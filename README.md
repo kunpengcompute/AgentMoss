@@ -38,6 +38,7 @@ pip install -e .
 安装后会得到 `agent-gate` 命令行。
 
 也可以只拷贝 `sdk/python/gate_client.py` 作为独立客户端使用，不依赖本包。
+默认鉴权开启时需传 `api_token=` 或设置 `AGENT_GATE_AUTH_TOKEN`。
 
 ## 快速开始
 

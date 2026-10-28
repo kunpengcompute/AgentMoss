@@ -1,10 +1,14 @@
 """Python SDK for AgentGate — standalone client library.
 
 This can be copied and used independently by any Python agent.
+
+鉴权：加固版 AgentGate 默认开启鉴权（``AGENT_GATE_AUTH_MODE=auto``），除
+``/api/v1/health`` 外的请求都要带 ``Authorization: Bearer <token>``。token 通过
+``api_token`` 参数或环境变量 ``AGENT_GATE_AUTH_TOKEN`` 提供。
 """
 
-import time
-from typing import Any, Optional
+import os
+from typing import Optional
 
 import httpx
 
@@ -13,7 +17,10 @@ class GateClient:
     """HTTP client for the AgentGate analysis API.
 
     Usage:
-        client = GateClient(base_url="http://127.0.0.1:9100")
+        client = GateClient(
+            base_url="http://127.0.0.1:9100",
+            api_token="<token>",  # 也可用 AGENT_GATE_AUTH_TOKEN
+        )
         response = client.analyze(
             agent_type="claude-code",
             session_id="sess-001",
@@ -29,13 +36,20 @@ class GateClient:
         self,
         base_url: str = "http://127.0.0.1:9100",
         timeout: float = 60.0,
+        api_token: str = "",
     ):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._api_token = (api_token or os.environ.get("AGENT_GATE_AUTH_TOKEN", "")).strip()
         self._client = httpx.Client(
             timeout=httpx.Timeout(timeout),
             limits=httpx.Limits(max_keepalive_connections=5),
         )
+
+    def _headers(self) -> dict[str, str]:
+        if not self._api_token:
+            return {}
+        return {"Authorization": f"Bearer {self._api_token}"}
 
     def analyze(
         self,
@@ -48,6 +62,7 @@ class GateClient:
         description: str = "",
         user_prompt: str = "",
         action_history: Optional[list[dict]] = None,
+        prompt_history: Optional[list[dict]] = None,
         metadata: Optional[dict] = None,
     ) -> dict:
         """Send a tool-call for security analysis.
@@ -69,17 +84,22 @@ class GateClient:
         }
         if action_history is not None:
             payload["action_history"] = action_history
+        if prompt_history is not None:
+            payload["prompt_history"] = prompt_history
 
         response = self._client.post(
             f"{self._base_url}/api/v1/analyze",
             json=payload,
+            headers=self._headers(),
         )
         response.raise_for_status()
         return response.json()
 
     def health(self) -> dict:
         """Check AgentGate service health."""
-        response = self._client.get(f"{self._base_url}/api/v1/health")
+        response = self._client.get(
+            f"{self._base_url}/api/v1/health", headers=self._headers()
+        )
         response.raise_for_status()
         return response.json()
 
