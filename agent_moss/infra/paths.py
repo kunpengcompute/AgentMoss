@@ -1,0 +1,161 @@
+"""路径解析 — 统一数据根目录 + 多实例(instance)隔离。
+
+解决两个问题：
+1. **数据归属用户目录**：即使服务以 root/systemd 运行（sudo systemctl 起），
+   也可通过 AGENT_MOSS_DATA_DIR 环境变量指向"当前用户"的数据目录，让
+   config / runtime / token 都写到该用户目录而非 root 的 /root。
+   未设时回退 Path.home()/.config/agentmoss（与旧行为一致）。
+
+2. **token 按 instance 隔离**：不同 agent（AGENT_MOSS_INSTANCE）起的服务，
+   token 消耗文件互不干扰。有 instance 时写到
+   <data_root>/<instance>/agent_moss_token_stats.json，无 instance 时写到
+   <data_root>/agent_moss_token_stats.json（保持默认位置）。
+
+config / runtime 不按 instance 分（规则/配置是共享的），只跟随数据根目录。
+"""
+
+import os
+import re
+import sys
+from pathlib import Path
+
+# 数据根目录环境变量（service/env 注入，解决 root→当前用户问题）
+ENV_DATA_ROOT = "AGENT_MOSS_DATA_DIR"
+
+# 归属实例标识（spawn/systemd 注入，多实例隔离用）
+ENV_INSTANCE = "AGENT_MOSS_INSTANCE"
+
+# 默认数据根目录（旧行为兼容）
+DEFAULT_DATA_ROOT = Path.home() / ".config" / "agentmoss"
+
+#: 规则/技能资产根目录（**规则仓剥离**后的落点）。
+#: 目录结构必须与包内 `agent_moss/` 一致：`rules/` `skills/` `scenarios/` `agents/`。
+#: 未设 → 用包内自带的那份（即历史行为，完全不变）。
+ENV_RULES_ROOT = "AGENT_MOSS_RULES_ROOT"
+
+#: 包内资产目录的父目录（`agent_moss/`）。
+_PACKAGE_ASSET_ROOT = Path(__file__).parent.parent
+
+#: agent_id / scenario_id 的合法形态。
+#:
+#: ⚠️ 为什么必须校验：这两个 id **由调用方自报**，并且会被直接拼进文件路径
+#: （`agents/<id>/rules.json`、`scenarios/<id>/rules.json`）。
+#: 不校验时 `agent_id="../../.."` 就能让 AgentMoss 去加载任意位置的 `rules.json`
+#: （把攻击者控制的 JSON 当成规则集 = 直接削弱检测），同时把自报字符串塞进
+#: 无界缓存（内存 DoS）。只允许字母数字下划线连字符，长度 ≤ 64。
+#: 与 TS 侧 `isSafeId()` 必须完全一致。
+_ID_MAX_LEN = 64
+_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def is_safe_id(value: str) -> bool:
+    """``agent_id`` / ``scenario_id`` 是否可以安全地用于拼接文件路径。"""
+    if not value or len(value) > _ID_MAX_LEN:
+        return False
+    return bool(_ID_PATTERN.match(value))
+
+
+def get_rules_root() -> Path | None:
+    """规则包根目录；未设或为空 → None（表示用包内资产）。"""
+    raw = os.environ.get(ENV_RULES_ROOT, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def asset_dir(name: str) -> Path:
+    """解析资产目录：``rules`` / ``skills`` / ``scenarios`` / ``agents``。
+
+    - 设了 ``AGENT_MOSS_RULES_ROOT`` → ``<root>/<name>``。**不检查是否存在**：
+      指了个缺文件的坏目录就让各自的加载器报错，不要静默回退到包内副本
+      （否则客户以为在用自家规则，实际跑的是内置那份）。
+    - 未设 → 包内 ``agent_moss/<name>``，与历史行为逐字一致。
+
+    ⚠️ 每次调用都读环境变量（不缓存）：测试用 monkeypatch 改完立即生效。
+    """
+    root = get_rules_root()
+    return (root / name) if root is not None else (_PACKAGE_ASSET_ROOT / name)
+
+
+def _is_root() -> bool:
+    """当前进程是否以 root 运行。"""
+    try:
+        return os.geteuid() == 0
+    except (AttributeError, OSError):
+        return False
+
+
+def _resolve_owner_home() -> Path | None:
+    """root 运行时探测"真实用户"的家目录。
+
+    依赖顺序：SUDO_USER（sudo 发起者）> LOGNAME/USER（登录用户）>
+    /etc/passwd 中第一个 UID>=1000 的非系统用户。探测不到返回 None。
+    这样任何 `sudo systemctl start` 起的服务，即使 env 未设 AGENT_MOSS_DATA_DIR，
+    数据也落到真实用户目录而非 /root。
+    """
+    for name in (os.getenv("SUDO_USER"), os.getenv("LOGNAME"), os.getenv("USER")):
+        if _is_owner(name):
+            return _home_of(name)
+    # /etc/passwd 兜底：第一个 UID>=1000 的普通用户
+    try:
+        import pwd
+        for u in pwd.getpwall():
+            if u.pw_uid >= 1000 and not u.pw_name.startswith("_"):
+                return Path(u.pw_dir)
+    except Exception:
+        pass
+    return None
+
+
+def _is_owner(name) -> bool:
+    return bool(name) and name not in ("root", "")
+
+
+def _home_of(name) -> Path | None:
+    try:
+        import pwd
+        return Path(pwd.getpwnam(name).pw_dir)
+    except Exception:
+        return None
+
+
+def get_data_root() -> Path:
+    """获取数据根目录。
+
+    优先级：env AGENT_MOSS_DATA_DIR > Path.home()/.config/agentmoss。
+    但 root 运行时（任何 sudo systemctl 起的服务）自动改指向真实用户目录，
+    让 config / runtime / token 落到当前用户而非 /root。
+    """
+    env_path = os.getenv(ENV_DATA_ROOT)
+    if env_path:
+        return Path(env_path)
+    if _is_root():
+        owner_home = _resolve_owner_home()
+        if owner_home:
+            return owner_home / ".config" / "agentmoss"
+    return DEFAULT_DATA_ROOT
+
+
+def get_instance() -> str:
+    """获取归属实例标识（未设返回空串）。"""
+    return os.getenv(ENV_INSTANCE, "").strip().strip("/\\")
+
+
+def get_config_dir() -> Path:
+    """配置文件目录（config.json 所在目录）。不按 instance 分，跟随数据根。"""
+    return get_data_root()
+
+
+def get_runtime_config_dir() -> Path:
+    """runtime 配置目录（agent_moss_runtime.json + skills 目录）。不按 instance 分。"""
+    return get_data_root()
+
+
+def get_token_stats_path() -> Path:
+    """token 统计文件路径。
+
+    有 instance → <data_root>/<instance>/agent_moss_token_stats.json
+    无 instance → <data_root>/agent_moss_token_stats.json
+    """
+    instance = get_instance()
+    if instance:
+        return get_data_root() / instance / "agent_moss_token_stats.json"
+    return get_data_root() / "agent_moss_token_stats.json"
