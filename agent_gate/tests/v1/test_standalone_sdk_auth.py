@@ -5,8 +5,7 @@
 且被文档明确推荐给集成方单独拷贝使用的。默认配置下不带 token 会 401，等于官方
 SDK 不可用。
 
-这里锁住四条：显式 token、环境变量回退、无 token 时不带 Authorization、
-显式 token 优先于环境变量。
+这里锁住三条：显式 token、环境变量回退、无 token 时不带 Authorization。
 """
 from __future__ import annotations
 
@@ -14,6 +13,8 @@ import importlib.util
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 _SDK_PATH = Path(__file__).resolve().parents[3] / "sdk" / "python" / "gate_client.py"
 

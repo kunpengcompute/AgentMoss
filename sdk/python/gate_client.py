@@ -1,14 +1,11 @@
 """Python SDK for AgentGate — standalone client library.
 
 This can be copied and used independently by any Python agent.
-
-鉴权：加固版 AgentGate 默认开启鉴权（``AGENT_GATE_AUTH_MODE=auto``），除
-``/api/v1/health`` 外的请求都要带 ``Authorization: Bearer <token>``。token 通过
-``api_token`` 参数或环境变量 ``AGENT_GATE_AUTH_TOKEN`` 提供。
 """
 
 import os
-from typing import Optional
+import time
+from typing import Any, Optional
 
 import httpx
 
@@ -17,10 +14,7 @@ class GateClient:
     """HTTP client for the AgentGate analysis API.
 
     Usage:
-        client = GateClient(
-            base_url="http://127.0.0.1:9100",
-            api_token="<token>",  # 也可用 AGENT_GATE_AUTH_TOKEN
-        )
+        client = GateClient(base_url="http://127.0.0.1:9100")
         response = client.analyze(
             agent_type="claude-code",
             session_id="sess-001",
@@ -38,6 +32,10 @@ class GateClient:
         timeout: float = 60.0,
         api_token: str = "",
     ):
+        """``api_token``：AgentGate 0.7.6 起默认开启鉴权（``AGENT_GATE_AUTH_MODE=auto``
+        首次启动生成 token 写到 ``~/.config/agentgate/auth_token``），不带凭证一律 401。
+        留空时回退读环境变量 ``AGENT_GATE_AUTH_TOKEN`` —— 与包内 SDK 行为一致。
+        """
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._api_token = (api_token or os.environ.get("AGENT_GATE_AUTH_TOKEN", "")).strip()
@@ -46,7 +44,11 @@ class GateClient:
             limits=httpx.Limits(max_keepalive_connections=5),
         )
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self) -> dict:
+        """鉴权头：有 token 带 Bearer，没有返回空（httpx 的 ``json=`` 自会补 Content-Type）。
+
+        与包内 SDK ``agent_gate.v1.sdk.GateClient._headers`` 行为一致。
+        """
         if not self._api_token:
             return {}
         return {"Authorization": f"Bearer {self._api_token}"}
@@ -62,7 +64,6 @@ class GateClient:
         description: str = "",
         user_prompt: str = "",
         action_history: Optional[list[dict]] = None,
-        prompt_history: Optional[list[dict]] = None,
         metadata: Optional[dict] = None,
     ) -> dict:
         """Send a tool-call for security analysis.
@@ -84,8 +85,6 @@ class GateClient:
         }
         if action_history is not None:
             payload["action_history"] = action_history
-        if prompt_history is not None:
-            payload["prompt_history"] = prompt_history
 
         response = self._client.post(
             f"{self._base_url}/api/v1/analyze",
@@ -97,9 +96,7 @@ class GateClient:
 
     def health(self) -> dict:
         """Check AgentGate service health."""
-        response = self._client.get(
-            f"{self._base_url}/api/v1/health", headers=self._headers()
-        )
+        response = self._client.get(f"{self._base_url}/api/v1/health")
         response.raise_for_status()
         return response.json()
 
