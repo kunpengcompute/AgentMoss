@@ -184,22 +184,54 @@ class Repository:
             params.append(exclude_session_id)
 
         where_clause = " AND ".join(conditions)
-        cursor = self._db.execute(
-            f"""SELECT s.id AS session_id, MAX(t.called_at) AS last_active
-                FROM tool_calls t
-                JOIN sessions s ON t.session_id = s.id
-                WHERE {where_clause}
-                GROUP BY s.id
-                ORDER BY last_active DESC
-                LIMIT ?""",
-            tuple(params + [limit]),
-        )
-        rows = [dict(r) for r in cursor.fetchall()]
+
+        def _session_sql(extra_cond: str = "") -> str:
+            cond = f"{where_clause} AND {extra_cond}" if extra_cond else where_clause
+            return f"""SELECT s.id AS session_id, s.agent_id AS agent_key,
+                              MAX(t.called_at) AS last_active
+                       FROM tool_calls t
+                       JOIN sessions s ON t.session_id = s.id
+                       WHERE {cond}
+                       GROUP BY s.id
+                       ORDER BY last_active DESC"""
+
+        # 组合攻击针对整台服务器：多 agent 时不能只取「全局最近 N 个会话」——
+        # 高频 agent 会把别人的会话全挤出去。这里按 agent 分组各取一份再合并，
+        # 保证每个来源都有历史进入上下文（与 TS 侧 buildSessionHistory 同语义）。
+        agent_rows = self._db.execute(
+            f"SELECT DISTINCT s.agent_id AS agent_key FROM sessions s "
+            f"JOIN tool_calls t ON t.session_id = s.id WHERE {where_clause}",
+            tuple(params),
+        ).fetchall()
+        agent_keys = [str(r["agent_key"]) for r in agent_rows if r["agent_key"]]
+        rows: list[dict] = []
+        if len(agent_keys) > 1:
+            per_agent = max(1, limit // len(agent_keys))
+            for key in agent_keys:
+                cur = self._db.execute(
+                    _session_sql("s.agent_id = ?") + " LIMIT ?",
+                    tuple(params + [key, per_agent]),
+                )
+                rows.extend(dict(r) for r in cur.fetchall())
+            rows.sort(key=lambda r: str(r.get("last_active") or ""), reverse=True)
+            rows = rows[:limit]
+        else:
+            cur = self._db.execute(_session_sql() + " LIMIT ?", tuple(params + [limit]))
+            rows.extend(dict(r) for r in cur.fetchall())
+
+        # session → agent_type（来源，供 AgentMoss 记录在链路径里）
+        agent_type_by_key = {
+            str(r["agent_key"]): str(r["agent_type"])
+            for r in self._db.execute(
+                "SELECT id AS agent_key, agent_type FROM agents"
+            ).fetchall()
+        }
 
         result = []
         for row in rows:
             result.append({
                 "session_id": row["session_id"],
+                "agent_id": agent_type_by_key.get(str(row.get("agent_key") or ""), ""),
                 "action_history": self.get_action_history(row["session_id"], per_session_limit),
             })
         return result
