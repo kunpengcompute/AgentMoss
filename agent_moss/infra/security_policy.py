@@ -793,6 +793,25 @@ def agent_inflight() -> int:
     return _env_int("AGENT_MOSS_MAX_AGENT_INFLIGHT", 8)
 
 
+def chain_scope() -> str:
+    """组合链时间线的作用域。
+
+    - ``system``（默认）：**全系统共享一个桶**。组合攻击的目标是这台服务器，
+      攻击者可能换用户、换 agent 分步实施（agent1 建监听、agent2 扫描、agent3 外传），
+      按 agent 隔离会直接漏掉这类跨 agent 链。
+    - ``agent``：每个 agent 独立分桶。仅用于"一个 AgentGate 服务多个互不相关租户"
+      的部署，避免把不同租户的正常操作拼成攻击链。
+    """
+    return (_env("AGENT_MOSS_CHAIN_SCOPE", "system") or "system").lower()
+
+
+def chain_bucket(agent_id: str = "") -> str:
+    """时间线分桶 key。system 模式所有 agent 共用一个；agent 模式按 agent_id。"""
+    if chain_scope() == "agent":
+        return agent_id or "default"
+    return "__system__"
+
+
 def bound_agent_of(principal: str) -> str:
     """principal → 绑定的 agent 名；全局 token / 未知返回空串。"""
     return principal[len("agent:"):] if principal.startswith("agent:") else ""

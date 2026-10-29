@@ -41,10 +41,17 @@ def _internal_error(exc: Exception) -> HTTPException:
 # ==================== Stateful incremental (L2.2 有状态) ====================
 
 def _chain_state_for_agent(agent_id: str):
-    """拿到某 agent 的链状态仓储（按 agent_id 分桶）。"""
+    """拿到链状态仓储。
+
+    分桶由 ``AGENT_MOSS_CHAIN_SCOPE`` 决定：默认 ``system`` —— 所有 agent 共用
+    一个桶（组合攻击针对的是这台服务器，换 agent 分步实施也不能漏）；只有多租户
+    部署才切到 ``agent`` 模式。
+    """
     from ..engine.formal_engine.chain_state import get_chain_state_store
+    from ..infra import security_policy as sp
+
     store = get_chain_state_store()
-    return _AgentState(store, agent_id or "default")
+    return _AgentState(store, sp.chain_bucket(agent_id))
 
 
 class _AgentState:
@@ -59,9 +66,14 @@ class _AgentState:
         a_next: dict,
         session_id: str,
         is_error: bool = False,
+        source_agent: str = "",
     ) -> dict:
         r = self.store.apply_action(
-            self.agent_id, a_next=a_next, session_id=session_id, is_error=is_error
+            self.agent_id,
+            a_next=a_next,
+            session_id=session_id,
+            is_error=is_error,
+            source_agent=source_agent,
         )
         return {
             "matched": r.matched.to_judgment() if r.matched else None,
@@ -262,6 +274,8 @@ async def analyze(req: AnalyzeRequest, request: Request):
                     a_next,
                     session_id=session_id,
                     is_error=bool(metadata.get("is_error", False)),
+                    # 来源：真实 agent（不是桶 key），仅用于链路径取证/展示
+                    source_agent=agent_id,
                 )
                 if inc["should_block"]:
                     j = inc["matched"] or (inc["exfil"][0] if inc["exfil"] else None)
@@ -336,7 +350,9 @@ async def review(req: ReviewRequest):
 
         agent_id = req.agent_id or "default"
         store = get_chain_state_store()
-        tracker = store.load_or_new(agent_id)
+        # 与实时链路同一个桶：review 全量读到的历史要写进增量引擎之后会读的位置，
+        # 否则"谁触发 review 谁才有跨 agent 历史"的不一致会一直存在。
+        tracker = store.load_or_new(sp.chain_bucket(agent_id))
 
         # 1. 读取历史（db_path 直读 > 显式 sessions）
         sessions: list[dict] = []

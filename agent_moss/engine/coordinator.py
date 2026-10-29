@@ -89,6 +89,7 @@ class AgentMossBot:
         llm_log_path: str | None = None,
         prompt_history: list[dict[str, object]] | None = None,
         session_history: list[dict[str, object]] | None = None,
+        agent_id: str = "",
     ) -> SecurityJudgment:
         """
         执行三层防御安全判断。
@@ -479,10 +480,13 @@ class AgentMossBot:
                 for s in session_history:
                     formal_sessions.append({
                         "session_id": str(s.get("session_id", "s")),
+                        # 来源 agent：仅记录在链路径里供告警/取证，不参与链匹配
+                        "agent_id": str(s.get("agent_id") or ""),
                         "action_history": s.get("action_history", []) or [],
                     })
             formal_sessions.append({
                 "session_id": "current",
+                "agent_id": agent_id or "",
                 "action_history": action_history,
             })
             formal_result = self._formal_engine.verify(
@@ -728,4 +732,4 @@ def judge_security(
         skills_dir=config.security.skills_dir,
         agent_ext=ext,
     )
-    return agent.judge(prompt_session, action_history, a_next, reason, config, llm_config=llm_config, cwd=cwd, llm_log_path=llm_log_path, prompt_history=prompt_history, session_history=session_history)
+    return agent.judge(prompt_session, action_history, a_next, reason, config, llm_config=llm_config, cwd=cwd, llm_log_path=llm_log_path, prompt_history=prompt_history, session_history=session_history, agent_id=agent_id)

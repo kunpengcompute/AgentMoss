@@ -134,6 +134,7 @@ class ChainStateStore:
         a_next: dict,
         session_id: str,
         is_error: bool = False,
+        source_agent: str = "",
     ) -> AdvanceResult:
         """有状态的实时增量：对某 agent 的 tracker 推送一条当前动作并判定。
 
@@ -146,6 +147,7 @@ class ChainStateStore:
             a_next=a_next,
             session_id=session_id,
             is_error=is_error,
+            agent_id=source_agent,
         )
         self.save(t)
         return r

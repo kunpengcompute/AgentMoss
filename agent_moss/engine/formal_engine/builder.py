@@ -79,9 +79,18 @@ def _mark_integrity(action_detail: str) -> tuple[str, bool]:
 
 
 def _init_node(
-    session_id: str, seq: int, at: str, ad: str, timestamp: str | None = None
+    session_id: str,
+    seq: int,
+    at: str,
+    ad: str,
+    timestamp: str | None = None,
+    agent_id: str = "",
 ) -> ActionNode:
-    """统一构造 ActionNode（含 stage + resources + integrity 标记）。"""
+    """统一构造 ActionNode（含 stage + resources + integrity 标记）。
+
+    ``agent_id`` 只作为来源记录（取证/告警展示），不参与链匹配 —— 组合攻击
+    针对的是这台服务器，跨 agent 分步实施同样成立。
+    """
     integrity, is_low = _mark_integrity(ad)
     return ActionNode(
         session_id=session_id,
@@ -93,6 +102,7 @@ def _init_node(
         integrity=integrity,
         is_low_source=is_low,
         timestamp=timestamp or None,
+        agent_id=agent_id or "",
     )
 
 
@@ -100,6 +110,7 @@ def build_session_graph(
     action_history: list,
     a_next: dict | None = None,
     session_id: str = "current",
+    agent_id: str = "",
 ) -> SessionGraph:
     """从单 session 动作历史构建 SessionGraph。
 
@@ -107,22 +118,24 @@ def build_session_graph(
     a_next: 可选，拟执行的下一步动作（追加为末节点）。
     """
     graph = SessionGraph(session_id=session_id)
-    details: list[tuple[str, str, str | None]] = []
+    details: list[tuple[str, str, str | None, str]] = []
     for action in action_history:
         at = str(action.get("action_type", ""))
         ad = str(action.get("action_detail", ""))
         ts = str(action.get("called_at") or "") or None
+        aid = str(action.get("agent_id") or agent_id or "")
         if ad:
-            details.append((at, ad, ts))
+            details.append((at, ad, ts, aid))
     if a_next:
         details.append((
             str(a_next.get("action_type", "")),
             str(a_next.get("action_detail", "")),
             str(a_next.get("called_at") or "") or None,
+            str(a_next.get("agent_id") or agent_id or ""),
         ))
 
-    for seq, (at, ad, ts) in enumerate(details):
-        node = _init_node(session_id, seq, at, ad, ts)
+    for seq, (at, ad, ts, aid) in enumerate(details):
+        node = _init_node(session_id, seq, at, ad, ts, aid)
         graph.nodes.append(node)
         if node.stage:
             graph.stage_flags.add(node.stage)
@@ -152,7 +165,8 @@ def build_multi_session_graph(
     for s in sessions:
         sid = str(s.get("session_id", "s"))
         hist = s.get("action_history", []) or []
-        sg = build_session_graph(hist, session_id=sid)
+        # 来源 agent：AgentGate 在 session_history 里逐会话带上，用于链路径取证展示
+        sg = build_session_graph(hist, session_id=sid, agent_id=str(s.get("agent_id") or ""))
         mg.sessions.append(sg)
 
     # 当前 session 的 a_next（若 sessions 最后一个是当前 session，附加其历史）
@@ -165,6 +179,7 @@ def build_multi_session_graph(
                 str(a_next.get("action_type", "")),
                 str(a_next.get("action_detail", "")),
                 str(a_next.get("called_at") or "") or None,
+                str(a_next.get("agent_id") or "") or "",
             ))
             if len(last.nodes) > 1:
                 last.edges.append(BehaviorEdge(src=len(last.nodes) - 2, dst=len(last.nodes) - 1, kind="next"))

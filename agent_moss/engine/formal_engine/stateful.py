@@ -70,6 +70,8 @@ class StateNode:
     is_error: bool = False
     # 生命周期："" (默认) | "alive" | "dead" | "never_activated"
     lifecycle: str = ""
+    #: 动作来源（哪个 agent 上报的）。仅用于取证/告警展示，不参与链匹配。
+    agent_id: str = ""
     # 真实发生时间（ISO 字符串，来自 action.called_at；无则 None → 退化为 seq 序号）
     timestamp: str | None = None
 
@@ -381,6 +383,7 @@ class StatefulChainTracker:
         session_id: str = "current",
         is_error: bool = False,
         external_resources: dict | None = None,
+        agent_id: str = "",
     ) -> "AdvanceResult":
         """增量推进：把当前动作追加到时间线 → 链指针推进 → 判定。
 
@@ -391,7 +394,7 @@ class StatefulChainTracker:
         """
         # 1. 新节点
         seq = self.seq_next
-        node = self._append(a_next, session_id, is_error=is_error)
+        node = self._append(a_next, session_id, is_error=is_error, agent_id=agent_id)
         if node is None:
             return AdvanceResult(seq=self.seq_next)
         seq = self.seq_next  # 追加后的下一个序号（节点 seq 索引为 seq_next-1）
@@ -417,7 +420,9 @@ class StatefulChainTracker:
             exfil=exfil_violations,
         )
 
-    def _append(self, action: dict, session_id: str, is_error: bool = False) -> StateNode | None:
+    def _append(
+        self, action: dict, session_id: str, is_error: bool = False, agent_id: str = ""
+    ) -> StateNode | None:
         """构造并追加一个节点，返回节点；空 detail 跳过。
 
         时间线上限保护：防无限增长（高频大项目下平凡动作会持续产生节点）。
@@ -444,6 +449,7 @@ class StatefulChainTracker:
             resources=_extract_resources(ad),
             instances=_extract_instances(ad, stage),
             is_error=is_error,
+            agent_id=str(action.get("agent_id") or agent_id or ""),
             lifecycle=self._lifecycle_for(ad, stage, is_error),
             # 调用方带 called_at → 用真实发生时间；否则用本地接收时刻（实时路径）
             timestamp=(str(action.get("called_at", "")) or self._now()),
@@ -540,7 +546,9 @@ class StatefulChainTracker:
         want = stages[0]
         for n in self.nodes:
             if n.stage == want:
-                path.append((n.session_id, n.seq, n.action_detail[:60], n.timestamp))
+                path.append(
+                    (n.session_id, n.seq, n.action_detail[:60], n.timestamp, n.agent_id)
+                )
                 idx = stages.index(n.stage)
                 if idx + 1 < len(stages):
                     want = stages[idx + 1]
@@ -626,6 +634,7 @@ class StatefulChainTracker:
                 resources=tuple(raw.get("resources") or ()),
                 instances=tuple(raw.get("instances") or ()),  # 旧快照无此字段 → 空
                 is_error=bool(raw.get("is_error", False)),
+                agent_id=str(raw.get("agent_id", "")),  # 旧快照无此字段 → 空
                 lifecycle=str(raw.get("lifecycle", "")),
                 timestamp=(raw.get("timestamp") or None),  # 旧快照无此字段 → None
             )

@@ -41,6 +41,9 @@ class ActionNode:
     #: 可空 —— 旧调用方 / 旧数据没有这个字段时，依赖时间的性质（P4 提权窗口）
     #: 退回"不设窗口"的旧行为，不改变判定。
     timestamp: str | None = None
+    #: 动作来源（哪个 agent 上报的）。**仅用于取证与告警展示，不参与链匹配** ——
+    #: 组合攻击针对的是这台服务器，跨 agent 分步实施同样成立（见 AGENT_MOSS_CHAIN_SCOPE）。
+    agent_id: str = ""
 
 
 @dataclass
