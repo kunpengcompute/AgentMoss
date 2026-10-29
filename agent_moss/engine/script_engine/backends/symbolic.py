@@ -27,7 +27,6 @@ from typing import Optional
 # ==================== 预算（P5 熔断） ====================
 MAX_LINES = 500            # 单脚本最大解析有效行
 MAX_BRANCHES = 50          # 最多处理的分支数
-MAX_CONSTRAINTS = 30       # 最多累积约束（当前架构未使用，为未来预留）
 MAX_VARS = 200             # 环境变量数上限（防变量注入表膨胀）
 
 
@@ -642,6 +641,10 @@ def symbolic_process(content: str, entry_args: list[str] | None) -> Optional[str
             return None  # 超预算 → 降级
 
         if isinstance(s, AssignStmt):
+            # 变量表上限：脚本可以是自动生成/拼接的，几万个变量赋值会把
+            # 环境表一路撑大（TS 侧同款保护，超限返回 None 回退全文匹配）。
+            if len(env) >= MAX_VARS:
+                return None
             # 赋值：右值求值写入 env
             modelable_encountered = True
             val = eval_expr(s.rhs, env)

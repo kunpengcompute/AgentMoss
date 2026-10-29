@@ -573,7 +573,11 @@ class StatefulChainTracker:
                 tainted_res.add(r)
         if tainted_res:
             self._tainted.add(idx)
-            self._tainted_resources.update(tainted_res)
+            # 节点一旦染毒，它的**全部资源**都视为携带同一份敏感数据：
+            # mv/cp 的目标路径也是这份数据的载体，必须一起染毒。旧实现只
+            # update(tainted_res)（命中的旧资源），目标路径没染毒 → 改名链
+            # 在第二次 mv 处断开（2026-10 修，双端同步）。
+            self._tainted_resources.update(node.resources)
 
     def _resource_tainted(self, resource: str) -> bool:
         """某个资源是否已被染毒（O(1) 反索引，避免每次扫描全部染毒节点）。"""
