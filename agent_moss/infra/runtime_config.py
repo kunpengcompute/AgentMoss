@@ -394,9 +394,10 @@ def _scenario_rules_to_defaults() -> dict:
     out = {}
     for scen_dir in sorted(_scenarios.iterdir()):
         scenario_id = scen_dir.name
+        # __pycache__ 等以 __ 开头的运行时目录不是场景。不跳过的话，每次生成
+        # 种子都会走一遍 resolve_scenario_rules_file 并刷一条「非法 scenario_id」
+        # 告警 —— 那是给"目录穿越尝试"用的信号，不该被缓存目录淹掉。
         if not scen_dir.is_dir() or scenario_id.startswith("__"):
-            # __pycache__ 等运行时目录不是场景；否则每次生成种子都会刷
-            # “非法 scenario_id”告警。
             continue
         rules_file = resolve_scenario_rules_file(scenario_id)
         if not rules_file.is_file():
