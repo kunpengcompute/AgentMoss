@@ -123,7 +123,14 @@ async def analyze(req: AnalyzeRequest, request: Request):
         # 因为真正的原始 payload 缺少必填的 a_next，会在校验处 422。）
         session_id = req.session_id
         prompt_session = req.prompt_session
-        a_next = {"action_type": req.a_next.action_type, "action_detail": req.a_next.action_detail}
+        # called_at 一并透传：L2 授权（consent）的时效窗（CONSENT_TTL_SECONDS）
+        # 需要「提问时刻」与「本次动作时刻」两侧都有时间戳才生效；缺了它就只剩
+        # 「最近 N 条」的距离窗口兜底。
+        a_next = {
+            "action_type": req.a_next.action_type,
+            "action_detail": req.a_next.action_detail,
+            "called_at": req.a_next.called_at,
+        }
         # ⚠️ 必须透传 output（工具返回 = 用户对 ask_user_question 的回答）。
         # L2 的授权（consent）判定看的是**用户答了什么**（logic_rules.py 的
         # `action.get("output", "")`），不是提问正文。历史 bug：这里只映射

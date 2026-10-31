@@ -155,6 +155,7 @@ def test_redact_chain_hides_other_sessions():
         ["victim-session", 0, "cat /home/victim/secret.csv", "2026-10-20T10:00:00"],
         ["mine", 1, "nmap 10.0.0.5", "2026-10-20T10:00:01"],
     ]
+    # 签名是 (chain, current_instance_id, current_session_id)：实例为空时回退按 session 比较
     out = sp.redact_chain(chain, "", "mine")
     assert out[0][0] == "<other-session>" and out[0][2] == "<已隐藏>"
     assert "secret" not in str(out)
@@ -533,6 +534,7 @@ def test_pool_of_classifies_paths():
     assert sp.pool_of("/api/v1/analyze") == "biz"
     assert sp.pool_of("/api/v1/review") == "review"
     assert sp.pool_of("/console/api/config") == "ops"
+    # 裁剪版已移除 brain，不再断言 /api/v1/brain/* 的池分类
     assert sp.pool_of("/api/v1/health") == "health"
     assert sp.pool_of("/anything-else") == "other"
 

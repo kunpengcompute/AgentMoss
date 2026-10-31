@@ -47,6 +47,26 @@ Python 和 TS 是同一套规则的**两份实现**。凡是"两边各写一遍"
 每条都写明「为什么现在不改」，且值要**精确配对**（只放宽这一对，换成别的差异照样报错）。
 不在表里的标注不一致一律报错。当前 1 条。
 
+### 另一个维度：用例元数据漂移 `known_risk_type_drift.json`
+
+语料管的是「**同一输入**两端判定是否一致」；这个清单管的是「**同一个用例**声明的
+`expected_risk_type` 与实际判定是否一致」—— 两个不同的问题。
+
+背景：用例的 `expected_decision` / `expected_risk_level` 一直被断言，但
+`expected_risk_type` **从没被校验**。于是出现了「用例声称在测 L2 授权，实际被
+L1 先拦下」的假绿（`tests/cases/l2/logic-06`、`logic-08` 都声明
+`expected_layers: ["1.2"]` + `consent_missing`，实际返回 `1.1` + `script_execution`）。
+
+2026-10 起它变成真断言（`tests/test_case_metadata.py` +
+`ts/src/__tests__/json-cases.test.ts`），范围限 `l1/ l2/ agent/`（确定性判定）。
+清单条目形如 `{case, expected, python, typescript}`，两端各比自己的字段：
+
+- **偏差集合必须与清单完全一致**：新漂移 → 失败；清单过期（已修复）→ 失败并提示删除
+- `python != typescript` 的条目 = **双端 risk_type 分叉**：`decision` 与 `risk_level`
+  一致（拦截行为相同），只是「多规则同时命中时先报哪条」不同（典型：TS 先命中敏感
+  路径 → `file_access`）。这是独立历史债，修它要重排规则优先级
+- 当前 55 条，其中 17 条双端分叉。清理时从清单删对应条目即可
+
 ## 语料不是"标准答案"
 
 存的是**两端一致时的判定**，是**冻结的共识**。生成器会先跑两端、断言完全一致

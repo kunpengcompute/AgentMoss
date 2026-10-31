@@ -177,19 +177,55 @@ PASSWORD_MODIFY_PATTERNS: list[str] = _load_l2_patterns("password_modify_consent
 # 用户/组删除命令模式（归一化自 rules/l2_rules.json）
 USER_DELETION_PATTERNS: list[str] = _load_l2_patterns("user_deletion_consent")
 
-#: 弱授权判定：``ask_user_question`` 的**提问正文**是否与本类操作相关。
+#: 授权提问的**相关性**判定：``ask_user_question`` 的提问正文是否与本类操作相关。
 #:
-#: 背景：``output``（用户回答）是 Agent 侧主动上报的字段，AgentGate 的请求模型
-#: 此前根本没有它、OpenDesk / xiaoO 也不收集 —— 「问了但拿不到回答」是结构性缺失。
-#: 若继续 Deny 就是确定性误报（改密码 / 删用户命令一律被拒）。
-#:
-#: 但不能简单「问过就放行」：那会退回历史 fail-open 行为（问一句「要重启吗？」
-#: 就能绕过改密码拦截，见 tests/test_entrypoint_parity.py 的回归用例）。
-#: 所以只在**提问正文命中了密码/账户类关键词**时视为弱授权。
+#: 只在提问正文命中了密码/账户类关键词时，这条提问才有资格作为授权来源。
 CONSENT_TOPIC_PATTERN = re.compile(
     r"密码|口令|passwd|password|凭据|凭证|用户|账户|账号|userdel|deluser|groupdel",
     re.IGNORECASE,
 )
+
+#: 用户回答的**否定词**。命中即视为拒绝 —— 优先于肯定词判定（「不，别删」含否定）。
+CONSENT_NEGATIVE_PATTERN = re.compile(
+    r"(?:"
+    r"否|不|别|取消|拒绝|停止|终止|算了|算了|"
+    r"\bno\b|\bnope\b|\bcancel\b|\babort\b|\bstop\b|\bdeny\b|\breject\b|"
+    r"\bdecline\b|\bdon'?t\b|\bdo\s+not\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: 用户回答的**肯定词**。否定词优先；两者都不命中 → 意图无法判定 → 不算授权。
+CONSENT_AFFIRMATIVE_PATTERN = re.compile(
+    r"(?:"
+    r"是|好|可以|行|嗯|对|确认|同意|继续|执行|删除|删掉|移除|修改|重置|改密|"
+    r"\byes\b|\by\b|\byep\b|\byeah\b|\bok\b|\bokay\b|\bconfirm(?:ed)?\b|"
+    r"\bproceed\b|\bcontinue\b|\bsure\b|\bapprove\b|\baccept\b|\bagree\b|"
+    r"\bdo\s+it\b|\bgo\s+ahead\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: **索取型**提问：agent 向用户**索取凭据/内容**（而不是征求同意）。
+#:
+#: 「请输入新的登录密码」这类提问，用户的回答就是密码本身（`mypassword`），
+#: 不可能出现「是/好/确认」——用户提供了内容即视为配合改密。区别于确认型提问
+#: （「确认删除用户 ops 吗？」），后者必须拿到肯定回答。
+CONSENT_INPUT_REQUEST_PATTERN = re.compile(
+    r"(?:请|输入|提供|填写|给出|告诉我).{0,8}(?:新的?)?(?:密码|口令|passwd|password)",
+    re.IGNORECASE,
+)
+
+#: 授权提问必须落在**最近 N 条动作**内。
+#:
+#: 防「预支授权」：一小时前问过「要重启服务吗」用户答「是」，不能拿来删今天的用户。
+#: 正常流程是「问 → 答 → 立刻执行」，中间隔着大量无关动作说明这条提问与本次操作无关。
+#: 取最近一条 ``ask_user_question`` 判定，更早的一律不认（不做「往前翻找任意一条」）。
+CONSENT_MAX_DISTANCE = 5
+
+#: 授权时效（秒）。仅当提问与本次动作**都**带 ``called_at`` 时生效；缺任一侧则跳过
+#: 时间窗，由 ``CONSENT_MAX_DISTANCE`` 兜底。可用环境变量覆盖。
+CONSENT_TTL_SECONDS = 300
 
 # ==================== 组合攻击链检测（combo_chain）====================
 # 单步操作（创建 Flask 服务 / 端口扫描 / 读 known_hosts）各自无害，但按 kill chain
@@ -1582,12 +1618,84 @@ class LogicRulesChecker:
             risk_type="file_access",
         )
 
+    @staticmethod
+    def _consent_within_ttl(asked: dict, a_next: dict) -> bool:
+        """提问与本次动作的间隔是否在 ``CONSENT_TTL_SECONDS`` 内。
+
+        仅当两侧都带 ``called_at`` 时校验；缺任一侧（调用方未上报时间）返回 True，
+        由 ``CONSENT_MAX_DISTANCE`` 的距离窗口兜底。时间格式不合法同样返回 True ——
+        时间窗是增强项，不是主防线，不因解析失败额外拦截。
+        """
+        raw = os.getenv("AGENT_MOSS_CONSENT_TTL_SECONDS", "").strip()
+        try:
+            ttl = int(raw) if raw else CONSENT_TTL_SECONDS
+        except ValueError:
+            ttl = CONSENT_TTL_SECONDS
+        if ttl <= 0:
+            return True
+        asked_at = str(asked.get("called_at", "") or "").strip()
+        next_at = str(a_next.get("called_at", "") or "").strip()
+        if not asked_at or not next_at:
+            return True
+        try:
+            from datetime import datetime
+            a = datetime.fromisoformat(asked_at.replace("Z", "+00:00"))
+            b = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
+            return abs((b - a).total_seconds()) <= ttl
+        except (ValueError, TypeError):
+            return True
+
+    def _has_valid_consent(
+        self, action_history: list[dict[str, object]], a_next: dict[str, str]
+    ) -> bool:
+        """历史中是否存在**可采信**的用户授权。
+
+        有效授权必须同时满足 5 条（任一条不满足即视为未授权，fail-closed）：
+
+        1. 动作类型是 ``ask_user_question``；
+        2. ``output``（用户回答）非空 —— 只提问不回答不算授权；
+        3. 提问正文命中本类操作关键词（``CONSENT_TOPIC_PATTERN``）——
+           「要重启服务吗」不能给删用户背书；
+        4. 回答是**肯定**：否定词优先（回答「否」也曾被判为授权，实测缺陷），
+           既无否定也无肯定 → 意图无法判定 → 不算授权；
+        5. 提问落在最近 ``CONSENT_MAX_DISTANCE`` 条动作内，且（若带 ``called_at``）
+           与本次动作间隔不超过 ``CONSENT_TTL_SECONDS``。
+
+        ⚠️ 只看**最近一条** ``ask_user_question``，不往前翻找：正常流程是
+        「问 → 答 → 立刻执行」，更早的提问与本次操作无关。旧实现遍历整个
+        action_history、任意一条带 output 的提问就放行 —— 实测「用户回答『否』」
+        「问『要重启服务吗』答『是』」都能过，授权形同虚设。
+        """
+        if not action_history:
+            return False
+        for action in reversed(action_history[-CONSENT_MAX_DISTANCE:]):
+            if not isinstance(action, dict):
+                continue
+            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
+            if hist_type != "ask_user_question":
+                continue
+            # 最近这条提问是唯一候选；它不合格就直接判未授权，不再往前找。
+            output = str(action.get("output", "") or "").strip()
+            if not output:
+                return False
+            question = str(action.get("action_detail", "") or "")
+            if not CONSENT_TOPIC_PATTERN.search(question):
+                return False
+            if CONSENT_NEGATIVE_PATTERN.search(output):
+                return False
+            # 索取型提问（「请输入新的登录密码」）：用户提供了内容即为授权；
+            # 确认型提问（「确认删除用户 ops 吗？」）：必须拿到肯定回答。
+            if not CONSENT_INPUT_REQUEST_PATTERN.search(question) and not CONSENT_AFFIRMATIVE_PATTERN.search(output):
+                return False
+            return self._consent_within_ttl(action, a_next)
+        return False
+
     def _check_password_consent(
         self, action_history: list[dict[str, object]], a_next: dict[str, str]
     ) -> LogicRuleResult:
         """
         密码修改授权检测：
-        非交互式密码修改命令必须在 action_history 中有 ask_user_question 且用户返回了密码。
+        非交互式密码修改命令必须在 action_history 中有 ask_user_question 且用户明确确认。
         交互式 passwd（无参数）不在此列，因为 LLM 无法完成交互式输入。
         """
         action_detail = a_next.get("action_detail", "").lower()
@@ -1603,33 +1711,17 @@ class LogicRulesChecker:
         if not is_password_modify:
             return LogicRuleResult(hit=False)
 
-        # 检查 action_history 中是否有 ask_user_question 且用户返回了答案
-        asked_without_answer = False
-        for action in action_history:
-            if not isinstance(action, dict):
-                continue
-            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
-            output = str(action.get("output", ""))
-            if hist_type == "ask_user_question":
-                if output.strip():
-                    return LogicRuleResult(hit=False)  # 用户已授权，放行
-                # 无 output（Agent 未上报）：只有提问正文与密码/账户相关才算弱授权，
-                # 否则退回 Deny —— 「要重启服务吗？」这类无关提问不能当作授权。
-                if CONSENT_TOPIC_PATTERN.search(str(action.get("action_detail", ""))):
-                    asked_without_answer = True
-
-        # 弱授权：Agent 问了与操作相关的问题但没上报 output（结构性缺失），
-        # 继续拦截就是确定性误报。无关提问不会走到这里，见 CONSENT_TOPIC_PATTERN。
-        if asked_without_answer:
-            return LogicRuleResult(hit=False)
+        if self._has_valid_consent(action_history, a_next):
+            return LogicRuleResult(hit=False)  # 用户已明确授权，放行
 
         return LogicRuleResult(
             hit=True,
             violated_rule="password_modify_requires_consent",
             risk_level="high",
             reason=(
-                "执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 "
-                "ask_user_question 操作，可能存在未授权的密码修改风险"
+                "执行非交互式密码修改命令，但历史执行序列中未发现用户明确授权的 "
+                "ask_user_question（须用户正面回答且与本次操作相关），"
+                "可能存在未授权的密码修改风险"
             ),
             risk_type="consent_missing",
         )
@@ -1654,32 +1746,17 @@ class LogicRulesChecker:
         if not is_user_deletion:
             return LogicRuleResult(hit=False)
 
-        # 检查 action_history 中是否有 ask_user_question 且用户确认了
-        asked_without_answer = False
-        for action in action_history:
-            if not isinstance(action, dict):
-                continue
-            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
-            output = str(action.get("output", ""))
-            if hist_type == "ask_user_question":
-                if output.strip():
-                    return LogicRuleResult(hit=False)  # 用户已授权，放行
-                # 无 output（Agent 未上报）：只有提问正文与密码/账户相关才算弱授权，
-                # 否则退回 Deny —— 「要重启服务吗？」这类无关提问不能当作授权。
-                if CONSENT_TOPIC_PATTERN.search(str(action.get("action_detail", ""))):
-                    asked_without_answer = True
-
-        # 同 password_consent：``output`` 结构性缺失时按弱授权放行，避免误报。
-        if asked_without_answer:
-            return LogicRuleResult(hit=False)
+        if self._has_valid_consent(action_history, a_next):
+            return LogicRuleResult(hit=False)  # 用户已明确授权，放行
 
         return LogicRuleResult(
             hit=True,
             violated_rule="user_deletion_requires_consent",
             risk_level="high",
             reason=(
-                "执行删除系统用户命令，但历史执行序列中未发现向用户确认的 "
-                "ask_user_question 操作，可能存在未授权的用户删除风险"
+                "执行删除系统用户命令，但历史执行序列中未发现用户明确授权的 "
+                "ask_user_question（须用户正面回答且与本次操作相关），"
+                "可能存在未授权的用户删除风险"
             ),
             risk_type="consent_missing",
         )

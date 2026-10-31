@@ -590,6 +590,14 @@ class TestLayer1And2:
             ("combo-chain-deny.json", dict(decision="Deny", risk_level="high")),
             # 跨会话组合攻击链命中：多 session 各自无害，拼接成 LISTEN→EXEC→SCAN 被 L2.2 形式化引擎拦截
             ("combo-cross-session-deny.json", dict(decision="Deny", risk_level="high")),
+            # L2.2 形式化性质 P2-P8 一拦一放（每条性质各一个 deny + 一个 allow）
+            ("formal-p2-sensitive-data-flow-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p3-low-integrity-reachability-deny.json", dict(decision="Deny", risk_level="high")),
+            ("formal-p4-no-exfil-after-privesc-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p5-no-exfil-after-credential-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p6-mc-ltl-rules-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p7-low-integrity-command-exec-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p8-sensitive-data-aggregation-deny.json", dict(decision="Deny", risk_level="critical")),
             # PERSIST→EXFIL 组合链：管道装 cron（单步放行，见 l1/allow-155）后外传 → L2.1 拦截
             # 2026-09 更新：curl -T 外传规则升 critical（外传数据到外部服务器），risk_level 同步
             ("combo-persist-exfil-deny.json", dict(decision="Deny", risk_level="critical")),
@@ -911,6 +919,14 @@ class TestLayer1And2:
             ("combo-chain-allow.json", dict(decision="Allow", risk_level="low")),
             # 跨会话组合攻击链放行：多 session 均无害（对照 combo-cross-session-deny）
             ("combo-cross-session-allow.json", dict(decision="Allow", risk_level="low")),
+            # L2.2 形式化性质 P2-P8 放行对照（各自不满足触发条件）
+            ("formal-p2-sensitive-data-flow-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p3-low-integrity-reachability-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p4-no-exfil-after-privesc-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p5-no-exfil-after-credential-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p6-mc-ltl-rules-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p7-low-integrity-command-exec-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p8-sensitive-data-aggregation-allow.json", dict(decision="Allow", risk_level="low")),
             # 2026-09 审查批次2：.ssh.bak 备份目录放行 / sticky-only 放行 / 相对 var/tmp 豁免对照
             ("allow-119-rm-ssh-bak-dir.json", dict(decision="Allow", risk_level="low")),
             ("allow-120-chmod-sticky-only.json", dict(decision="Allow", risk_level="low")),
@@ -1710,12 +1726,11 @@ class TestLogicRules:
         assert result.hit
         assert result.risk_type == "file_access"
 
-    def test_password_consent_weak_when_question_on_topic(self):
-        """提问正文与密码相关但没上报 output → 弱授权放行。
+    def test_password_consent_denied_when_user_never_answered(self):
+        """提问正文相关但没上报 output → 仍拦截（弱授权已取消，2026-10）。
 
-        `output` 是 Agent 侧主动上报的字段，AgentGate 的请求模型此前没有它、
-        OpenDesk / xiaoO 也不收集，属于结构性缺失。继续拦就是误报。
-        注意：这层只在 **L1 未命中** 时执行（默认 L1 会先把这类命令拦掉）。
+        旧行为是「提问正文命中密码类关键词就放行」——但提问正文是 agent 自己写的，
+        等于 agent 自问自答即可绕过；且「问了没答」本来就不是授权。
         """
         result = self.checker._check_password_consent(
             action_history=[
@@ -1723,7 +1738,8 @@ class TestLogicRules:
             ],
             a_next={"action_type": "bash", "action_detail": "echo pass | passwd"},
         )
-        assert not result.hit
+        assert result.hit
+        assert result.risk_type == "consent_missing"
 
     def test_password_consent_rejects_unrelated_question(self):
         """无关提问不能当授权（历史 fail-open 回归的护栏）。"""
@@ -1866,10 +1882,14 @@ class TestLogicRules:
         assert result.risk_level == "high"
 
     def test_password_consent_allowed(self):
-        """非交互式密码修改有用户授权应放行"""
+        """非交互式密码修改有用户明确授权应放行（确认型提问 + 肯定回答）"""
         result = self.checker._check_password_consent(
             action_history=[
-                {"action_type": "ask_user_question", "output": "mypassword"},
+                {
+                    "action_type": "ask_user_question",
+                    "action_detail": "要修改 ops 的密码吗？",
+                    "output": "是，改成 mypassword",
+                },
             ],
             a_next={"action_type": "bash", "action_detail": "echo pass | passwd"},
         )
