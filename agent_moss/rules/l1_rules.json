@@ -697,14 +697,14 @@
       "reason": "检测到 MongoDB 删除集合 (db.<col>.drop())"
     },
     {
-      "pattern": "(?:del|rmdir|rd)\\s+[\\\\/][a-zA-Z]:",
+      "pattern": "(?:del|rmdir|rd)\\s+[\\\\/]?[a-zA-Z]:",
       "risk_level": "critical",
       "risk_type": "script_execution",
       "reason": "检测到递归删除关键路径 (del/rmdir C:\\)",
       "os": "windows"
     },
     {
-      "pattern": "del\\s+[\\\\/][a-zA-Z]:",
+      "pattern": "del\\s+[\\\\/]?[a-zA-Z]:",
       "risk_level": "critical",
       "risk_type": "script_execution",
       "reason": "检测到删除卷根目录文件 (del C:\\)",
@@ -816,7 +816,7 @@
       "os": "windows"
     },
     {
-      "pattern": "\\bSet-Content\\b[^;&|\\n]*\\b-[A-Za-z]*Stream\\b",
+      "pattern": "\\bSet-Content\\b[^;&|\\n]*\\s-[A-Za-z]*Stream\\b",
       "risk_level": "high",
       "risk_type": "script_execution",
       "reason": "检测到写入 NTFS 备用数据流（用于隐藏载荷）",
