@@ -53,7 +53,7 @@ def test_origin_cases(case):
 
 @pytest.mark.parametrize("case", CASES["redact"], ids=lambda c: f"redact-{c['session']}-{len(c['chain'])}")
 def test_redact_cases(case):
-    assert sp.redact_chain(case["chain"], case["session"]) == case["expected"]
+    assert sp.redact_chain(case["chain"], "", case["session"]) == case["expected"]
 
 
 @pytest.mark.parametrize("case", CASES["llm_url"], ids=lambda c: c["url"] or "(empty)")

@@ -67,6 +67,7 @@ class _AgentState:
         session_id: str,
         is_error: bool = False,
         source_agent: str = "",
+        instance_id: str = "",
     ) -> dict:
         r = self.store.apply_action(
             self.agent_id,
@@ -74,6 +75,7 @@ class _AgentState:
             session_id=session_id,
             is_error=is_error,
             source_agent=source_agent,
+            instance_id=instance_id,
         )
         return {
             "matched": r.matched.to_judgment() if r.matched else None,
@@ -201,6 +203,12 @@ async def analyze(req: AnalyzeRequest, request: Request):
             if os_type != "windows":
                 os_type = "linux"
 
+        # 来源实例：仅用于展示层脱敏（同实例不隐藏），不参与判定。
+        instance_id = str(
+            (getattr(req, "instance_id", "") or "")
+            or ((req.metadata or {}).get("instance_id") or "")
+        )
+
         # Step 3: 获取 OS Profile 并调用分析引擎
         profile = get_profile(os_type)
 
@@ -239,6 +247,7 @@ async def analyze(req: AnalyzeRequest, request: Request):
                 llm_log_path=llm_log_path,  # 来自 req.metadata.llm_log_path（per-request 日志路径）
                 prompt_history=prompt_history,   # 交错历史 prompt（可选）
                 session_history=session_history,  # 多 session 历史（L2.2 跨会话验证）
+                instance_id=instance_id,  # 来源实例（仅展示层脱敏）
             ),
         )
         duration_ms = (time.monotonic() - start) * 1000
@@ -276,6 +285,7 @@ async def analyze(req: AnalyzeRequest, request: Request):
                     is_error=bool(metadata.get("is_error", False)),
                     # 来源：真实 agent（不是桶 key），仅用于链路径取证/展示
                     source_agent=agent_id,
+                    instance_id=instance_id,
                 )
                 if inc["should_block"]:
                     j = inc["matched"] or (inc["exfil"][0] if inc["exfil"] else None)
@@ -295,7 +305,9 @@ async def analyze(req: AnalyzeRequest, request: Request):
                             # 共享，别人能往里写；原样返回等于把别人的命令原文递出去。
                             # 当前会话的节点保持原样（本来就是调用方自己的数据）。
                             violation_chain=sp.redact_chain(
-                                j.get("path", []) or [], session_id),
+                                j.get("path", []) or [], instance_id, session_id),
+                            violation_graph=sp.redact_graph(
+                                j.get("graph"), instance_id, session_id),
                         )
                         logger.info(
                             "stateful 增量拦截: agent=%s property=%s risk=%s",
@@ -315,6 +327,7 @@ async def analyze(req: AnalyzeRequest, request: Request):
             confidence=result.get("confidence", 100),
             analysis_duration_ms=duration_ms,
             violation_chain=result.get("violation_chain", []) or [],
+            violation_graph=sp.redact_graph(result.get("violation_graph"), instance_id, session_id),
         )
     except HTTPException:
         raise  # 鉴权/越界等显式状态码不能被兜底 500 覆盖

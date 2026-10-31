@@ -560,11 +560,56 @@ def chain_detail_mode() -> str:
     return (_env("AGENT_MOSS_CHAIN_DETAIL", "redacted") or "redacted").lower()
 
 
-def redact_chain(chain, current_session_id: str) -> list:
+def redact_graph(
+    graph,
+    current_instance_id: str = "",
+    current_session_id: str = "",
+) -> dict | None:
+    """结构化攻击链图的脱敏：同实例不隐藏，跨实例/跨会话隐藏命令原文。
+
+    判定优先级：
+    1. 节点有 instance_id 且与当前请求的 instance_id 相同 → 原样返回
+       （同一个人/同一个 agent 实例的多个会话，没必要对自己打码）。
+    2. 节点没有 instance_id（旧数据）→ 回退到 session 比较，只有当前会话可见。
+    3. 其他 → 隐藏 session_id / action_detail / resources。
+    """
+    if not graph:
+        return None
+    if chain_detail_mode() == "full":
+        return graph
+    nodes = []
+    for n in graph.get("nodes", []) or []:
+        m = dict(n)
+        inst = str(m.get("instance_id", "") or "")
+        sid = str(m.get("session_id", "") or "")
+        same_instance = bool(inst and current_instance_id and inst == str(current_instance_id))
+        same_session_fallback = bool(
+            not inst and current_session_id and sid == str(current_session_id)
+        )
+        if not (same_instance or same_session_fallback):
+            m["session_id"] = "<other-session>"
+            m["action_detail"] = "<已隐藏>"
+            m["resources"] = []
+        nodes.append(m)
+    out: dict = {"nodes": nodes, "edges": graph.get("edges", []) or []}
+    # 性质元信息/表达式只含性质名与节点索引，不含命令原文，脱敏时必须保留
+    # （否则前端无法展示"违反了哪条性质"与表达式对应关系）。
+    for key in ("property_id", "property_short", "property_name", "property_expression"):
+        if graph.get(key) is not None:
+            out[key] = graph[key]
+    return out
+
+
+def redact_chain(
+    chain,
+    current_instance_id: str = "",
+    current_session_id: str = "",
+) -> list:
     """跨会话节点只保留结构，去掉命令原文与会话标识。
 
-    节点形状为 ``[session_id, seq, action_detail, timestamp]``（见 formal_engine）。
-    当前会话的节点原样返回 —— 那些数据本来就是本次调用方自己提供的。
+    节点形状为 ``[session_id, seq, action_detail, timestamp, agent_id, instance_id]``。
+    同实例的节点原样返回（同一个人自己的多个会话）；旧数据没有 instance_id 时
+    回退到 session 比较。其他节点隐藏命令原文与资源。
     """
     if not chain:
         return []
@@ -575,7 +620,12 @@ def redact_chain(chain, current_session_id: str) -> list:
         if isinstance(step, (list, tuple)) and len(step) >= 3:
             sid, seq, detail = step[0], step[1], step[2]
             ts = step[3] if len(step) > 3 else ""
-            if str(sid) == str(current_session_id):
+            inst = str(step[5]) if len(step) > 5 else ""
+            same_instance = bool(inst and current_instance_id and inst == str(current_instance_id))
+            same_session_fallback = bool(
+                not inst and current_session_id and str(sid) == str(current_session_id)
+            )
+            if same_instance or same_session_fallback:
                 out.append(list(step))
             else:
                 out.append(["<other-session>", seq, "<已隐藏>", ts])

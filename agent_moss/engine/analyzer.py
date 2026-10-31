@@ -77,6 +77,7 @@ def analyze(
     llm_log_path: str | None = None,
     prompt_history: list[dict[str, object]] | None = None,
     session_history: list[dict[str, object]] | None = None,
+    instance_id: str = "",
 ) -> dict[str, str]:
     """
     分析 agent 的下一步动作是否在安全范围内，并在允许时生成最小 policy。
@@ -129,6 +130,7 @@ def analyze(
             llm_log_path=llm_log_path,
             prompt_history=prompt_history,
             session_history=session_history,
+            instance_id=instance_id,
         )
 
         if not judgment.allowed:
@@ -146,6 +148,9 @@ def analyze(
                 "risk_level": judgment.risk_level,
                 "risk_type": judgment.risk_type,
                 "confidence": judgment.confidence,
+                # 组合式拦截的结构化攻击链（前端可视化）；普通单步拦截为空
+                "violation_graph": judgment.violation_graph,
+                "violation_chain": judgment.violation_chain,
             }
             moss_log.log_result("Deny", result["reason"])
             return result

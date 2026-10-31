@@ -46,6 +46,7 @@ class AnalyzeRequest(BaseModel):
     os_type: str = Field(default="", description="OS type: 'linux', 'windows', or empty for auto-detect")
     cwd: str = Field(default="", description="Current working directory for context-aware path detection")
     agent_id: str = Field(default="", description="Caller agent identifier, e.g. 'xiaoo' / 'opencode' / 'opendesk'. Empty = generic mode (no agent-specific rules).")
+    instance_id: str = Field(default="", description="Agent installation/instance identifier. Used only for display-layer redaction: nodes from the same instance are returned unredacted. Does not affect detection.")
     metadata: Optional[dict] = Field(default=None, description="Extended metadata (sandbox_id, trace_id, etc.)")
 
     @model_validator(mode="before")
@@ -142,6 +143,9 @@ class AnalyzeResponse(BaseModel):
     # 组合攻击链反例路径：每步 [session_id, seq, stage, timestamp]，含真实发生时间
     violation_chain: list[list] = Field(default_factory=list,
                                         description="Combo-chain counterexample path with timestamps")
+    # 结构化攻击链图（前端可视化）：{"nodes": [...], "edges": [...]}
+    violation_graph: dict | None = Field(default=None,
+                                         description="Structured attack-chain graph for visualization")
 
 
 class HealthResponse(BaseModel):

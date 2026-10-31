@@ -15,6 +15,12 @@ class SecurityJudgment:
     source: str = ""  # 判断来源："heuristic" | "logic_rule" | "llm"
     action_desc: str = ""  # 动作描述
     violated_layers: list[str] = field(default_factory=list)  # 违反的具体层号，如 ["L1.1"], ["L2.1", "L3.1"]
+    # 组合式拦截的结构化攻击链（前端可视化用）：
+    # {"nodes": [{session_id, seq, stage, action_detail, resources}],
+    #  "edges": [{from, to, type, label?}]}
+    violation_graph: dict | None = None
+    # 兼容旧调用方：反例路径数组 [[session_id, seq, detail, timestamp?, agent?], ...]
+    violation_chain: list = field(default_factory=list)
 
 
 @dataclass

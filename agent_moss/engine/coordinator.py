@@ -90,6 +90,7 @@ class AgentMossBot:
         prompt_history: list[dict[str, object]] | None = None,
         session_history: list[dict[str, object]] | None = None,
         agent_id: str = "",
+        instance_id: str = "",
     ) -> SecurityJudgment:
         """
         执行三层防御安全判断。
@@ -480,18 +481,23 @@ class AgentMossBot:
                 for s in session_history:
                     formal_sessions.append({
                         "session_id": str(s.get("session_id", "s")),
-                        # 来源 agent：仅记录在链路径里供告警/取证，不参与链匹配
+                        # 来源 agent/实例：仅记录在链路径里供告警/取证与展示脱敏，
+                        # 不参与链匹配
                         "agent_id": str(s.get("agent_id") or ""),
+                        "instance_id": str(s.get("instance_id") or ""),
                         "action_history": s.get("action_history", []) or [],
                     })
             formal_sessions.append({
                 "session_id": "current",
                 "agent_id": agent_id or "",
+                "instance_id": instance_id,
                 "action_history": action_history,
             })
+            a_next_with_iid = dict(a_next)
+            a_next_with_iid["instance_id"] = instance_id
             formal_result = self._formal_engine.verify(
                 sessions=formal_sessions,
-                a_next=a_next,
+                a_next=a_next_with_iid,
             )
             if not formal_result.verified:
                 v = formal_result.first_violation
@@ -523,6 +529,11 @@ class AgentMossBot:
                         source="formal_engine",
                         action_desc=a_next.get("action_detail", ""),
                         violated_layers=violated_layers,
+                        violation_graph=getattr(v, "graph", None) if v else None,
+                        violation_chain=[
+                            list(x) if isinstance(x, (tuple, list)) else x
+                            for x in (v.path if v else [])
+                        ],
                     )
 
         # ========== L2.3: 脚本内容 L2 扫描（对预处理后脚本内容做 L2 规则检测） ==========
@@ -682,6 +693,7 @@ def judge_security(
     llm_log_path: str | None = None,
     prompt_history: list[dict[str, object]] | None = None,
     session_history: list[dict[str, object]] | None = None,
+    instance_id: str = "",
 ) -> SecurityJudgment:
     """
     便捷函数：执行 AgentMoss 安全判断。
@@ -732,4 +744,4 @@ def judge_security(
         skills_dir=config.security.skills_dir,
         agent_ext=ext,
     )
-    return agent.judge(prompt_session, action_history, a_next, reason, config, llm_config=llm_config, cwd=cwd, llm_log_path=llm_log_path, prompt_history=prompt_history, session_history=session_history, agent_id=agent_id)
+    return agent.judge(prompt_session, action_history, a_next, reason, config, llm_config=llm_config, cwd=cwd, llm_log_path=llm_log_path, prompt_history=prompt_history, session_history=session_history, agent_id=agent_id, instance_id=instance_id)

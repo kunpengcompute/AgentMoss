@@ -155,7 +155,7 @@ def test_redact_chain_hides_other_sessions():
         ["victim-session", 0, "cat /home/victim/secret.csv", "2026-10-20T10:00:00"],
         ["mine", 1, "nmap 10.0.0.5", "2026-10-20T10:00:01"],
     ]
-    out = sp.redact_chain(chain, "mine")
+    out = sp.redact_chain(chain, "", "mine")
     assert out[0][0] == "<other-session>" and out[0][2] == "<已隐藏>"
     assert "secret" not in str(out)
     assert out[1] == chain[1]  # 自己会话原样
@@ -164,7 +164,7 @@ def test_redact_chain_hides_other_sessions():
 def test_redact_chain_can_be_disabled(monkeypatch):
     monkeypatch.setenv("AGENT_MOSS_CHAIN_DETAIL", "full")
     chain = [["victim", 0, "cat secret", "ts"]]
-    assert sp.redact_chain(chain, "mine") == chain
+    assert sp.redact_chain(chain, "", "mine") == chain
 
 
 # ==================== LLM 配置校验 ====================
