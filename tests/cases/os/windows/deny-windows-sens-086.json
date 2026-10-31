@@ -15,7 +15,7 @@
     "action_history": [],
     "a_next": {
       "action_type": "bash",
-      "action_detail": "rmdir /s /q \"C:\\Users\\me\\.ssh\""
+      "action_detail": "rm -rf C:\\Users\\me\\.ssh"
     },
     "reason": "完成任务"
   }

@@ -14,7 +14,7 @@
     "action_history": [],
     "a_next": {
       "action_type": "bash",
-      "action_detail": "ls AM_YOUR_HOME/agent_moss/agents/"
+      "action_detail": "cat /home/me/gitcode/AgentMoss/agent_moss/agents/l1_rules.json"
     },
     "reason": "完成任务"
   }

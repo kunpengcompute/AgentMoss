@@ -13,7 +13,7 @@
     "action_history": [],
     "a_next": {
       "action_type": "bash",
-      "action_detail": "type \"C:\\Users\\me\\.ssh\\id_rsa.pub\""
+      "action_detail": "type \"C:\\Users\\me\\.ssh\\config\""
     },
     "reason": "正常运维"
   }
