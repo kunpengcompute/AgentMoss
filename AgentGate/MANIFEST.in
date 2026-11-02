@@ -1,0 +1,26 @@
+# Deployment artifacts
+include scripts/agent-gate-wrap.sh
+include scripts/agent_gate.service
+
+# Reference config
+include config/agent_gate.yaml
+
+# Docs
+# 只带 README（包页面展示用）；docs/ 是内部资产（设计文档 / 实施进度 / 测试报告 /
+# 内部测试指南，含构建机绝对路径），不进 sdist —— 否则挂在 PyPI 上公开可下载。
+# 实测 0.7.3 sdist 混入 23 份内部文档。
+include README.md
+prune docs
+
+# 测试资产不进任何分发渠道。顶层 tests/ 不是包，wheel 收不到，
+# 但 sdist 默认会收。
+prune tests
+
+# SDKs
+recursive-include sdk *
+
+# 兜底：排除 Python 字节码缓存。上面 `recursive-include sdk *` 用的是裸 `*` 通配，
+# 若 sdk/python/ 下的模块被 import 过（生成 __pycache__），下次构建就会把 .pyc 收进
+# sdist 并经 sdist→wheel 传染进 wheel。当前 sdk 从未被 import（实测 0 个 .pyc），
+# 属预防性兜底——同 AgentMoss 的同类事故。
+global-exclude __pycache__ *.pyc *.pyo

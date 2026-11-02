@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-gate-sec"
+version = "0.9.0"
+description = "AgentGate V1 - AI Agent 数据采集与安全分析中间层服务"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "AgentGate Team" }
+]
+keywords = ["ai-agent", "security", "data-collection", "agent-moss"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.5.0",
+    "httpx>=0.27.0",
+    "psutil>=5.9.0",
+    "pyyaml>=6.0",
+    "loguru>=0.7.0",
+    "typing-extensions>=4.13.2,<=4.14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+agent-gate = "agent_gate.v1.cli:main"
+
+[project.urls]
+Repository = "https://gitcode.com/kenhkl/AgentGate"
+Documentation = "https://gitcode.com/kenhkl/AgentGate"
+
+[tool.setuptools.packages.find]
+include = ["agent_gate*"]
+# 测试用例不进交付物：agent_gate/tests/ 带 __init__.py，会被上面的 include 匹配到。
+# 不排除的话，0.7.3 及以前的 wheel/sdist 会把 428K 测试代码（含内部主机名、产品代号、
+# 内部服务地址）一并发给客户 —— 实测 0.7.3 wheel 混入 36 个测试文件。
+exclude = ["agent_gate.tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["agent_gate/tests"]
+asyncio_mode = "auto"

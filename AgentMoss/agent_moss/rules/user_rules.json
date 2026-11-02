@@ -1,0 +1,8 @@
+{
+  "sensitive_actions": [],
+  "sensitive_tools": [
+    "eval",
+    "exec",
+    "system"
+  ]
+}

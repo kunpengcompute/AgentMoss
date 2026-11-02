@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "_comment": "AgentGate 自身安全策略的金标准用例。鉴权用例固定使用 AGENT_GATE_AUTH_TOKEN=good 与 AGENT_GATE_AGENT_TOKENS=opendesk=tok-open,qwenpaw=tok-qwen。principalPrefix 为期望主体的前缀（全局 token 的主体是 tok:<哈希>）。",
+  "origin": [
+    { "origin": "", "host": "127.0.0.1:9100", "extra": [], "allowed": true },
+    { "origin": "http://127.0.0.1:9100", "host": "127.0.0.1:9100", "extra": [], "allowed": true },
+    { "origin": "http://127.0.0.1:9100/", "host": "127.0.0.1:9100", "extra": [], "allowed": true },
+    { "origin": "http://localhost:9100", "host": "localhost:9100", "extra": [], "allowed": true },
+    { "origin": "http://evil.example", "host": "127.0.0.1:9100", "extra": [], "allowed": false },
+    { "origin": "http://evil.example", "host": "127.0.0.1:9100", "extra": ["http://evil.example"], "allowed": true },
+    { "origin": "http://ui.internal:3000", "host": "127.0.0.1:9100", "extra": ["http://ui.internal:3000"], "allowed": true },
+    { "origin": "https://ui.internal:3000", "host": "127.0.0.1:9100", "extra": ["http://ui.internal:3000"], "allowed": false },
+    { "origin": "null", "host": "127.0.0.1:9100", "extra": [], "allowed": false },
+    { "origin": "http://127.0.0.1:9100", "host": "", "extra": [], "allowed": false }
+  ],
+  "auth": [
+    { "name": "health 永远放行", "path": "/api/v1/health", "bearer": "", "cookie": "", "ok": true, "principalPrefix": "" },
+    { "name": "health 带尾斜杠也放行", "path": "/api/v1/health/", "bearer": "", "cookie": "", "ok": true, "principalPrefix": "" },
+    { "name": "全局 token", "path": "/api/v1/analyze", "bearer": "good", "cookie": "", "ok": true, "principalPrefix": "tok:" },
+    { "name": "错误 token", "path": "/api/v1/analyze", "bearer": "bad", "cookie": "", "ok": false, "principalPrefix": "" },
+    { "name": "缺 token", "path": "/api/v1/analyze", "bearer": "", "cookie": "", "ok": false, "principalPrefix": "" },
+    { "name": "agent token 可调 analyze", "path": "/api/v1/analyze", "bearer": "tok-open", "cookie": "", "ok": true, "principalPrefix": "agent:opendesk" },
+    { "name": "analyze 不接受 Cookie（只认 Bearer）", "path": "/api/v1/analyze", "bearer": "", "cookie": "good", "ok": false, "principalPrefix": "" },
+    { "name": "只读 API 接受 Cookie", "path": "/api/v1/tool_calls", "bearer": "", "cookie": "good", "ok": true, "principalPrefix": "tok:" },
+    { "name": "只读 API 拒绝坏 Cookie", "path": "/api/v1/tool_calls", "bearer": "", "cookie": "bad", "ok": false, "principalPrefix": "" },
+    { "name": "traces 接受 Cookie", "path": "/api/v1/sessions/s1/traces", "bearer": "", "cookie": "good", "ok": true, "principalPrefix": "tok:" },
+    { "name": "traces 接受 agent Bearer", "path": "/api/v1/sessions/s1/traces", "bearer": "tok-qwen", "cookie": "", "ok": true, "principalPrefix": "agent:qwenpaw" },
+    { "name": "dashboard 数据接受 Cookie", "path": "/dashboard/stats", "bearer": "", "cookie": "good", "ok": true, "principalPrefix": "tok:" },
+    { "name": "dashboard 数据拒绝无凭证", "path": "/dashboard/stats", "bearer": "", "cookie": "", "ok": false, "principalPrefix": "" },
+    { "name": "ws 接受 Cookie", "path": "/ws/events", "bearer": "", "cookie": "good", "ok": true, "principalPrefix": "tok:" },
+    { "name": "ws 拒绝无凭证", "path": "/ws/events", "bearer": "", "cookie": "", "ok": false, "principalPrefix": "" }
+  ],
+  "binding": [
+    { "name": "全局 token 可声称任意 agent", "principal": "tok:abc123", "agentType": "opendesk", "ok": true },
+    { "name": "agent token 声称自己", "principal": "agent:opendesk", "agentType": "opendesk", "ok": true },
+    { "name": "agent token 大小写不敏感", "principal": "agent:opendesk", "agentType": "OpenDesk", "ok": true },
+    { "name": "agent token 冒充别人", "principal": "agent:opendesk", "agentType": "qwenpaw", "ok": false },
+    { "name": "agent token 不声明身份", "principal": "agent:opendesk", "agentType": "", "ok": false },
+    { "name": "无主体（未鉴权）放行", "principal": "", "agentType": "opendesk", "ok": true }
+  ],
+  "cookie_paths": [
+    { "path": "/dashboard/", "cookieAllowed": true },
+    { "path": "/dashboard/stats", "cookieAllowed": true },
+    { "path": "/ws/events", "cookieAllowed": true },
+    { "path": "/api/v1/tool_calls", "cookieAllowed": true },
+    { "path": "/api/v1/sessions/s1/traces", "cookieAllowed": true },
+    { "path": "/api/v1/analyze", "cookieAllowed": false }
+  ]
+}

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentmoss-deepagents"
+version = "0.5.1"
+description = "AgentGate integration middleware for DeepAgents"
+requires-python = ">=3.12"
+dependencies = ["deepagents==0.7.32", "langchain==1.4.7", "langchain-core==1.7.1", "langgraph==1.2.18", "langgraph-prebuilt==1.1.1", "httpx==0.28.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error", "default:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:langsmith"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

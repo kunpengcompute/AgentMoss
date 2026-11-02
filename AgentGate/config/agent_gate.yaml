@@ -1,0 +1,99 @@
+# AgentGate 配置文件
+# 环境变量覆盖规则: AGENT_GATE_ 前缀 + 大写路径，例如 AGENT_GATE_SERVER_PORT
+
+server:
+  # 监听地址保持不变（0.0.0.0），避免影响跨机采集。
+  # 访问控制交给鉴权：AGENT_GATE_AUTH_MODE=auto（默认）下，没凭证一律 401。
+  host: "0.0.0.0"
+  port: 9100
+  # 部署模式: http (TCP) 或 socket (Unix Domain Socket)
+  mode: "http"
+  # Unix Domain Socket 路径（仅 mode=socket 时生效）
+  socket_path: "/var/run/agent_gate/agent_gate.sock"
+  # 工作进程数
+  workers: 1
+  # 日志级别: debug / info / warning / error
+  log_level: "info"
+
+agent_moss:
+  # AgentMoss 服务地址
+  # HTTP 模式: http://127.0.0.1:9090 (AgentMoss 默认端口)
+  # Socket 模式: unix:///var/run/agent_moss/agent_moss.sock
+  url: "http://127.0.0.1:9090"
+  # 请求超时（秒）
+  timeout: 30.0
+  # 最大重试次数
+  max_retries: 2
+  # 重试间隔（秒）
+  retry_delay: 1.0
+
+collector:
+  # 是否启用系统信息采集
+  system_info: true
+  # 是否启用进程信息采集（需要 CAP_SYS_PTRACE 或 root）
+  process_info: true
+  # 是否启用环境变量采集
+  env_info: true
+  # 是否启用网络信息采集
+  network_info: true
+  # 是否启用用户信息采集
+  user_info: true
+  # 采集超时（秒）
+  timeout: 5.0
+  # 线程池大小（并行采集）
+  pool_size: 5
+
+cache:
+  # 是否启用本地决策缓存
+  enabled: true
+  # 缓存最大条目数
+  max_size: 500
+  # 缓存 TTL（秒，0 表示无过期）
+  ttl: 300
+
+audit:
+  # 审计日志目录
+  log_dir: "/var/log/agent_gate"
+  # 是否启用审计日志
+  enabled: true
+  # 审计日志保留天数
+  retention_days: 30
+
+storage:
+  # SQLite 数据库路径
+  # db_path: "auto" — 自动选择（开发→data/，用户安装→~/.local/share/agent_gate/）
+  # 显式指定: "/var/lib/agent_gate/agent_gate.db" (systemd 部署)
+  db_path: "auto"
+  # 数据保留天数（超过自动清理）
+  retention_days: 30
+  # 每次查询最大返回记录数
+  max_query_limit: 500
+
+security:
+  # 敏感环境变量黑名单（不会被采集）
+  env_blacklist:
+    - ".*_TOKEN$"
+    - ".*_KEY$"
+    - ".*_SECRET$"
+    - ".*_PASSWORD$"
+    - ".*_PASSWD$"
+    - ".*_CREDENTIALS$"
+    - "AWS_.*"
+    - "AZURE_.*"
+    - "GCP_.*"
+  # 允许采集的环境变量白名单（优先级高于黑名单）
+  env_whitelist:
+    - "^PATH$"
+    - "^HOME$"
+    - "^USER$"
+    - "^SHELL$"
+    - "^LANG$"
+    - "^LC_.*"
+    - "^PYTHON.*"
+    - "^NODE_.*"
+    - "^JAVA_HOME$"
+    - "^GOPATH$"
+    - "^CARGO_HOME$"
+    - "^VIRTUAL_ENV$"
+    - "^CONDA_.*"
+    - "^CUDA_.*"

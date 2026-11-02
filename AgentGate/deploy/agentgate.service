@@ -1,0 +1,14 @@
+[Unit]
+Description=AgentGate V1 AI Agent Security Analysis Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-gate server --host 0.0.0.0 --port 9100
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

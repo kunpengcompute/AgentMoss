@@ -1,0 +1,4 @@
+# AgentMoss 判定汇总（import 方式，不执行命令）
+# agent_moss 0.17.0 | scenario=bank | agent=- | 生成时间 2026-10-26 08:33:15
+Allow 160 160 0 0 0
+Deny 202 202 0 0 0

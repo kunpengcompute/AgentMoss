@@ -1,0 +1,26 @@
+[Unit]
+Description=AgentGate - AI Agent Data Collection & Security Analysis Gateway
+After=network.target agent-moss.service
+Wants=agent-moss.service
+
+[Service]
+Type=simple
+User=agent_gate
+Group=agent_gate
+
+# V1 HTTP 模式
+ExecStart=/usr/local/bin/agent-gate server --mode http --host 127.0.0.1 --port 9100
+
+Restart=on-failure
+RestartSec=5
+
+Environment=AGENT_GATE_CONFIG_PATH=/etc/agent_gate/agent_gate.yaml
+Environment=MOSS_URL=http://127.0.0.1:9091
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/agent_gate/agent_gate.env
+
+# 采集功能所需权限（V2 daemon 模式需额外 CAP_BPF, CAP_SYS_ADMIN）
+# AmbientCapabilities=CAP_SYS_PTRACE CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
