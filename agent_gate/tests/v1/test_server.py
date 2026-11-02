@@ -966,6 +966,54 @@ class TestNormalizer:
         assert len(moss_request["action_history"]) == 1
         assert moss_request["action_history"][0]["action_type"] == "custom"
 
+    @pytest.mark.asyncio
+    async def test_normalize_forwards_action_history_called_at(self):
+        """Agent 上报的 called_at 必须透传 —— 授权时效窗靠它和 a_next 相减。"""
+        from agent_gate.v1.server.models import AgentGateInput, ActionHistoryItem
+
+        normalizer = Normalizer(repo=None)
+        asked_at = "2026-11-02T10:00:00"
+        input_data = AgentGateInput(
+            agent_type="test",
+            session_id="sess-called-at",
+            tool_name="bash",
+            command="echo 'sandbox:newpass' | chpasswd",
+            cwd="/tmp",
+            action_history=[
+                ActionHistoryItem(
+                    action_type="ask_user_question",
+                    action_detail="确认要改密吗？",
+                    output="是",
+                    called_at=asked_at,
+                ),
+            ],
+        )
+
+        moss_request = await normalizer.normalize(input_data, SystemContext())
+
+        assert moss_request["action_history"][0]["called_at"] == asked_at
+
+    @pytest.mark.asyncio
+    async def test_normalize_stamps_a_next_called_at(self):
+        """a_next.called_at 由 AgentGate 补当前时刻（调用方通常不上报）。"""
+        import datetime
+        from agent_gate.v1.server.models import AgentGateInput
+
+        normalizer = Normalizer(repo=None)
+        before = datetime.datetime.now() - datetime.timedelta(seconds=5)
+        input_data = AgentGateInput(
+            agent_type="test",
+            session_id="sess-a-next-called-at",
+            tool_name="bash",
+            command="ls -la",
+            cwd="/tmp",
+        )
+
+        moss_request = await normalizer.normalize(input_data, SystemContext())
+
+        stamp = datetime.datetime.fromisoformat(moss_request["a_next"]["called_at"])
+        assert stamp >= before
+
 
 # ============================================================
 # 9. Configuration Tests

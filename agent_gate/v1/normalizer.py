@@ -3,6 +3,7 @@
 Also integrates with Repository to auto-fill action_history from SQLite.
 """
 
+import datetime
 import socket
 import time
 from typing import Optional
@@ -154,9 +155,13 @@ class Normalizer:
         ]
 
         # Current action as a_next
+        # called_at：当前动作的发生时刻。AgentMoss 的 L2 授权规则用它和历史里
+        # ask_user_question 的 called_at 比较，判断「用户刚才的确认是否仍在
+        # 时效窗内」（默认 300s）。缺了它时效窗整条失效，只剩「最近 5 条」兜底。
         current_action = {
             "action_type": action_type,
             "action_detail": input_data.command or input_data.description,
+            "called_at": datetime.datetime.now().isoformat(),
         }
 
         # Convert prompt_history turns to dicts (interleaved prompt + actions)
@@ -168,6 +173,7 @@ class Normalizer:
                         "action_type": a.action_type,
                         "action_detail": a.action_detail,
                         "output": getattr(a, "output", "") or "",
+                        "called_at": getattr(a, "called_at", "") or "",
                     }
                     for a in t.actions
                 ],

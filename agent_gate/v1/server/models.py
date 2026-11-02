@@ -74,10 +74,15 @@ class ActionHistoryItem(BaseModel):
     回答 —— AgentMoss 的授权类规则（改密码 / 删用户）靠它判断「用户是否已确认」。
     此前模型里没有这个字段，Agent 传了也会被剥掉，导致这两类规则**必然**
     判成「未授权」。
+
+    ``called_at`` 是动作发生时刻（ISO 8601）。AgentMoss 的 L2 授权规则用它
+    校验「提问 → 回答 → 执行」的时效窗（默认 300s），防止拿很久以前的授权
+    当依据。此前模型里没有这个字段，Agent 传了也会被剥掉。
     """
     action_type: str = ""
     action_detail: str = ""
     output: str = ""
+    called_at: str = ""
 
 
 class PromptTurn(BaseModel):
