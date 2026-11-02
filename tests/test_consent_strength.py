@@ -156,3 +156,39 @@ class TestConsentTtl:
         """调用方没上报时间 → 跳过时间窗，由距离窗口兜底。"""
         hist = [_q("确认删除用户 ops 吗？", "是", called_at="2020-01-01T00:00:00")]
         assert not _userdel(checker, hist).hit
+
+
+class TestToolNameAliases:
+    """工具名别名：OpenDesk 链路（executeBash / askUser）也要能触发授权判定。
+
+    经 AgentGate 透传的工具名不是裸 ``bash`` / ``ask_user_question``：
+      - OpenDesk 的 shell 工具注册名是 ``executeBash``（消息里可能带命名空间前缀）
+      - AskUserTool 的注册名是 ``askUser``
+    只认标准名时，这两条授权规则在 OpenDesk 链路上**根本不执行** ——
+    不是「判未授权」，而是「规则没跑」，改密/删用户完全不受管控。
+    """
+
+    def test_execute_bash_triggers_password_rule(self, checker):
+        a_next = {"action_type": "executeBash", "action_detail": "echo 'x' | passwd"}
+        assert checker._check_password_consent([], a_next).hit
+
+    def test_execute_bash_triggers_userdel_rule(self, checker):
+        a_next = {"action_type": "executeBash", "action_detail": "userdel -r ops"}
+        assert checker._check_user_deletion_consent([], a_next).hit
+
+    def test_ns_prefixed_execute_bash_triggers(self, checker):
+        a_next = {"action_type": "terminal-executeBash", "action_detail": "userdel -r ops"}
+        assert checker._check_user_deletion_consent([], a_next).hit
+
+    def test_ask_user_camel_case_allowed(self, checker):
+        hist = [{"action_type": "askUser", "action_detail": "确认删除用户 ops 吗？", "output": "是"}]
+        assert not _userdel(checker, hist).hit
+
+    def test_ns_prefixed_ask_user_allowed(self, checker):
+        hist = [{"action_type": "interaction-askUser", "action_detail": "要修改 ops 的密码吗？", "output": "是"}]
+        assert not _passwd(checker, hist).hit
+
+    def test_non_shell_tool_not_triggered(self, checker):
+        """别名放宽不能波及其他工具：读文件里出现 userdel 字样不算删用户。"""
+        a_next = {"action_type": "readFile", "action_detail": "userdel -r ops"}
+        assert not checker._check_user_deletion_consent([], a_next).hit

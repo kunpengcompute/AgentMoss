@@ -137,6 +137,60 @@ def test_log_roots_and_path_within(tmp_path):
     assert sp.path_within("/tmp/agentmoss.log", sp.log_roots()) is True
 
 
+# ---------- root 下的默认家目录分级判定（2026-11） ----------
+# 0.17.0 的 log_roots 白名单默认取 Path.home()；systemd 以 root 跑时它是
+# /root，导致真实用户家目录下的 llm_log_path 被判越界（xiaoO hkl.log 无
+# [LLM_PROMPT]）。分级规则：显式 env > 单用户自动 > 多用户不猜。
+
+def test_default_home_non_root_unchanged(monkeypatch):
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: False)
+    assert sp._default_home() == Path.home()
+
+
+def test_default_home_root_explicit_env_wins(monkeypatch):
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: True)
+    monkeypatch.setattr(
+        paths, "_resolve_explicit_owner_home", lambda: Path("/home/alice")
+    )
+    monkeypatch.setattr(
+        paths, "_list_owner_homes", lambda: [Path("/home/alice"), Path("/home/bob")]
+    )
+    assert sp._default_home() == Path("/home/alice")
+
+
+def test_default_home_root_single_user_auto_detect(monkeypatch):
+    """单用户机器：唯一的普通用户就是真实用户，开箱即用。"""
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: True)
+    monkeypatch.setattr(paths, "_resolve_explicit_owner_home", lambda: None)
+    monkeypatch.setattr(paths, "_list_owner_homes", lambda: [Path("/home/alice")])
+    assert sp._default_home() == Path("/home/alice")
+
+
+def test_default_home_root_multi_user_does_not_guess(monkeypatch):
+    """多用户机器：不猜「第一个 UID>=1000」，保持 /root；靠显式配置授权。"""
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: True)
+    monkeypatch.setattr(paths, "_resolve_explicit_owner_home", lambda: None)
+    monkeypatch.setattr(
+        paths, "_list_owner_homes", lambda: [Path("/home/alice"), Path("/home/bob")]
+    )
+    assert sp._default_home() == Path.home()
+
+
+def test_log_roots_follows_single_user_home(monkeypatch):
+    """集成：单用户 + root 时，log_roots 默认包含真实用户家目录。"""
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: True)
+    monkeypatch.setattr(paths, "_resolve_explicit_owner_home", lambda: None)
+    monkeypatch.setattr(paths, "_list_owner_homes", lambda: [Path("/home/alice")])
+    roots = [str(p) for p in sp.log_roots()]
+    assert "/home/alice" in roots
+    assert sp.path_within("/home/alice/gitcode/xiaoO/hkl.log", sp.log_roots()) is True
+
+
 def test_review_roots_default_cover_agent_gate():
     roots = [str(p) for p in sp.review_roots()]
     assert any("agent_gate" in r for r in roots)

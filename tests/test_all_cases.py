@@ -705,6 +705,8 @@ class TestLayer1And2:
             ("deny-771-danger-171.json", dict(decision="Deny", risk_level="high")),
             ("deny-775-danger-175.json", dict(decision="Deny", risk_level="critical")),
             ("deny-783-danger-183.json", dict(decision="Deny", risk_level="high")),
+            # 2026-11：内联补位判定误报修复的正向对照（真实敏感路径仍拦）
+            ("deny-786-py-inline-open-shadow.json", dict(decision="Deny", risk_level="critical")),
             ("combo-listener-exec-cred-deny.json", dict(decision="Deny", risk_level="critical")),
             ("combo-listener-exec-exfil-deny.json", dict(decision="Deny", risk_level="critical")),
             ("combo-listener-exec-persist-deny.json", dict(decision="Deny", risk_level="high")),
@@ -823,6 +825,8 @@ class TestLayer1And2:
             ("logic-29-sed-readonly-allow.json", dict(decision="Allow", risk_level="low")),
             # M13 看护对照：file_write 创建新文件放行
             ("logic-31-file-write-new-file-allow.json", dict(decision="Allow", risk_level="low")),
+            # 2026-11：heredoc 内 XML 闭合 /> 被误当重定向写（read_before_write 误报）
+            ("logic-32-rbw-heredoc-xml-close-allow.json", dict(decision="Allow", risk_level="low")),
             # L1 缺口补齐放行用例（每条规则配一个不命中的放行变体）
             ("allow-53-rm-single.json", dict(decision="Allow", risk_level="low")),
             ("allow-54-group-read.json", dict(decision="Allow", risk_level="low")),
@@ -1320,6 +1324,10 @@ class TestLayer1And2:
             ("allow-1119-danger-219.json", dict(decision="Allow", risk_level="low")),
             ("allow-1120-danger-220.json", dict(decision="Allow", risk_level="low")),
             ("allow-1121-danger-221.json", dict(decision="Allow", risk_level="low")),
+            # 2026-11：内联补位判定误报修复（0.15.4 起 Image.open / open('/tmp/x') 被 critical 误杀）
+            ("allow-1122-py-inline-image-open.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1123-py-inline-open-tmp.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1124-py-inline-os-system-ls.json", dict(decision="Allow", risk_level="low")),
             ("combo-listener-exec-scan-allow.json", dict(decision="Allow", risk_level="low")),
             ("combo-listener-exec-cred-allow.json", dict(decision="Allow", risk_level="low")),
             ("combo-listener-exec-exfil-allow.json", dict(decision="Allow", risk_level="low")),

@@ -11,7 +11,7 @@
 | ``AGENT_MOSS_AUTH_TOKEN`` | 空 | 全局 Bearer token；**空 = 不鉴权（保持现状）** |
 | ``AGENT_MOSS_AUTH_TOKEN_FILE`` | 空 | 同上，从文件读（便于 0600 保存） |
 | ``AGENT_MOSS_AGENT_TOKENS`` | 空 | 每个 agent 一个 token，``agent=tok,agent2=tok2``；启用后 ``agent_id`` 必须与 token 匹配 |
-| ``AGENT_MOSS_LOG_ROOTS`` | ``$HOME,/tmp,$TMPDIR`` | ``metadata.llm_log_path`` 允许落盘的根目录 |
+| ``AGENT_MOSS_LOG_ROOTS`` | ``$HOME,/tmp,$TMPDIR`` | ``metadata.llm_log_path`` 允许落盘的根目录（root 下取真实用户家目录；多用户机器不猜，需显式配置） |
 | ``AGENT_MOSS_REVIEW_PATHS`` | AgentGate 标准目录 | ``/api/v1/review`` 的 ``db_path`` 允许读取的根目录 |
 | ``AGENT_MOSS_CHAIN_DETAIL`` | ``redacted`` | 组合链返回：``redacted`` 隐藏跨会话命令原文，``full`` 全量 |
 | ``AGENT_MOSS_MAX_BODY_BYTES`` | 16MB | 请求体上限 |
@@ -382,9 +382,33 @@ def principal_hash(principal: str) -> str:
 
 def _default_home() -> Path:
     try:
-        return Path.home()
+        home = Path.home()
     except Exception:  # noqa: BLE001
         return Path(tempfile.gettempdir())
+    # root（systemd 模式）下 Path.home() = /root，但真实用户的数据/日志在
+    # /home/<user>。0.17.0 引入 log_roots 白名单时漏了 systemd/root 部署：
+    #   - llm_log_path 落在 /home/<user> 被判越界（xiaoO hkl.log 无 [LLM_PROMPT]）；
+    #   - hardenExistingPaths 去 /root 下找根本不存在的文件、权限收紧从未生效。
+    #
+    # 分级判定（不能无条件用 _resolve_owner_home —— 它会猜）：
+    #   1. SUDO_USER / LOGNAME / USER 明确 → 该用户（sudo 启动）；
+    #   2. 只有一个普通用户 → 自动识别（单用户机器开箱即用）；
+    #   3. 多个普通用户 → **不猜**，保持 /root（安全）。
+    #      多用户共享同一 root 服务时，由安装脚本显式写 AGENT_MOSS_LOG_ROOTS
+    #      （每条目的用户装一次，累积进白名单）。
+    from .paths import (
+        _is_root,
+        _list_owner_homes,
+        _resolve_explicit_owner_home,
+    )
+    if _is_root():
+        explicit = _resolve_explicit_owner_home()
+        if explicit is not None:
+            return explicit
+        owners = _list_owner_homes()
+        if len(owners) == 1:
+            return owners[0]
+    return home
 
 
 def log_roots() -> list[Path]:

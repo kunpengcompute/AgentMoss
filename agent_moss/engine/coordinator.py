@@ -30,7 +30,7 @@ from .heuristic import (
     is_fully_safe_bash_command, is_readonly_sensitive_bash_command,
     is_inline_script_command, build_path_context,
 )
-from .inline_analyzer import analyze_inline_script, is_literal_text_command
+from .inline_analyzer import analyze_inline_script, has_inline_danger_evidence, is_literal_text_command
 from .llm_analyzer import LLMAnalyzer
 from .logic_rules import LogicRulesChecker
 from .script_content_analyzer import (
@@ -447,7 +447,21 @@ class AgentMossBot:
                 #   - 字面量（python -c "print('/etc/shadow')"、echo "rm -rf /"）→ inline 判 Allow → 不拦
                 #   - 正常内联脚本（print/json/console.log）→ inline 判 Allow → 不拦
                 # 实测（2026-09-11）对 8 个正常脚本 + 4 个字面量零误伤。
-                if is_inline_script_cmd or is_literal_text_cmd:
+                #
+                # ⚠️ 2026-11 修正：真内联脚本（python -c 等）必须**先有危险证据**
+                # （敏感路径 / rm -rf / mkfs / dd if= 等）才进本判定。此前只要求
+                # "是内联脚本"，而 analyze_inline_script 的步骤 2 只看读写调用词
+                # （open( / system( …），于是 `Image.open('/tmp/x.png')`、
+                # `print(open('/tmp/x').read())` 这类正常脚本被 critical 误杀
+                # （0.15.4 起）。无证据时不判定，交回后续 L2.2 / L3 语义分析
+                # （数据外传等仍由 L3 兜住）。echo/printf 保持无条件调用：
+                # 步骤 2 已跳过它们，只用于提前 Allow 跳过 L3。
+                if is_literal_text_cmd or (
+                    is_inline_script_cmd
+                    and has_inline_danger_evidence(
+                        a_next.get("action_detail", ""), self._profile
+                    )
+                ):
                     inline_judgment = analyze_inline_script(
                         a_next.get("action_detail", ""), profile=self._profile
                     )

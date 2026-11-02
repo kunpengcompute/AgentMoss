@@ -83,6 +83,31 @@ def _is_root() -> bool:
         return False
 
 
+def _resolve_explicit_owner_home() -> Path | None:
+    """只按显式环境变量解析「真实用户」家目录（SUDO_USER > LOGNAME/USER）。
+
+    不查 /etc/passwd —— 多用户机器上「第一个 UID>=1000」不一定是调用方。
+    systemd 直接起的服务通常这三个都为空。
+    """
+    for name in (os.getenv("SUDO_USER"), os.getenv("LOGNAME"), os.getenv("USER")):
+        if _is_owner(name):
+            return _home_of(name)
+    return None
+
+
+def _list_owner_homes() -> list[Path]:
+    """所有普通用户（UID>=1000、非系统账户）的家目录。"""
+    homes: list[Path] = []
+    try:
+        import pwd
+        for u in pwd.getpwall():
+            if u.pw_uid >= 1000 and not u.pw_name.startswith("_"):
+                homes.append(Path(u.pw_dir))
+    except Exception:
+        pass
+    return homes
+
+
 def _resolve_owner_home() -> Path | None:
     """root 运行时探测"真实用户"的家目录。
 
@@ -90,19 +115,17 @@ def _resolve_owner_home() -> Path | None:
     /etc/passwd 中第一个 UID>=1000 的非系统用户。探测不到返回 None。
     这样任何 `sudo systemctl start` 起的服务，即使 env 未设 AGENT_MOSS_DATA_DIR，
     数据也落到真实用户目录而非 /root。
+
+    ⚠️ 这个函数**会猜**（多用户机器取第一个），只适合"数据落盘"这类
+    猜错也只影响自己写哪的场景。安全边界（如 log_roots 白名单）必须用
+    `_resolve_explicit_owner_home` + `_list_owner_homes` 做分级判定，
+    不能直接用它 —— 猜错等于把写权限授予错误用户的目录。
     """
-    for name in (os.getenv("SUDO_USER"), os.getenv("LOGNAME"), os.getenv("USER")):
-        if _is_owner(name):
-            return _home_of(name)
-    # /etc/passwd 兜底：第一个 UID>=1000 的普通用户
-    try:
-        import pwd
-        for u in pwd.getpwall():
-            if u.pw_uid >= 1000 and not u.pw_name.startswith("_"):
-                return Path(u.pw_dir)
-    except Exception:
-        pass
-    return None
+    explicit = _resolve_explicit_owner_home()
+    if explicit is not None:
+        return explicit
+    owners = _list_owner_homes()
+    return owners[0] if owners else None
 
 
 def _is_owner(name) -> bool:

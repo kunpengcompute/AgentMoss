@@ -8,15 +8,15 @@
 
 ## 一、用例总量
 
-`tests/cases/` 共 **1216** 个测试用例，其中 **Deny 545 个、Allow 671 个**（2026-10 三层规则用例补齐 + P2–P8 形式化性质用例后重算）。
+`tests/cases/` 共 **1221** 个测试用例，其中 **Deny 546 个、Allow 675 个**（2026-11 内联补位/重定向误报修复用例后重算）。
 
 按子目录分层（对应 AgentMoss 三层规则 + agent 专属规则 + 场景定制规则）：
 
 | 子目录 | 层级 | 用例数 | 说明 |
 |---|---|---|---|
-| `l1/` | L1 特征匹配 | 844 | 危险命令正则 + 敏感路径 + 内联脚本 + 脚本分支感知（case $1 / python sys.argv） + 用户规则 |
+| `l1/` | L1 特征匹配 | 848 | 危险命令正则 + 敏感路径 + 内联脚本 + 脚本分支感知（case $1 / python sys.argv） + 用户规则 |
 | `os/<平台>/` | **平台专属规则** | 213 | `os/windows/`(154) + `os/macos/`(36) + `os/harmony/`(23)：子目录名即 `input.os_type`。**客户交付集默认排除**（客户沙箱是麒麟/Linux，平台用例在此判定必然失败） |
-| `l2/` | L2 逻辑规则 | 81 | read_before_write / 意图一致 / 提权 / 授权 / 间接访问 / 通配 / 重定向 / 组合攻击链（combo_chain）/ 跨会话组合链 + P2–P8 形式化性质（formal_engine） |
+| `l2/` | L2 逻辑规则 | 82 | read_before_write / 意图一致 / 提权 / 授权 / 间接访问 / 通配 / 重定向 / 组合攻击链（combo_chain）/ 跨会话组合链 + P2–P8 形式化性质（formal_engine） |
 | `l3/` | L3 LLM 语义 | 32 | security skill 命中+放行，需有效 LLM key 真跑 |
 | `agent/` | Agent 专属规则 | 9 | xiaoo/opendesk 的 extra_* / builtin_safe_* 看护（见下节） |
 | `scenario/<id>/` | 场景定制规则 | 37 | 客户沙箱部署级约束（如 bank 的目录白名单/禁 ssh），见下节 |

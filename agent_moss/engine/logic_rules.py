@@ -227,6 +227,28 @@ CONSENT_MAX_DISTANCE = 5
 #: 时间窗，由 ``CONSENT_MAX_DISTANCE`` 兜底。可用环境变量覆盖。
 CONSENT_TTL_SECONDS = 300
 
+#: 「shell 工具」的动作类型集合。
+#:
+#: 与 L2 其他规则（read_before_write / 写意图判定）保持同一口径：OpenDesk 注册的
+#: ``executeBash``（以及旧版 ``terminal-executeBash``）同样是 shell 工具。授权类规则
+#: 只认裸 ``bash`` 时，经 AgentGate 透传的工具名会让整条规则**命中不了** ——
+#: 不是「判未授权」，而是「规则根本没跑」（OpenDesk 链路实测缺陷）。
+BASH_LIKE_ACTION_TYPES = ("bash", "executebash", "terminal-executebash")
+
+#: 「向用户提问」的动作类型：标准名 + OpenDesk 注册名。
+#:
+#: OpenDesk 的 AskUserTool 注册名是 ``askUser``（消息里也可能带 ``interaction-`` 前缀）。
+#: AgentGate 未做工具名归一化时，历史里的提问会以 ``askuser`` 出现 —— 只认
+#: ``ask_user_question`` 会把真实授权判成「没问过」，用户答「是」也照样拦。
+ASK_USER_ACTION_TYPES = ("ask_user_question", "askuser")
+
+
+def _is_ask_user_action(action_type: str) -> bool:
+    """动作类型是否为「向用户提问」。兼容裸名与 ``<ns>-askUser`` 命名空间前缀。"""
+    if action_type in ASK_USER_ACTION_TYPES:
+        return True
+    return action_type.endswith("-askuser")
+
 # ==================== 组合攻击链检测（combo_chain）====================
 # 单步操作（创建 Flask 服务 / 端口扫描 / 读 known_hosts）各自无害，但按 kill chain
 # 顺序组合（LISTEN→EXEC→SCAN→CRED）即为后渗透攻击链（参考 ChainWatch 六阶段
@@ -401,7 +423,10 @@ def _is_write_operation(
         # 真实文件重定向：> 或 >> 后紧跟非空白、非 & 的文件目标字符。
         # `>{1,2}\s*(?!&)\S` 匹配 echo x > /file、cat in >file、sort in >> /file；
         # 排除 ls 2>&1、echo >&2（>& 紧邻或 > 后 & 是 fd 合并，非写文件）。
-        if re.search(r">{1,2}\s*(?!&)\S", detail_without_quotes):
+        # 另排除代码符号里的 >：`/>`（XML 闭合）、`->`（类型注解）、`=>`（箭头）。
+        # 2026-11 实测：python heredoc 里 `<a:alpha val="100"/>` 剥引号后剩 `val=/>`，
+        # 被当重定向写 → read_before_write 误判（xiaoO 生成 PPT 时被 Deny）。
+        if re.search(r"(?<![/\-=>])>{1,2}\s*(?!&)\S", detail_without_quotes):
             return True
     return False
 
@@ -855,7 +880,12 @@ class LogicRulesChecker:
                 detail_no_devnull,
             )
             detail_no_quotes = re.sub(r"'[^']*'|\"[^\"]*\"", "", detail_unquoted_redirect)
-            has_redirect_write = bool(re.search(r">{1,2}\s*(?!&)\S", detail_no_quotes))
+            # 排除代码符号里的 >：`/>`（XML 闭合）、`->`（类型注解）、`=>`（箭头）。
+            # 2026-11 实测：python heredoc 里 `<a:alpha val="100"/>` 剥引号后剩
+            # `val=/>`，被当重定向写 → read_before_write 误判。
+            has_redirect_write = bool(
+                re.search(r"(?<![/\-=>])>{1,2}\s*(?!&)\S", detail_no_quotes)
+            )
             has_write_seg = has_redirect_write
             if not has_write_seg:
                 for seg in _split_shell_segments(action_detail):
@@ -1672,7 +1702,7 @@ class LogicRulesChecker:
             if not isinstance(action, dict):
                 continue
             hist_type = str(action.get("action_type", action.get("name", ""))).lower()
-            if hist_type != "ask_user_question":
+            if not _is_ask_user_action(hist_type):
                 continue
             # 最近这条提问是唯一候选；它不合格就直接判未授权，不再往前找。
             output = str(action.get("output", "") or "").strip()
@@ -1701,8 +1731,8 @@ class LogicRulesChecker:
         action_detail = a_next.get("action_detail", "").lower()
         action_type = a_next.get("action_type", "").lower()
 
-        # 只检测 bash 工具中的密码修改命令
-        if action_type != "bash":
+        # 只检测 shell 工具中的密码修改命令（executeBash 等同 bash）
+        if action_type not in BASH_LIKE_ACTION_TYPES:
             return LogicRuleResult(hit=False)
 
         is_password_modify = any(
@@ -1736,8 +1766,8 @@ class LogicRulesChecker:
         action_detail = a_next.get("action_detail", "").lower()
         action_type = a_next.get("action_type", "").lower()
 
-        # 只检测 bash 工具中的用户删除命令
-        if action_type != "bash":
+        # 只检测 shell 工具中的用户删除命令（executeBash 等同 bash）
+        if action_type not in BASH_LIKE_ACTION_TYPES:
             return LogicRuleResult(hit=False)
 
         is_user_deletion = any(
