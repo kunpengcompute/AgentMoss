@@ -10,10 +10,10 @@ venv/
 .coverage
 htmlcov/
 
-# Runtime data
-logs/
-data/
-out/
+# Runtime data（只忽略仓库根目录，避免误伤 agent_moss/data 包资源）
+/logs/
+/data/
+/out/
 *.db
 *.db-wal
 *.db-shm
