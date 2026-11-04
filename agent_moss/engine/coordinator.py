@@ -519,7 +519,7 @@ class AgentMossBot:
                 if security_cfg.formal_observe_mode:
                     # observe 模式：只记录不拦截（灰度观察 FP 率用，如商用前的
                     # 大体量数据回放阶段）。违规仍标记进 violated_layers 供
-                    # actrail/调用方观测，但不短路 Deny，继续走后续层。
+                    # 调用方观测，但不短路 Deny，继续走后续层。
                     logger.warning(
                         "形式化验证 observe（只记录不拦截）: property=%s risk=%s path_len=%d reason=%s",
                         v.property_id if v else "?",
@@ -676,7 +676,7 @@ class AgentMossBot:
                 llm_judgment.violated_layers = violated_layers
             elif "L2.2" in violated_layers:
                 # observe 模式：formal 引擎命中但未拦截 → 把标记合并进 LLM Allow 结果，
-                # 使调用方/actrail 可见"本会拦但未拦"（与 skip_llm / LLM 禁用路径一致）。
+                # 使调用方可见"本会拦但未拦"（与 skip_llm / LLM 禁用路径一致）。
                 llm_judgment.violated_layers = list(dict.fromkeys(
                     ["L2.2", *llm_judgment.violated_layers]
                 ))

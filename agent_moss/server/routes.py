@@ -259,26 +259,6 @@ async def analyze(req: AnalyzeRequest, request: Request):
         )
         duration_ms = (time.monotonic() - start) * 1000
 
-        # Report enforcement event to AcTrail (fire-and-forget)
-        try:
-            from ..infra.actrail import report_enforcement_event
-            report_enforcement_event(
-                trace_id=session_id,
-                decision=result["decision"].lower(),
-                tool_name=a_next.get("action_type", ""),
-                tool_command=a_next.get("action_detail", ""),
-                session_id=session_id,
-                prompt=prompt_session,
-                risk_level=result.get("risk_level", ""),
-                risk_type=result.get("risk_type", ""),
-                reason=result.get("reason", ""),
-                violated_layers=result.get("violated_layers", []),
-                confidence=result.get("confidence", 100),
-                duration_ms=duration_ms,
-            )
-        except Exception:
-            pass  # Non-fatal, never block the response
-
         # ========== L2.2 stateful incremental（有状态实时判定，可选启用） ==========
         # 调用方在 metadata.stateful_incremental=true 时启用：把当前动作推入该 agent
         # 的持久化时间线，若当前动作补全某组合链（跨 session/长时距前序已就位）→ Deny。

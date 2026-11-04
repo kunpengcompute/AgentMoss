@@ -60,9 +60,3 @@ logging:
 adapter:
   enabled: true
   type: "observable"
-
-# AcTrail integration: write enforcement events to AcTrail's storage
-actrail:
-  enabled: false                    # Set to true or env ACTRAIL_ENABLED=1
-  storage_path: "/tmp/actrail.sqlite"  # AcTrail SQLite DB path
-  timeout_ms: 100                   # Write timeout (non-blocking)
