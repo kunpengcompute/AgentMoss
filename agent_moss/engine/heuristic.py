@@ -1029,6 +1029,10 @@ def _path_scan_variants(action_detail_lower: str) -> list[str]:
     return variants
 
 
+_PATH_QUOTE_TOKEN_RE = re.compile(r"__Q([0-9]+)__")
+_PATH_PROTOCOL_TOKEN_RE = re.compile(r"__PROT([0-9]+)__")
+
+
 def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
     """NORM-PATH: 折叠路径混淆段，堵路径穿越变体（对齐 CVE-2023-37274 攻击面）。
 
@@ -1049,6 +1053,12 @@ def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
         fold_quotes: 连引号内内容一起折叠。敏感路径检查用（引号内是真实路径参数，
             `cat "/etc//shadow"` 应同判 Deny），见 `_path_scan_variants`。
     """
+    # 原文中的 Q/PROT 可能与生成标记的边界拼出额外标记（如 'a' 'b'Q0'c'）。
+    # 保守地保留旧还原顺序；仅检查完整的 __Q/__PROT 前缀并不足够。
+    needs_legacy_restore = "Q" in text or "PROT" in text
+    if not needs_legacy_restore and "//" not in text and "/./" not in text:
+        return text
+
     # 1. 保护协议 URL 的 //（用不含 / 的令牌占位，避免被 /{2,} 折叠）
     prot_tokens: list[str] = []
     def _stash_prot(m: re.Match[str]) -> str:
@@ -1065,11 +1075,20 @@ def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
     # 3. 折叠非 URL 的连续斜杠与单点段
     text = re.sub(r"/{2,}", "/", text)
     text = re.sub(r"/\./", "/", text)
-    # 4. 还原引号与协议
-    for i, q in enumerate(quote_tokens):
-        text = text.replace(f"__Q{i}__", q)
-    for i, p in enumerate(prot_tokens):
-        text = text.replace(f"__PROT{i}__", p)
+    # 4. 原文存在编号冲突时，保留逐次替换的兼容行为。
+    if needs_legacy_restore:
+        for i, quote in enumerate(quote_tokens):
+            text = text.replace(f"__Q{i}__", quote)
+        for i, protocol in enumerate(prot_tokens):
+            text = text.replace(f"__PROT{i}__", protocol)
+        return text
+
+    # 普通输入集中还原，避免每个编号都重新搜索全文。
+    # 引号内容可能含协议编号，因此必须先还原引号，再还原协议。
+    if quote_tokens:
+        text = _PATH_QUOTE_TOKEN_RE.sub(lambda m: quote_tokens[int(m.group(1))], text)
+    if prot_tokens:
+        text = _PATH_PROTOCOL_TOKEN_RE.sub(lambda m: prot_tokens[int(m.group(1))], text)
     return text
 
 
