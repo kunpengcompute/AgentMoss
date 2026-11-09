@@ -1033,6 +1033,28 @@ def _path_scan_variants(action_detail_lower: str) -> list[str]:
 _PATH_QUOTE_TOKEN_RE = re.compile(r"__Q([0-9]+)__")
 _PATH_PROTOCOL_TOKEN_RE = re.compile(r"__PROT([0-9]+)__")
 
+#: 占位令牌批量还原阈值：少于该值逐个 str.replace 更快（C 实现，无正则引擎
+#: 与回调开销），达到该值一次 re.sub 更快（避免每个编号都重新扫描全文）。
+#: 实测交叉点约 8 个令牌（随文本长度浮动，取偏保守值）。
+_PATH_RESTORE_BATCH_MIN_TOKENS = 8
+
+
+def _restore_path_tokens(
+    text: str, tokens: list[str], prefix: str, token_re: re.Pattern[str]
+) -> str:
+    """还原路径归一化占位令牌，按令牌数选择更快的还原策略。
+
+    少量令牌时批量正则反而比逐个 replace 慢（少量令牌 + 含 `//` 的输入
+    实测回退 1.4~1.75 倍），因此只在令牌较多时走批量正则。
+    """
+    if not tokens:
+        return text
+    if len(tokens) < _PATH_RESTORE_BATCH_MIN_TOKENS:
+        for i, token in enumerate(tokens):
+            text = text.replace(f"__{prefix}{i}__", token)
+        return text
+    return token_re.sub(lambda m: tokens[int(m.group(1))], text)
+
 
 def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
     """NORM-PATH: 折叠路径混淆段，堵路径穿越变体（对齐 CVE-2023-37274 攻击面）。
@@ -1084,12 +1106,10 @@ def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
             text = text.replace(f"__PROT{i}__", protocol)
         return text
 
-    # 普通输入集中还原，避免每个编号都重新搜索全文。
-    # 引号内容可能含协议编号，因此必须先还原引号，再还原协议。
-    if quote_tokens:
-        text = _PATH_QUOTE_TOKEN_RE.sub(lambda m: quote_tokens[int(m.group(1))], text)
-    if prot_tokens:
-        text = _PATH_PROTOCOL_TOKEN_RE.sub(lambda m: prot_tokens[int(m.group(1))], text)
+    # 普通输入按令牌数择优还原：少量逐个 replace、大量批量正则（避免每个编号
+    # 都重新搜索全文）。引号内容可能含协议编号，因此必须先还原引号，再还原协议。
+    text = _restore_path_tokens(text, quote_tokens, "Q", _PATH_QUOTE_TOKEN_RE)
+    text = _restore_path_tokens(text, prot_tokens, "PROT", _PATH_PROTOCOL_TOKEN_RE)
     return text
 
 
