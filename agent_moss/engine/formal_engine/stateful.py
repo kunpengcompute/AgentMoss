@@ -772,6 +772,7 @@ class StatefulChainTracker:
                 instances=tuple(raw.get("instances") or ()),  # 旧快照无此字段 → 空
                 is_error=bool(raw.get("is_error", False)),
                 agent_id=str(raw.get("agent_id", "")),  # 旧快照无此字段 → 空
+                instance_id=str(raw.get("instance_id", "")),  # 旧快照无此字段 → 空
                 lifecycle=str(raw.get("lifecycle", "")),
                 timestamp=(raw.get("timestamp") or None),  # 旧快照无此字段 → None
             )

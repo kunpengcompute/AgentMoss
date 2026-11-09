@@ -177,6 +177,9 @@ agent-moss rules status
 | `AGENT_MOSS_DISABLE_LOGIC_RULES` | 关闭 L2 逻辑规则 |
 | `AGENT_MOSS_DISABLE_LLM` | 关闭 L3 LLM |
 | `AGENT_MOSS_LLM_TIMEOUT` | LLM 超时（秒） |
+| `AGENT_MOSS_LLM_HISTORY_MAX_ITEMS` | L3 prompt 最多注入历史动作条数（0 = 不限） |
+| `AGENT_MOSS_LLM_ACTION_DETAIL_MAX_CHARS` | L3 prompt 单条历史动作详情最大字符数（0 = 不截断） |
+| `AGENT_MOSS_LLM_MAX_PROMPT_TOKENS` | L3 输入 prompt 的 token 预算（0 = 不限） |
 | `AGENT_MOSS_SCENARIO` | 部署级默认场景 ID |
 | `AGENT_MOSS_DATA_DIR` | 数据目录 |
 | `AGENT_MOSS_LOG_PATH` | LLM prompt 日志路径 |

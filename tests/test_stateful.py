@@ -173,6 +173,27 @@ def test_snapshot_restore_roundtrip():
     assert r.matched.chain_id == "listener-exec-scan"
 
 
+def test_restore_preserves_instance_id():
+    """restore 必须保留节点 instance_id（2026-11 xiaoO 实测：Python 侧漏传，
+    save/load 往返后旧节点实例 ID 丢失 → 展示层把同实例节点误当跨实例隐藏。
+    TS 侧 restore 一直有 instanceId，本测试守护双端对齐）。"""
+    t = StatefulChainTracker(agent_id="test")
+    t.advance(_listener(), session_id="A", instance_id="iid-x")
+    t.advance(_exec(), session_id="B", instance_id="iid-x")
+    snap = t.to_snapshot()
+
+    t2 = StatefulChainTracker(agent_id="test")
+    t2.restore(snap)
+    r = t2.advance(_scan(), session_id="C", instance_id="iid-x")
+    assert r.matched is not None
+    graph = r.matched.build_graph() if hasattr(r.matched, "build_graph") else None
+    if graph and graph.get("nodes"):
+        iids = {n.get("instance_id") for n in graph["nodes"]}
+        assert iids == {"iid-x"}, f"restore 后节点实例 ID 丢失: {iids}"
+    # 直接断言时间线节点也保留
+    assert all(n.instance_id == "iid-x" for n in t2.nodes)
+
+
 def test_chain_consistent_with_full_verify():
     """stateful 增量判定与 FormalEngine 全量 verify 跨会话链结果一致。"""
     sessions = [

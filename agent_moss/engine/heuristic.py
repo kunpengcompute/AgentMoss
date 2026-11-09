@@ -26,6 +26,7 @@ from .types import HeuristicResult
 # _is_write_operation 留在 logic_rules.py 作为单一事实源（read_before_write 也用），
 # 此处复用避免读写判定逻辑漂移。
 from .logic_rules import _is_write_operation, _SensitivePathMatcher, _is_directory_delete_action, _is_archive_read_of_dir, _is_ssh_keygen_generate
+from .logic_rules import has_exec_bypass_chain, ALL_QUOTES_RE
 # 引号感知命令段切分同样下沉 logic_rules（NEW-FN-M 起含单管道切分），单一事实源：
 from .logic_rules import _SEPARATOR_SEGMENTS, _split_shell_segments
 
@@ -924,6 +925,20 @@ def _strip_inline_python_literals(text: str) -> str:
     return out
 
 
+#: NEW-FP-R（2026-11，xiaoO 实测误报）：非交互式密码修改家族的真实语义要求
+#: 「管道/命令词出现在引号外」——`grep -E "password|passwd|secret" f` 的模式串
+#: 里 `|passwd` 是正则或关系，却被 `\\|\\s*passwd\\b` 误当"管道喂密码给 passwd"。
+#: 守卫：原始命中后，若剥离全部引号内容就不再命中 → 丢弃该模式命中。
+#: 绕过链（has_exec_bypass_chain）不适用此守卫（引号内载荷会被执行）。
+QUOTED_SAFE_PASSWORD_PATTERNS = frozenset(
+    {
+        r"\|\s*passwd\b",
+        r"\bpasswd\s+--stdin\b",
+        r"\bchpasswd\b",
+    }
+)
+
+
 def _strip_literal_text_segments(action_detail: str) -> str:
     """NEW-FP-I: 对首词 echo/printf 的命令段剥掉引号内容（字面量参数）。
 
@@ -954,10 +969,7 @@ def _strip_literal_text_segments(action_detail: str) -> str:
     # crontab/at 是"持久化消费者"：`echo '<schedule> <命令>' | crontab -` 里的内容会被
     # 写入定时任务**稍后执行**，等价于喂给解释器——剥离会把载荷当文本丢弃，导致
     # `@reboot /tmp/x.sh`、`wget ... && bash ...` 这类 cron 后门整体漏拦（2026-09 修复）。
-    _exec_after = r"&&|\|\||;|\n|\|"
-    if (re.search(r">\s*[/~]\S*\.(sh|py|pl|rb)\b", action_detail) and
-        re.search(rf"(?:{_exec_after})\s*(?:bash|sh|zsh|dash|python|perl|ruby|node)", action_detail)) or \
-       re.search(r"\|\s*(?:bash|sh|zsh|dash|python|perl|ruby|node|crontab|at)\b", action_detail):
+    if has_exec_bypass_chain(action_detail):
         return action_detail
     # 按命令分隔符分段，但跳过引号内的分隔符（echo "a; b" 的 ; 在引号内不分段）
     result_parts: list[str] = []
@@ -1227,10 +1239,19 @@ class CommandPatternScanner:
         # ssh-keygen 生成模式豁免：生成新私钥时 -f 后的私钥路径是写目标，不应命中
         # 「访问私钥」命令正则（如 .ssh/id_rsa）。读模式（-y/-l/-p）不受豁免。
         exempt_keygen = _is_ssh_keygen_generate(action_detail)
+        # NEW-FP-R：密码修改家族的命中必须经得起全量剥引号——真实语义的管道/命令词
+        # 都在引号外；只在引号内出现（grep 搜索模式串）是字面量误报。绕过链例外。
+        _pw_guard_off = has_exec_bypass_chain(action_detail)
+        _no_quotes = None if _pw_guard_off else ALL_QUOTES_RE.sub(" ", action_detail)
         hits = [
             p for p in active
             if any(p["regex"].search(t) for t in scan_texts)
             and not (exempt_keygen and p["risk_type"] == "file_access")
+            and (
+                p["pattern"] not in QUOTED_SAFE_PASSWORD_PATTERNS
+                or _no_quotes is None
+                or p["regex"].search(_no_quotes) is not None
+            )
         ]
         if not hits:
             return HeuristicResult(hit=False)

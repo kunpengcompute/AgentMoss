@@ -707,6 +707,8 @@ class TestLayer1And2:
             ("deny-783-danger-183.json", dict(decision="Deny", risk_level="high")),
             # 2026-11：内联补位判定误报修复的正向对照（真实敏感路径仍拦）
             ("deny-786-py-inline-open-shadow.json", dict(decision="Deny", risk_level="critical")),
+            # 2026-11：grep 引号模式串误报修复的正向对照（引号外真实管道仍拦）
+            ("deny-787-grep-pipe-real-passwd.json", dict(decision="Deny", risk_level="high")),
             ("combo-listener-exec-cred-deny.json", dict(decision="Deny", risk_level="critical")),
             ("combo-listener-exec-exfil-deny.json", dict(decision="Deny", risk_level="critical")),
             ("combo-listener-exec-persist-deny.json", dict(decision="Deny", risk_level="high")),
@@ -1328,6 +1330,8 @@ class TestLayer1And2:
             ("allow-1122-py-inline-image-open.json", dict(decision="Allow", risk_level="low")),
             ("allow-1123-py-inline-open-tmp.json", dict(decision="Allow", risk_level="low")),
             ("allow-1124-py-inline-os-system-ls.json", dict(decision="Allow", risk_level="low")),
+            # 2026-11：grep 搜索模式串里的 |passwd 是正则或关系，非管道改密
+            ("allow-1125-grep-pattern-pipe-passwd.json", dict(decision="Allow", risk_level="low")),
             ("combo-listener-exec-scan-allow.json", dict(decision="Allow", risk_level="low")),
             ("combo-listener-exec-cred-allow.json", dict(decision="Allow", risk_level="low")),
             ("combo-listener-exec-exfil-allow.json", dict(decision="Allow", risk_level="low")),

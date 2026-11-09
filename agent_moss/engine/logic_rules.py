@@ -328,6 +328,26 @@ def _match_dangerous_action(action_detail: str, action: str) -> bool:
     return bool(re.search(rf"(?<![-\w]){escaped}\b", action_detail, re.IGNORECASE))
 
 
+def has_exec_bypass_chain(action_detail: str) -> bool:
+    """是否含「写脚本 + 后续执行」或「管道喂解释器/持久化消费者」绕过链。
+
+    这两种链里的引号内容是**稍后会被执行的载荷**而非字面量，任何"引号内不算"
+    类守卫（heuristic 的 _strip_literal_text_segments 剥离、NEW-FP-R 引号守卫）
+    都必须对它失效，否则绕过链在 L1/L2 漏检（inline-09/10 依赖）。
+    """
+    _exec_after = r"&&|\|\||;|\n|\|"
+    return (
+        re.search(r">\s*[/~]\S*\.(sh|py|pl|rb)\b", action_detail)
+        and re.search(rf"(?:{_exec_after})\s*(?:bash|sh|zsh|dash|python|perl|ruby|node)", action_detail)
+    ) or re.search(r"\|\s*(?:bash|sh|zsh|dash|python|perl|ruby|node|crontab|at)\b", action_detail) is not None
+
+
+#: 全量剥引号内容（NEW-FP-R 引号守卫用）：剥**整条命令**的引号内容（不按首词
+#: 区分），只用于判断「命中是否纯在引号内」。与 heuristic 的
+#: _strip_literal_text_segments（首词 echo/printf 才剥）语义不同。
+ALL_QUOTES_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
 def _is_write_operation(
     action_type: str,
     action_detail: str,
@@ -1738,6 +1758,14 @@ class LogicRulesChecker:
         is_password_modify = any(
             re.search(p, action_detail, re.IGNORECASE) for p in self._get_password_patterns()
         )
+        # NEW-FP-R：密码修改家族的命中必须经得起全量剥引号——真实语义的管道/命令词
+        # 都在引号外；只在引号内出现（grep 搜索模式串里的 |passwd）是字面量误报。
+        # 绕过链（写脚本+执行 / 管道喂解释器）例外：引号内载荷稍后会被执行。
+        if is_password_modify and not has_exec_bypass_chain(action_detail):
+            _no_quotes = ALL_QUOTES_RE.sub(" ", action_detail)
+            is_password_modify = any(
+                re.search(p, _no_quotes, re.IGNORECASE) for p in self._get_password_patterns()
+            )
         if not is_password_modify:
             return LogicRuleResult(hit=False)
 
