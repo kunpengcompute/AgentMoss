@@ -962,7 +962,8 @@ def _strip_literal_text_segments(action_detail: str) -> str:
     # 按命令分隔符分段，但跳过引号内的分隔符（echo "a; b" 的 ; 在引号内不分段）
     result_parts: list[str] = []
     for seg in _split_command_segments(action_detail):
-        fw = seg.strip().split()[0].lower() if seg.strip().split() else ""
+        words = seg.strip().split()
+        fw = words[0].lower() if words else ""
         if fw in ("echo", "printf"):
             # NEW-FP-Q（M21）：先剥 $() 内 python -c 纯输出（echo $(python3 -c 'print(1)')），
             # 否则下面的引号剥离只剥掉代码引号、$(python3 -c ) 骨架残留仍被 A51 命中；
@@ -1092,6 +1093,9 @@ def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
     return text
 
 
+_COMMAND_SEGMENT_TOKEN_RE = re.compile(r"['\";\n]|&&|\|\|")
+
+
 def _split_command_segments(action_detail: str) -> list[str]:
     """按 &&/||/;/换行 分段，跳过引号内的分隔符。
 
@@ -1099,45 +1103,21 @@ def _split_command_segments(action_detail: str) -> list[str]:
     引号内 chmod/mkfs 等词会脱离 echo 段被当独立命令首词误匹配（NEW-FP-I）。
     """
     segments: list[str] = []
-    cur = []
-    i = 0
-    quote: str | None = None
-    while i < len(action_detail):
-        ch = action_detail[i]
-        if quote:
-            cur.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
+    start = cursor = 0
+    while match := _COMMAND_SEGMENT_TOKEN_RE.search(action_detail, cursor):
+        token = match.group()
+        if token in ("'", '"'):
+            # 保持旧状态机语义：同种引号关闭，不额外解释反斜杠转义。
+            end = action_detail.find(token, match.end())
+            if end < 0:
+                break
+            cursor = end + 1
             continue
-        if ch in ("'", '"'):
-            quote = ch
-            cur.append(ch)
-            i += 1
-            continue
-        # 检查分隔符 &&/||/;/换行（引号外）
-        if ch == ';' or ch == '\n':
-            segments.append("".join(cur))
-            segments.append(ch)
-            cur = []
-            i += 1
-            continue
-        if ch == '&' and i + 1 < len(action_detail) and action_detail[i + 1] == '&':
-            segments.append("".join(cur))
-            segments.append("&&")
-            cur = []
-            i += 2
-            continue
-        if ch == '|' and i + 1 < len(action_detail) and action_detail[i + 1] == '|':
-            segments.append("".join(cur))
-            segments.append("||")
-            cur = []
-            i += 2
-            continue
-        cur.append(ch)
-        i += 1
-    if cur:
-        segments.append("".join(cur))
+        segments.append(action_detail[start:match.start()])
+        segments.append(token)
+        start = cursor = match.end()
+    if start < len(action_detail):
+        segments.append(action_detail[start:])
     return segments
 
 
