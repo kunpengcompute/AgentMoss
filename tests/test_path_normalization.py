@@ -78,3 +78,11 @@ def test_long_text_does_not_replace_whole_string_per_placeholder(unit, expected_
     replace_calls = sum(stats[1] for key, stats in pstats.Stats(profiler).stats.items()
                         if key[2] == "<method 'replace' of 'str' objects>")
     assert replace_calls <= 2, f"Repeated full-string replacements: {replace_calls}"
+
+
+@pytest.mark.parametrize("count", [0, 1, 2, 3, 7, 8, 9, 12])
+def test_restore_strategy_switch_preserves_output(count):
+    """少量令牌走 str.replace、大量令牌走批量正则（阈值 8），两条路径输出必须一致。"""
+    text = " ".join(f'cat "v{i}" http://h{i}//x' for i in range(count)) + ' /a//b'
+    expected = " ".join(f'cat "v{i}" http://h{i}/x' for i in range(count)) + ' /a/b'
+    assert _normalize_path_segments(text) == expected
