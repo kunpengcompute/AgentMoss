@@ -119,23 +119,114 @@ app = create_app()
 | POST | `/api/v1/review` | 低频全量回顾（供 AgentGate 触发） |
 | GET | `/console` | 运行时控制台 |
 
-`POST /api/v1/analyze` 请求示例：
+#### POST /api/v1/analyze
+
+请求示例：
 
 ```json
 {
   "session_id": "sess-001",
   "prompt_session": "list files",
-  "action_history": [],
+  "prompt_history": [
+    {
+      "text": "list files",
+      "actions": [
+        {"action_type": "bash", "action_detail": "ls -la"}
+      ]
+    }
+  ],
+  "action_history": [
+    {
+      "action_type": "bash",
+      "action_detail": "pwd",
+      "called_at": "2026-11-10T10:00:00"
+    }
+  ],
+  "session_history": [
+    {
+      "session_id": "other-session",
+      "action_history": [
+        {"action_type": "bash", "action_detail": "cat /tmp/report.txt"}
+      ]
+    }
+  ],
   "a_next": {
     "action_type": "bash",
-    "action_detail": "ls -la"
+    "action_detail": "ls -la",
+    "called_at": "2026-11-10T10:00:01"
   },
   "reason": "list files",
   "agent_id": "",
+  "instance_id": "",
   "os_type": "linux",
-  "cwd": "/home/user/project"
+  "cwd": "/home/user/project",
+  "metadata": {"stateful_incremental": false}
 }
 ```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string | 是 | 会话唯一标识 |
+| `prompt_session` | string | 否 | 最近一条用户提示 |
+| `prompt_history` | array | 否 | 交错 prompt 历史：`[{text, actions: [{action_type, action_detail}]}]` |
+| `action_history` | array | 否 | 历史动作：`[{action_type, action_detail, called_at?, output?}]`。`ask_user_question` 动作应带 `output`（用户回答），否则改密/删用户授权会被判未授权 |
+| `session_history` | array | 否 | 多 session 历史：`[{session_id, action_history: [{action_type, action_detail}]}]`，供 L2.2 跨会话验证 |
+| `a_next` | object | 是 | 下一步动作：`{action_type, action_detail, called_at?}` |
+| `reason` | string | 否 | 执行理由 |
+| `os_type` | string | 否 | `linux` / `windows` / 空=自动检测 |
+| `cwd` | string | 否 | 当前工作目录 |
+| `agent_id` | string | 否 | 调用方 agent 标识（如 `xiaoo` / `opendesk`），空=通用模式 |
+| `instance_id` | string | 否 | agent 安装实例标识，仅用于展示层脱敏 |
+| `metadata` | object | 否 | 扩展字段；支持 `llm_config`、`llm_log_path`、`stateful_incremental`、`is_error` 等 |
+
+> `action_type` / `action_detail` 在 `a_next` 和 `action_history` 项中均必填；`called_at` 为 ISO 8601 时间，供 L2 授权时效窗和 P4 提权外传窗口使用。
+
+响应字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `decision` | string | `Allow` / `Deny` |
+| `reason` | string | 决策原因 |
+| `risk_level` | string | `low` / `medium` / `high` / `critical` |
+| `risk_type` | string | 风险类别，如 `file_access`、`script_execution`、`data_exfiltration`、`formal_verification` |
+| `violated_layers` | array | 命中层，如 `["L1.1", "L2.2"]` |
+| `policy` | string | Allow 时生成的最小策略（TOML） |
+| `violated_policy` | string | Deny 时违反的策略条款 |
+| `confidence` | int | 置信度 0–100 |
+| `analysis_duration_ms` | float | 分析耗时（毫秒） |
+| `violation_chain` | array | 组合链反例路径（按引擎返回的步骤数组） |
+| `violation_graph` | object/null | 结构化攻击链图：`{nodes, edges}`，供前端可视化 |
+
+#### POST /api/v1/review
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `agent_id` | string | 否 | 目标 agent（决定状态库分桶） |
+| `db_path` | string | 否 | AgentGate SQLite 文件或 tool_calls JSON 目录；为空则用 `sessions` |
+| `sessions` | array | 否 | 多 session 历史，结构同 `session_history` |
+| `a_next` | object | 否 | 可选，连同当前动作一起判定 |
+| `is_error` | bool | 否 | 当前动作是否执行失败（生命周期判定） |
+| `output_pending` | bool | 否 | 返回待攻击前序链清单 |
+
+响应字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string | 目标 agent |
+| `seeded_nodes` | int | 写入状态库的节点数 |
+| `verified` | bool | 全量形式化验证是否通过 |
+| `violations` | array | 全量验证发现的违规 |
+| `pending_prefixes` | array | 待补全的攻击前序链 |
+| `state_nodes` | int | 状态库累计节点数 |
+| `discovered_patterns` | array | 数据驱动发现的跨 session 危险组合 |
+
+#### GET /api/v1/health
+
+响应字段：`status`（服务状态）、`version`（版本）、`instance`（实例归属标识，未配置为空串）。
 
 ## 规则与扩展
 
