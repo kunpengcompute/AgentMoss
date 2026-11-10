@@ -228,6 +228,44 @@ app = create_app()
 
 响应字段：`status`（服务状态）、`version`（版本）、`instance`（实例归属标识，未配置为空串）。
 
+#### 鉴权
+
+默认 `AGENT_MOSS_AUTH_MODE=auto`：首次启动生成 token，写入
+`$AGENT_MOSS_DATA_DIR/auth_token`（未设置时默认 `~/.config/agentmoss/auth_token`，权限 0600）。
+`/api/v1/health` 公开，其余接口需要：
+
+```text
+Authorization: Bearer <token>
+```
+
+读取 token 并直连 `/api/v1/analyze`：
+
+```bash
+MOSS_TOKEN=$(cat ~/.config/agentmoss/auth_token)
+
+curl -sS -X POST http://127.0.0.1:9090/api/v1/analyze \
+  -H "Authorization: Bearer $MOSS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "moss-direct-1",
+    "prompt_session": "",
+    "action_history": [],
+    "a_next": {"action_type": "bash", "action_detail": "ls -la /tmp"},
+    "reason": "direct curl test"
+  }'
+```
+
+相关环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `AGENT_MOSS_AUTH_MODE` | `auto`（默认，自动生成/读取 token）/ `off`（关闭鉴权） |
+| `AGENT_MOSS_AUTH_TOKEN` | 显式指定全局 token |
+| `AGENT_MOSS_AUTH_TOKEN_FILE` | 从文件读取全局 token |
+| `AGENT_MOSS_AGENT_TOKENS` | 逐 agent token，如 `opendesk=tok-a,qwenpaw=tok-b` |
+
+AgentGate 调用 AgentMoss 时也必须携带这个 token，配置方法见 AgentGate README 的“AgentGate 调 AgentMoss 的鉴权”。若 AgentGate 返回 `Deny` 且 reason 包含 `AgentMoss HTTP 401`，说明 Gate 自己鉴权通过，但 Gate→Moss 的 token 没配对。
+
 ## 规则与扩展
 
 | 路径 | 内容 |
