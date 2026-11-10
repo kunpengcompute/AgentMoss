@@ -330,7 +330,7 @@ agent-moss rules status
 AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
 ```
 
-当前裁剪版回归结果：**1526 passed, 28 skipped**。
+最近一次裁剪版全量回归：**3128 passed, 136 skipped**。
 
 测试语料位于 `tests/cases/`，双端一致性 golden 数据位于 `tests/parity/`
 （裁剪后只校验 Python 侧行为，不依赖 TypeScript 源码）。
