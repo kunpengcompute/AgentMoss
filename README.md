@@ -45,10 +45,11 @@ AgentMoss 默认开启鉴权（`AGENT_MOSS_AUTH_MODE=auto`），首次启动会�
 否则会返回 `Deny` + `AgentMoss HTTP 401`（见下文「AgentGate 调 AgentMoss 的鉴权」）。
 
 > 如果只启动 AgentGate、没有安装/启动 AgentMoss：AgentGate 本身可以启动，
-> `/api/v1/health` 仍返回 200，但 `moss_status` 为 `unreachable`；
-> `/api/v1/analyze` 会按 **fail-closed** 返回 `Deny`（`source=fail_closed`，
-> reason 类似 `AgentMoss security service unavailable: ...`），这不是正常的
-> 安全判定结果，不能用于验收。
+> `/api/v1/health` 仍返回 200，但 `moss_status` 为 `unreachable`、`moss_version`
+> 为 `N/A`；`/api/v1/analyze` 会按 **fail-closed** 返回 `Deny`（HTTP 200，
+> `risk_type=service_unavailable`，`source` 仍为 `agent_moss`，reason 类似
+> `AgentMoss security service unavailable: ...`），这不是正常的安全判定结果，
+> 不能用于验收。
 
 安装 AgentGate：
 
@@ -221,7 +222,7 @@ app = create_app()
 | `analysis_duration_ms` | float | 本次分析耗时（毫秒） |
 | `violation_graph` | object/null | 组合式拦截时的结构化攻击链图 `{nodes, edges}` |
 | `collected_context` | object/null | AgentGate 采集的系统上下文 |
-| `source` | string | 结果来源：`agent_moss` / `cache` / `fail_closed` |
+| `source` | string | 结果来源：`agent_moss` / `cache`。AgentMoss 不可用时的 fail-closed Deny 也标为 `agent_moss`，用 `risk_type=service_unavailable` / `analysis_timeout` 区分 |
 
 `GET /api/v1/sessions/{session_id}/traces` 的轨迹字段名为 `tool_calls`（与 TS 版一致，旧字段 `traces` 已移除）。
 
