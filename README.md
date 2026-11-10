@@ -167,17 +167,19 @@ app = create_app()
 
 #### POST /api/v1/analyze
 
-必填字段：`agent_type`、`session_id`、`tool_name`、`command`。
+必填字段：`agent_type`、`session_id`，以及 `tool_name` + `command` **或** `a_next`（二选一；`a_next` 存在时从 `action_type`/`action_detail` 兜底）。
 
-可选字段：`agent_version`、`cwd`、`description`、`user_prompt`、
-`prompt_history`、`action_history`、`metadata`。
+可选字段：`agent_version`、`cwd`、`description`、`user_prompt`、`instance_id`、
+`a_next`、`prompt_history`、`action_history`、`session_history`、`metadata`。
 
 嵌套字段：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
+| `a_next` | object | `{action_type, action_detail, called_at?}`；只发这个字段时 `tool_name`/`command` 从它兜底 |
 | `action_history[]` | array | `[{action_type, action_detail, output, called_at}]`。`output` 是工具返回内容；对 `ask_user_question` 是用户回答，供 L2 授权规则判断。`called_at` 是动作时间（ISO 8601），供授权 300s 时效窗使用 |
 | `prompt_history[]` | array | `[{text, actions: [ActionHistoryItem]}]`，按“提示词 → 该提示触发的动作”组织；`actions[]` 字段同 `action_history[]` |
+| `session_history[]` | array | `[{session_id, action_history: [...]}]`；调用方显式提供时优先使用，否则从本地 SQLite 组装 |
 | `metadata` | object | 可选扩展；`hostname` 用于生成 agent 标识，`os_type` 用于覆盖 Agent 侧平台检测 |
 
 `action_history` **未提供（不传或 null）** 时，AgentGate 会根据 `session_id` 从本地 SQLite 自动补齐；显式传 `[]` 表示使用空历史，不会自动补齐。
@@ -194,12 +196,15 @@ app = create_app()
 | `policy` | string | Allow 时生成的最小策略 |
 | `confidence` | int | 置信度 0–100 |
 | `analysis_duration_ms` | float | 本次分析耗时（毫秒） |
+| `violation_graph` | object/null | 组合式拦截时的结构化攻击链图 `{nodes, edges}` |
 | `collected_context` | object/null | AgentGate 采集的系统上下文 |
 | `source` | string | 结果来源：`agent_moss` / `cache` / `fail_closed` |
 
+`GET /api/v1/sessions/{session_id}/traces` 的轨迹字段名为 `tool_calls`（与 TS 版一致，旧字段 `traces` 已移除）。
+
 #### GET /api/v1/health
 
-公开端点，无需鉴权。响应字段：`status`、`version`、`timestamp`、`instance`。
+公开端点，无需鉴权。响应字段：`status`（`healthy`）、`version`、`timestamp`、`instance`、`moss_version`、`moss_status`。
 
 ## 鉴权与安全加固
 
@@ -238,12 +243,11 @@ AGENT_GATE_MOSS_TOKEN
 > ~/.config/agentmoss/auth_token
 ```
 
-> **root/systemd 注意（常见 401）**：AgentMoss 以 root 运行时，如果没有设置
-> `AGENT_MOSS_DATA_DIR`，token 可能被写到 `/home/<某普通用户>/.config/agentmoss/auth_token`
-> （AgentMoss 会优先识别真实用户目录），而 AgentGate 以 root 运行时默认去
-> `/root/.config/agentmoss/auth_token` 找，两边路径不一致就会 401。
-> 建议给 AgentMoss 和 AgentGate 显式设置**同一个** `AGENT_MOSS_DATA_DIR`
-> （例如 `/var/lib/agentmoss`），或直接设置 `AGENT_GATE_MOSS_TOKEN`。
+> **root/systemd 注意**：AgentMoss（sudo/systemd/直接运行）和 AgentGate 在 root
+> 下都把数据目录固定为 `/root/.config/agentmoss`，两边默认查找路径一致，不再按
+> `SUDO_USER` 猜测。若 AgentGate 以**非 root** 用户运行，则读不到 root 家目录
+> 下 0600 的 token，必须显式配置 `AGENT_GATE_MOSS_TOKEN` /
+> `AGENT_MOSS_AUTH_TOKEN_FILE`，或给两边设置同一个可读的 `AGENT_MOSS_DATA_DIR`。
 
 若 AgentGate 与 AgentMoss 由不同系统用户启动（例如 systemd 的
 `User=agent_gate`），AgentGate 读不到 AgentMoss 用户目录下的 0600 token，

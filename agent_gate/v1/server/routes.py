@@ -111,10 +111,15 @@ def _maybe_trigger_review(moss_client, agent_id: str) -> None:
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint."""
+async def health_check(moss_client=Depends(get_moss_client)):
+    """Health check endpoint（网关状态 + 版本 + 身后 AgentMoss 状态）。"""
+    moss = await moss_client.health()
     # 归属标识由启动方注入：同机多套 AgentGate 时供探测端区分是谁起的服务。
-    return HealthResponse(instance=os.getenv("AGENT_GATE_INSTANCE", ""))
+    return HealthResponse(
+        instance=os.getenv("AGENT_GATE_INSTANCE", ""),
+        moss_version=moss["moss_version"],
+        moss_status=moss["moss_status"],
+    )
 
 
 @router.post("/analyze", response_model=AgentGateResponse)
@@ -134,6 +139,11 @@ async def analyze(
     and returns the security decision.
     """
     start = time.monotonic()
+    # 只发 a_next（Python API 格式）的调用方，tool_name/command 从
+    # action_type/action_detail 兜底；两者都有时以顶层字段为准。
+    _a_next_in = input_data.a_next or {}
+    tool_name = input_data.tool_name or str(_a_next_in.get("action_type") or "unknown")
+    command = input_data.command or str(_a_next_in.get("action_detail") or "")
 
     # 0. 身份绑定：配了 AGENT_GATE_AGENT_TOKENS 时，自报的 agent_type 必须与
     #    凭证一致 —— 否则任何人拿自己的 token 声称是 opendesk，就能把脏数据
@@ -174,10 +184,10 @@ async def analyze(
 
     # 2. Check decision cache
     if cache:
-        cached = cache.get(input_data.session_id, input_data.cwd, input_data.command)
+        cached = cache.get(input_data.session_id, input_data.cwd, command)
         if cached:
             elapsed = (time.monotonic() - start) * 1000
-            logger.debug(f"Cache hit for {input_data.tool_name}:{input_data.command[:50]}")
+            logger.debug(f"Cache hit for {tool_name}:{command[:50]}")
             return AgentGateResponse(
                 decision=cached["decision"],
                 reason=cached.get("reason", "Cached decision"),
@@ -204,12 +214,12 @@ async def analyze(
 
     # 6. Write tool_call record
     tool_call_dict = {
-        "tool_name": input_data.tool_name,
-        "command": input_data.command,
+        "tool_name": tool_name,
+        "command": command,
         "description": input_data.description,
         "cwd": input_data.cwd,
-        "action_type": input_data.tool_name,
-        "action_detail": input_data.command or input_data.description,
+        "action_type": tool_name,
+        "action_detail": command or input_data.description,
     }
     tool_call_id = repo.insert_tool_call(
         session_id=input_data.session_id,
@@ -227,11 +237,11 @@ async def analyze(
 
     # 8. Update cache (Allow only)
     if cache:
-        cache.set(input_data.session_id, input_data.cwd, input_data.command, moss_result)
+        cache.set(input_data.session_id, input_data.cwd, command, moss_result)
 
     elapsed = (time.monotonic() - start) * 1000
     logger.info(
-        f"Analysis complete: {input_data.tool_name} → {moss_result.get('decision')} "
+        f"Analysis complete: {tool_name} → {moss_result.get('decision')} "
         f"({elapsed:.1f}ms total)"
     )
 
@@ -240,8 +250,8 @@ async def analyze(
         "type": "analyze_complete",
         "agent_type": input_data.agent_type,
         "session_id": input_data.session_id,
-        "tool_name": input_data.tool_name,
-        "command": input_data.command,
+        "tool_name": tool_name,
+        "command": command,
         "decision": moss_result.get("decision", "Deny"),
         "risk_level": moss_result.get("risk_level", ""),
         "analysis_duration_ms": elapsed,
@@ -261,6 +271,7 @@ async def analyze(
         policy=moss_result.get("policy", ""),
         confidence=moss_result.get("confidence", 0),
         analysis_duration_ms=elapsed,
+        violation_graph=moss_result.get("violation_graph"),
         collected_context=context,
         source="agent_moss",
     )
@@ -312,7 +323,7 @@ async def get_session_traces(
         user_prompt=session.get("user_prompt", ""),
         created_at=str(session.get("created_at", "")),
         tool_call_count=session.get("tool_call_count", 0),
-        traces=traces,
+        tool_calls=traces,
     )
 
 

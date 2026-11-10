@@ -17,6 +17,7 @@ from agent_gate.v1.multi_session import (
 )
 from agent_gate.v1.server.models import AgentGateInput, SystemContext
 from agent_gate.v1.storage.repository import Repository
+from agent_gate.v1.instance_id import get_instance_id
 
 
 class Normalizer:
@@ -56,7 +57,9 @@ class Normalizer:
         # 开关默认开（AGENT_GATE_MULTI_SESSION，见 multi_session.py）；显式设 0
         # 时跳过，省掉跨会话查询开销。
         session_history: list[dict] = []
-        if multi_session_enabled() and self._repo and input_data.session_id:
+        if input_data.session_history is not None:
+            session_history = [dict(x) for x in input_data.session_history if isinstance(x, dict)]
+        elif multi_session_enabled() and self._repo and input_data.session_id:
             try:
                 # 注意：不按 agent 过滤（保守方向）——跨会话组合链的检测
                 # 应覆盖全部历史 session，而非仅本 agent；agent_id 在 Repository
@@ -109,7 +112,8 @@ class Normalizer:
             "ast_search": "grep",
             "browser": "web_fetch",
         }
-        action_type = _TOOL_TO_ACTION.get(input_data.tool_name, input_data.tool_name)
+        _raw_tool = input_data.tool_name or str((input_data.a_next or {}).get("action_type") or "unknown")
+        action_type = _TOOL_TO_ACTION.get(_raw_tool, _raw_tool)
 
         # Prefer Agent-provided history, fallback to DB
         action_history = (
@@ -158,10 +162,15 @@ class Normalizer:
         # called_at：当前动作的发生时刻。AgentMoss 的 L2 授权规则用它和历史里
         # ask_user_question 的 called_at 比较，判断「用户刚才的确认是否仍在
         # 时效窗内」（默认 300s）。缺了它时效窗整条失效，只剩「最近 5 条」兜底。
+        _a_next = input_data.a_next or {}
         current_action = {
             "action_type": action_type,
-            "action_detail": input_data.command or input_data.description,
-            "called_at": datetime.datetime.now().isoformat(),
+            "action_detail": (
+                input_data.command
+                or str(_a_next.get("action_detail") or "")
+                or input_data.description
+            ),
+            "called_at": str(_a_next.get("called_at") or "") or datetime.datetime.now().isoformat(),
         }
 
         # Convert prompt_history turns to dicts (interleaved prompt + actions)
@@ -196,6 +205,9 @@ class Normalizer:
 
         return {
             "session_id": input_data.session_id,
+            # 安装级实例 ID：展示层脱敏按它判断「同实例不隐藏」。
+            # 调用方没带时用网关自己的持久化实例 ID。
+            "instance_id": input_data.instance_id or get_instance_id(),
             "prompt_session": input_data.user_prompt,
             "prompt_history": prompt_history_list,
             "a_next": current_action,

@@ -41,7 +41,7 @@ def test_table_cells_are_escaped():
     script = _script_block()
     assert "escapeHtml(r.agent_type" in script, "agent_type 未转义"
     assert "escapeHtml(r.tool_name" in script, "tool_name 未转义"
-    assert "escapeHtml((r.session_id" in script, "session_id 未转义"
+    assert "escapeHtml(r.session_id" in script, "session_id 未转义"
     assert "escapeHtml(r.command" in script, "command 未转义"
 
 

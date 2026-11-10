@@ -312,7 +312,18 @@ tr:hover { background:#F5F5F7; }
    文字会糊成一团（见 drawTimeline 注释）。 */
 .chart-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:14px; }
 .empty { text-align:center; color:var(--muted); padding:40px; }
+.ag-storage-banner { display:none; align-items:center; justify-content:space-between; gap:12px; margin:12px 24px 0; padding:10px 14px; border:1px solid rgba(255,149,0,.35); background:rgba(255,204,0,.14); border-radius:8px; font-size:12px; }
+.ag-storage-banner.show { display:flex; }
+.ag-sb-text { color:var(--text); }
+.ag-sb-text b { color:var(--orange); }
+.ag-sb-actions { display:flex; align-items:center; gap:8px; flex:none; }
+.ag-sb-status { font-size:11px; color:var(--muted); }
+.ag-sb-btn { padding:5px 14px; border-radius:6px; border:1px solid var(--orange); background:var(--orange); color:#fff; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
+.ag-sb-btn:hover { background:#e08600; border-color:#e08600; }
+.ag-sb-btn:disabled { opacity:.5; cursor:default; }
 .command-cell { max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:'SF Mono',Menlo,monospace; font-size:12px; }
+.session-cell { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--muted); }
+.reason-cell { max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--muted); }
 .ag-pagination { display:flex; align-items:center; justify-content:center; gap:8px; padding:10px 14px; font-size:12px; color:var(--muted); background:#FAFAFA; border-top:1px solid var(--border); }
 .ag-pagination button { padding:4px 12px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--text); font-size:12px; cursor:pointer; }
 .ag-pagination button:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
@@ -391,6 +402,14 @@ table.copy-mode .col-check { display:table-cell; }
   </div>
 </div>
 
+<div class="ag-storage-banner" id="storage-banner">
+  <span class="ag-sb-text" id="storage-banner-text"></span>
+  <span class="ag-sb-actions">
+    <span class="ag-sb-status" id="storage-banner-status"></span>
+    <button class="ag-sb-btn" id="storage-clear-btn">清理历史记录</button>
+  </span>
+</div>
+
 <!-- Tabs -->
 <div class="tabs">
   <div class="tab active" data-tab="recent">Recent Calls</div>
@@ -418,7 +437,7 @@ table.copy-mode .col-check { display:table-cell; }
       <table id="recent-calls"><thead><tr>
         <th class="col-check"></th>
         <th>Time</th><th>Agent</th><th>Session</th><th>Tool</th><th>Command</th>
-        <th>Decision</th><th>Risk</th><th>Latency</th><th>Action</th>
+        <th>Decision</th><th>Risk</th><th>Latency</th><th>Reason</th><th>Action</th>
       </tr></thead><tbody id="recent-table"></tbody></table>
     </div>
     <div id="ag-pagination" class="ag-pagination"></div>
@@ -439,7 +458,7 @@ table.copy-mode .col-check { display:table-cell; }
   </div>
 </div>
 
-<div class="footer">AgentGate V1 · Data refreshes automatically</div>
+<div class="footer" id="footer">Loading versions...</div>
 
 <div class="ag-modal" id="chain-modal">
   <div class="ag-modal-backdrop" id="chain-modal-backdrop"></div>
@@ -500,6 +519,68 @@ function badge(d, cls) {
   return `<span class="badge ${map[d]||''}">${escapeHtml(d)}</span>`;
 }
 
+// ==================== 存储超限横幅 + 清理 ====================
+let _storageVisible = false;
+function _fmtMB(n){ return (n / 1048576).toFixed(1); }
+function _getTotalMB(stats){ return _fmtMB((stats.dbBytes || 0) + (stats.jsonBytes || 0)); }
+function _showStorageBanner(oversize, text){
+  _storageVisible = !!oversize && !!text;
+  const el = document.getElementById('storage-banner');
+  if (el) el.classList.toggle('show', _storageVisible);
+  if (text) _setText('storage-banner-text', text);
+}
+function _setStorageBusy(busy){
+  const btn = document.getElementById('storage-clear-btn');
+  if (btn) btn.disabled = busy;
+  _setText('storage-banner-status', busy ? '清理中…' : '');
+}
+async function loadStorageStats(){
+  try {
+    const r = await fetch(BASE+'/api/v1/storage_stats');
+    const st = await r.json();
+    if (!st || typeof st !== 'object' || !st.oversize) { _showStorageBanner(false); return; }
+    const s = st.stats || {};
+    const cnt = typeof s.toolCalls === 'number' ? s.toolCalls : '?';
+    const thr = typeof st.thresholdMB === 'number' ? st.thresholdMB + ' MB' : '?';
+    _showStorageBanner(true,
+      '本地存储已超过阈值（' + thr + '）：当前占用 ' + _getTotalMB(s) + ' MB，共 ' + cnt +
+      ' 条历史记录。建议清理历史记录，释放空间。');
+  } catch (e) { _showStorageBanner(false); console.error('[AgentGate] storage stats error:', e); }
+}
+(function bindStorageClear(){
+  const btn = document.getElementById('storage-clear-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (!window.confirm('确定要清空全部历史调用记录吗？此操作不可恢复。')) return;
+    _setStorageBusy(true);
+    try {
+      const r = await fetch(BASE+'/api/v1/tool_calls', { method: 'DELETE' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      _setText('storage-banner-status', '清理完成，已删除 ' + (d && d.deleted != null ? d.deleted : 0) + ' 条记录');
+      _showStorageBanner(false);
+      refresh();
+    } catch (e) {
+      _setText('storage-banner-status', '清理失败：' + String(e.message || e));
+    } finally { _setStorageBusy(false); }
+  });
+})();
+
+// ==================== 页脚版本（从 health 动态读取）====================
+(async function loadFooter(){
+  try {
+    const h = await fetch(BASE+'/api/v1/health').then(r=>r.json());
+    const gateV = h.version || 'N/A';
+    const mossV = h.moss_version || 'N/A';
+    const mossS = h.moss_status || 'unknown';
+    let mossLabel = mossV === 'N/A' ? 'AgentMoss N/A (unreachable)' : 'AgentMoss v' + mossV;
+    if (mossS === 'healthy') mossLabel += ' ✓';
+    _setText('footer', 'AgentGate v' + gateV + ' + ' + mossLabel + ' (Python)');
+  } catch (e) {
+    _setText('footer', 'AgentGate N/A + AgentMoss N/A (Python)');
+  }
+})();
+
 async function refresh() {
   try {
     const offset = (_currentPage - 1) * _pageSize;
@@ -516,6 +597,7 @@ async function refresh() {
     updatePagination();
     if (activeTab === 'agents') updateAgents(stats);
     if (activeTab === 'timeline') updateTimeline();
+    loadStorageStats();
   } catch(e) { console.error(e); }
 }
 
@@ -565,7 +647,7 @@ function updateRecent(data, force) {
   _lastRecentKey = key;
   _currentPageRows = data.slice();           // 复制时读这份原始数据，不读 DOM
 
-  const cols = _copyMode ? 10 : 9;
+  const cols = _copyMode ? 11 : 10;
   if (!data.length) {
     tb.innerHTML = `<tr><td colspan="${cols}" class="empty">No tool calls yet</td></tr>`;
     updateCopyBar();
@@ -576,12 +658,13 @@ function updateRecent(data, force) {
       ${_copyMode ? `<td class="col-check"><input type="checkbox" class="row-check" data-id="${r.id}"${_selectedIds.has(Number(r.id)) ? ' checked' : ''}></td>` : ''}
       <td style="white-space:nowrap;font-size:12px;color:var(--muted)">${fmtTime(r.called_at)}</td>
       <td>${escapeHtml(r.agent_type||'-')}</td>
-      <td style="font-size:12px;color:var(--muted)">${escapeHtml((r.session_id||'').substring(0,12))}</td>
+      <td class="session-cell" title="${escapeHtml(r.session_id||'')}">${escapeHtml(r.session_id||'-')}</td>
       <td>${escapeHtml(r.tool_name)}</td>
       <td class="command-cell" title="${escapeHtml(r.command||'')}">${escapeHtml(r.command||'')}</td>
       <td>${badge(r.decision)}</td>
       <td>${r.risk_level ? badge(r.risk_level) : '-'}</td>
       <td style="font-size:12px;color:var(--muted)">${r.analysis_duration_ms||0}ms</td>
+      <td class="reason-cell" title="${escapeHtml(r.reason||'')}">${escapeHtml(r.reason||'-')}</td>
       <td>${parseChainGraphFromRow(r) ? `<button class="ag-chain-btn" data-chain="${idx}">查看攻击链</button>` : ''}</td>
     </tr>
   `).join('');

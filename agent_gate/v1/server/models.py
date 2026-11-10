@@ -104,15 +104,28 @@ class PromptTurn(BaseModel):
 class AgentGateInput(BaseModel):
     """Input sent by the Agent to AgentGate for security analysis.
 
-    Minimal required fields: agent_type, session_id, tool_name, command
+    Minimal required fields: agent_type, session_id, tool_name（+ command 或 a_next.action_detail）
     action_history is optional - AgentGate auto-fills from SQLite.
+
+    与 TS 版 ``AgentGateInputSchema`` 对齐：``command`` 可选（只发 ``a_next`` 的
+    调用方也能用）；``a_next`` / ``session_history`` 两个字段此前 Python 侧缺失，
+    调用方传了会被静默丢弃。
     """
     agent_type: str = Field(..., description="Agent type: opendes / claude-code / generic")
     agent_version: str = Field(default="", description="Agent version string")
     session_id: str = Field(..., description="Unique session identifier")
+    # 安装级实例 ID：仅用于 AgentMoss 展示层脱敏（同实例多会话不隐藏命令原文），
+    # 不参与判定。缺省由网关生成持久化 ID（~/.config/agentgate/instance_id）。
+    instance_id: str = Field(default="", description="Agent installation instance id (display-layer redaction only)")
     cwd: str = Field(default="", description="Current working directory")
-    tool_name: str = Field(..., description="Tool being called: bash / file_write / edit")
-    command: str = Field(..., description="The command or action being executed")
+    tool_name: str = Field(default="", description="Tool being called: bash / file_write / edit（缺省时取 a_next.action_type）")
+    command: str = Field(default="", description="The command or action being executed（缺省时取 a_next.action_detail）")
+    # Python API 格式的「当前动作」（与 TS 同构）：调用方只发这个字段时，
+    # tool_name/command 从 action_type/action_detail 兜底。
+    a_next: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Next action (Python API format): {action_type, action_detail, called_at}",
+    )
     description: str = Field(default="", description="Human-readable description of the action")
     user_prompt: str = Field(default="", description="Original user task description")
     prompt_history: list[PromptTurn] = Field(
@@ -122,6 +135,11 @@ class AgentGateInput(BaseModel):
     action_history: Optional[list[ActionHistoryItem]] = Field(
         default=None,
         description="Optional history of previous actions; AgentGate auto-fills from SQLite if None"
+    )
+    # 调用方显式提供的跨会话历史（与 TS 同构）；缺省时由网关从本地存储组装。
+    session_history: Optional[list[dict[str, Any]]] = Field(
+        default=None,
+        description="Optional multi-session history: [{session_id, action_history: [...]}]; auto-filled from storage if None",
     )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Extra metadata")
 
@@ -136,6 +154,12 @@ class AgentGateResponse(BaseModel):
     policy: str = Field(default="")
     confidence: int = Field(default=0, description="Confidence score 0-100")
     analysis_duration_ms: float = Field(default=0.0)
+    # 结构化攻击链图（组合式拦截时非空；前端弹窗画图用）。与 TS 版对齐：
+    # 此前 Python 侧响应模型没有这个字段，调用方拿不到图（只能事后查库里的
+    # moss_response）。
+    violation_graph: Optional[dict[str, Any]] = Field(
+        default=None, description="Structured attack-chain graph (present when a combo chain is blocked)"
+    )
     collected_context: Optional[SystemContext] = Field(
         default=None, description="Collected system context (if requested)"
     )
@@ -167,7 +191,11 @@ class ToolCallRecord(BaseModel):
 
 
 class SessionTraceResponse(BaseModel):
-    """Response for GET /api/v1/sessions/{session_id}/traces."""
+    """Response for GET /api/v1/sessions/{session_id}/traces.
+
+    ``tool_calls`` 与 TS 版同名字段（此前叫 ``traces``，同一端点两种结构）。
+    其余会话元信息两端一致。
+    """
     session_id: str
     agent_type: str = ""
     agent_version: str = ""
@@ -176,16 +204,20 @@ class SessionTraceResponse(BaseModel):
     user_prompt: str = ""
     created_at: str = ""
     tool_call_count: int = 0
-    traces: list[ToolCallRecord] = Field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
-    status: str = "ok"
+    """与 TS 版 health 同构：status=healthy、包版本、身后 AgentMoss 状态。"""
+    status: str = "healthy"
     version: str = __version__
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     # 归属标识：由启动方注入 AGENT_GATE_INSTANCE（同机多套 AgentGate 时区分是谁起的），
     # 未注入时为空串。与 agent-moss 的 AGENT_MOSS_INSTANCE 同一套约定。
     instance: str = ""
+    # 身后 AgentMoss 的版本与健康状态（TS 版一直有，Python 侧此前没有）。
+    moss_version: str = ""
+    moss_status: str = ""
 
 
 class ErrorResponse(BaseModel):
