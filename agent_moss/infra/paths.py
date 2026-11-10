@@ -109,17 +109,18 @@ def _list_owner_homes() -> list[Path]:
 
 
 def _resolve_owner_home() -> Path | None:
-    """root 运行时探测"真实用户"的家目录。
+    """root 运行时探测"真实用户"的家目录（兼容保留，**不再用于数据目录**）。
 
-    依赖顺序：SUDO_USER（sudo 发起者）> LOGNAME/USER（登录用户）>
+    ⚠️ 2026-11 起 `get_data_root()` 不再调用本函数：root 下数据（含 token）
+    固定落 `/root/.config/agentmoss`。原因是猜测会把 token（0600）暴露给
+    与 AgentMoss 无关的普通用户，且多用户机器上「第一个 UID>=1000」与调用方
+    毫无关系 —— AgentGate 按同一规则读 /root 时还会因路径不一致导致 401。
+
+    依赖顺序（仅本函数内部使用）：SUDO_USER > LOGNAME/USER >
     /etc/passwd 中第一个 UID>=1000 的非系统用户。探测不到返回 None。
-    这样任何 `sudo systemctl start` 起的服务，即使 env 未设 AGENT_MOSS_DATA_DIR，
-    数据也落到真实用户目录而非 /root。
 
-    ⚠️ 这个函数**会猜**（多用户机器取第一个），只适合"数据落盘"这类
-    猜错也只影响自己写哪的场景。安全边界（如 log_roots 白名单）必须用
-    `_resolve_explicit_owner_home` + `_list_owner_homes` 做分级判定，
-    不能直接用它 —— 猜错等于把写权限授予错误用户的目录。
+    安全边界（如 log_roots 白名单）必须用 `_resolve_explicit_owner_home` +
+    `_list_owner_homes` 做分级判定，不能直接用它。
     """
     explicit = _resolve_explicit_owner_home()
     if explicit is not None:
@@ -144,16 +145,19 @@ def get_data_root() -> Path:
     """获取数据根目录。
 
     优先级：env AGENT_MOSS_DATA_DIR > Path.home()/.config/agentmoss。
-    但 root 运行时（任何 sudo systemctl 起的服务）自动改指向真实用户目录，
-    让 config / runtime / token 落到当前用户而非 /root。
+
+    root（含 sudo systemctl）启动时数据就落在 /root/.config/agentmoss ——
+    **不再**按 SUDO_USER / LOGNAME / /etc/passwd 猜测"真实用户"：
+    - 猜错会把 token（0600）暴露给一个与 AgentMoss 无关的普通用户；
+    - 多用户机器上"第一个 UID>=1000"与调用方毫无关系；
+    - 只有 SUDO_USER 是"sudo 代启"的可靠证据，systemd 启动时它也不存在。
+
+    非 root 用户要访问 root 服务的数据（含 token）时显式传入：
+    AGENT_MOSS_AUTH_TOKEN / AGENT_MOSS_AUTH_TOKEN_FILE / AGENT_MOSS_DATA_DIR。
     """
     env_path = os.getenv(ENV_DATA_ROOT)
     if env_path:
         return Path(env_path)
-    if _is_root():
-        owner_home = _resolve_owner_home()
-        if owner_home:
-            return owner_home / ".config" / "agentmoss"
     return DEFAULT_DATA_ROOT
 
 
