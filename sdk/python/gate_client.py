@@ -64,6 +64,7 @@ class GateClient:
         description: str = "",
         user_prompt: str = "",
         action_history: Optional[list[dict]] = None,
+        prompt_history: Optional[list[dict]] = None,
         metadata: Optional[dict] = None,
     ) -> dict:
         """Send a tool-call for security analysis.
@@ -85,6 +86,8 @@ class GateClient:
         }
         if action_history is not None:
             payload["action_history"] = action_history
+        if prompt_history is not None:
+            payload["prompt_history"] = prompt_history
 
         response = self._client.post(
             f"{self._base_url}/api/v1/analyze",

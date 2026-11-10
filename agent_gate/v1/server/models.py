@@ -12,6 +12,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from ... import __version__
+
 
 # --- Sub-models for collected system context ---
 
@@ -179,7 +181,7 @@ class SessionTraceResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.2.2"
+    version: str = __version__
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     # 归属标识：由启动方注入 AGENT_GATE_INSTANCE（同机多套 AgentGate 时区分是谁起的），
     # 未注入时为空串。与 agent-moss 的 AGENT_MOSS_INSTANCE 同一套约定。

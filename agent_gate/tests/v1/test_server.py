@@ -29,6 +29,7 @@ from fastapi.testclient import TestClient
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from agent_gate import __version__ as agent_gate_version
 from agent_gate.v1.config import Config, reload_config, get_config
 from agent_gate.v1.server.models import (
     AgentGateInput,
@@ -104,7 +105,7 @@ class TestHealthCheck:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
-        assert data["version"] == "0.2.2"
+        assert data["version"] == agent_gate_version
         assert "timestamp" in data
 
 

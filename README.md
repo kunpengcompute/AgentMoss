@@ -144,12 +144,41 @@ app = create_app()
 | GET | `/api/v1/storage_stats` | 存储用量与条数 |
 | GET | `/dashboard/` | 内置看板 |
 
-请求字段（最小集）：`agent_type`、`session_id`、`tool_name`、`command`。
+#### POST /api/v1/analyze
+
+必填字段：`agent_type`、`session_id`、`tool_name`、`command`。
 
 可选字段：`agent_version`、`cwd`、`description`、`user_prompt`、
 `prompt_history`、`action_history`、`metadata`。
 
-`action_history` 为空时，AgentGate 会根据 `session_id` 从本地 SQLite 自动补齐。
+嵌套字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `action_history[]` | array | `[{action_type, action_detail, output, called_at}]`。`output` 是工具返回内容；对 `ask_user_question` 是用户回答，供 L2 授权规则判断。`called_at` 是动作时间（ISO 8601），供授权 300s 时效窗使用 |
+| `prompt_history[]` | array | `[{text, actions: [ActionHistoryItem]}]`，按“提示词 → 该提示触发的动作”组织；`actions[]` 字段同 `action_history[]` |
+| `metadata` | object | 可选扩展；`hostname` 用于生成 agent 标识，`os_type` 用于覆盖 Agent 侧平台检测 |
+
+`action_history` **未提供（不传或 null）** 时，AgentGate 会根据 `session_id` 从本地 SQLite 自动补齐；显式传 `[]` 表示使用空历史，不会自动补齐。
+
+响应字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `decision` | string | `Allow` / `Deny` |
+| `reason` | string | 决策原因 |
+| `risk_level` | string | `low` / `medium` / `high` / `critical` |
+| `risk_type` | string | 风险类别 |
+| `violated_layers` | array | 命中层，如 `["L1.1", "L2.2"]` |
+| `policy` | string | Allow 时生成的最小策略 |
+| `confidence` | int | 置信度 0–100 |
+| `analysis_duration_ms` | float | 本次分析耗时（毫秒） |
+| `collected_context` | object/null | AgentGate 采集的系统上下文 |
+| `source` | string | 结果来源：`agent_moss` / `cache` / `fail_closed` |
+
+#### GET /api/v1/health
+
+公开端点，无需鉴权。响应字段：`status`、`version`、`timestamp`、`instance`。
 
 ## 鉴权与安全加固
 

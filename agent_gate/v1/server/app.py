@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from ... import __version__
 from . import security as sp
 from .dashboard import dashboard_router, router as dash_api_router
 from .middleware import RequestLoggingMiddleware
@@ -121,7 +122,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="AgentGate",
         description="AI Agent Data Collection & Security Analysis Gateway",
-        version="0.2.2",
+        version=__version__,
     )
 
     # Middleware
