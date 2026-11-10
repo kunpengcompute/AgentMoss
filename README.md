@@ -29,6 +29,29 @@ AgentGate 负责：
 
 要求 Python >= 3.10。
 
+**前置依赖：AgentMoss 必须单独安装并启动。** AgentGate 只负责采集上下文和转发，
+真实的 Allow/Deny 判定由 AgentMoss 完成：
+
+```bash
+pip install agent-moss
+agent-moss --version
+
+# 启动 AgentMoss 后，默认在 127.0.0.1:9090 提供 /api/v1/analyze
+agent-moss server --host 127.0.0.1 --port 9090
+```
+
+AgentMoss 默认开启鉴权（`AGENT_MOSS_AUTH_MODE=auto`），首次启动会在
+`~/.config/agentmoss/auth_token` 生成 token。AgentGate 必须能读到该 token，
+否则会返回 `Deny` + `AgentMoss HTTP 401`（见下文「AgentGate 调 AgentMoss 的鉴权」）。
+
+> 如果只启动 AgentGate、没有安装/启动 AgentMoss：AgentGate 本身可以启动，
+> `/api/v1/health` 仍返回 200，但 `moss_status` 为 `unreachable`；
+> `/api/v1/analyze` 会按 **fail-closed** 返回 `Deny`（`source=fail_closed`，
+> reason 类似 `AgentMoss security service unavailable: ...`），这不是正常的
+> 安全判定结果，不能用于验收。
+
+安装 AgentGate：
+
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
@@ -42,7 +65,7 @@ pip install -e .
 
 ## 快速开始
 
-1. 启动 AgentMoss，并等待就绪：
+1. 先安装并启动 AgentMoss（见「安装」），等待就绪：
 
 ```bash
 agent-moss server --host 127.0.0.1 --port 9090
