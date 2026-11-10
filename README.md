@@ -238,6 +238,13 @@ AGENT_GATE_MOSS_TOKEN
 > ~/.config/agentmoss/auth_token
 ```
 
+> **root/systemd 注意（常见 401）**：AgentMoss 以 root 运行时，如果没有设置
+> `AGENT_MOSS_DATA_DIR`，token 可能被写到 `/home/<某普通用户>/.config/agentmoss/auth_token`
+> （AgentMoss 会优先识别真实用户目录），而 AgentGate 以 root 运行时默认去
+> `/root/.config/agentmoss/auth_token` 找，两边路径不一致就会 401。
+> 建议给 AgentMoss 和 AgentGate 显式设置**同一个** `AGENT_MOSS_DATA_DIR`
+> （例如 `/var/lib/agentmoss`），或直接设置 `AGENT_GATE_MOSS_TOKEN`。
+
 若 AgentGate 与 AgentMoss 由不同系统用户启动（例如 systemd 的
 `User=agent_gate`），AgentGate 读不到 AgentMoss 用户目录下的 0600 token，
 必须显式传入：
