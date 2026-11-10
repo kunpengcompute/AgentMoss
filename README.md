@@ -238,6 +238,18 @@ app = create_app()
 Authorization: Bearer <token>
 ```
 
+> **root/systemd 注意**：root 运行时如果没设置 `AGENT_MOSS_DATA_DIR`，token **不一定**在
+> `/root/.config/agentmoss/auth_token`。`get_data_root()` 会优先使用
+> `SUDO_USER` / `LOGNAME` / `USER` 指向的真实用户目录，其次使用 `/etc/passwd`
+> 中第一个普通用户的家目录，只有都找不到时才用 `/root`。多用户机器上路径不确定，
+> 建议给 AgentMoss（以及 AgentGate）显式设置同一个可写的 `AGENT_MOSS_DATA_DIR`，
+> 例如 `/var/lib/agentmoss`，token 固定落在 `/var/lib/agentmoss/auth_token`。
+>
+> 启动日志会打印实际路径：`安全策略: ... auth=on(/path/to/auth_token)`；
+> 若显示 `auth=off` 说明显式关闭了鉴权，`auth=on(explicit)` 说明用了
+> `AGENT_MOSS_AUTH_TOKEN*` 环境变量，`auth=on(no-token!)` 说明 token 生成失败
+> （通常是数据目录不可写），此时服务会以无鉴权方式继续运行，需要立即检查。
+
 读取 token 并直连 `/api/v1/analyze`：
 
 ```bash
