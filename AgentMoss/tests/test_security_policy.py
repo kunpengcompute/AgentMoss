@@ -137,6 +137,60 @@ def test_log_roots_and_path_within(tmp_path):
     assert sp.path_within("/tmp/agentmoss.log", sp.log_roots()) is True
 
 
+# ---------- root 下的默认家目录分级判定（2026-11） ----------
+# 0.17.0 的 log_roots 白名单默认取 Path.home()；systemd 以 root 跑时它是
+# /root，导致真实用户家目录下的 llm_log_path 被判越界（xiaoO hkl.log 无
+# [LLM_PROMPT]）。分级规则：显式 env > 单用户自动 > 多用户不猜。
+
+def test_default_home_non_root_unchanged(monkeypatch):
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: False)
+    assert sp._default_home() == Path.home()
+
+
+def test_default_home_root_explicit_env_wins(monkeypatch):
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: True)
+    monkeypatch.setattr(
+        paths, "_resolve_explicit_owner_home", lambda: Path("/home/alice")
+    )
+    monkeypatch.setattr(
+        paths, "_list_owner_homes", lambda: [Path("/home/alice"), Path("/home/bob")]
+    )
+    assert sp._default_home() == Path("/home/alice")
+
+
+def test_default_home_root_single_user_auto_detect(monkeypatch):
+    """单用户机器：唯一的普通用户就是真实用户，开箱即用。"""
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: True)
+    monkeypatch.setattr(paths, "_resolve_explicit_owner_home", lambda: None)
+    monkeypatch.setattr(paths, "_list_owner_homes", lambda: [Path("/home/alice")])
+    assert sp._default_home() == Path("/home/alice")
+
+
+def test_default_home_root_multi_user_does_not_guess(monkeypatch):
+    """多用户机器：不猜「第一个 UID>=1000」，保持 /root；靠显式配置授权。"""
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: True)
+    monkeypatch.setattr(paths, "_resolve_explicit_owner_home", lambda: None)
+    monkeypatch.setattr(
+        paths, "_list_owner_homes", lambda: [Path("/home/alice"), Path("/home/bob")]
+    )
+    assert sp._default_home() == Path.home()
+
+
+def test_log_roots_follows_single_user_home(monkeypatch):
+    """集成：单用户 + root 时，log_roots 默认包含真实用户家目录。"""
+    from agent_moss.infra import paths
+    monkeypatch.setattr(paths, "_is_root", lambda: True)
+    monkeypatch.setattr(paths, "_resolve_explicit_owner_home", lambda: None)
+    monkeypatch.setattr(paths, "_list_owner_homes", lambda: [Path("/home/alice")])
+    roots = [str(p) for p in sp.log_roots()]
+    assert "/home/alice" in roots
+    assert sp.path_within("/home/alice/gitcode/xiaoO/hkl.log", sp.log_roots()) is True
+
+
 def test_review_roots_default_cover_agent_gate():
     roots = [str(p) for p in sp.review_roots()]
     assert any("agent_gate" in r for r in roots)
@@ -155,7 +209,8 @@ def test_redact_chain_hides_other_sessions():
         ["victim-session", 0, "cat /home/victim/secret.csv", "2026-10-20T10:00:00"],
         ["mine", 1, "nmap 10.0.0.5", "2026-10-20T10:00:01"],
     ]
-    out = sp.redact_chain(chain, "mine")
+    # 签名是 (chain, current_instance_id, current_session_id)：实例为空时回退按 session 比较
+    out = sp.redact_chain(chain, "", "mine")
     assert out[0][0] == "<other-session>" and out[0][2] == "<已隐藏>"
     assert "secret" not in str(out)
     assert out[1] == chain[1]  # 自己会话原样
@@ -164,7 +219,7 @@ def test_redact_chain_hides_other_sessions():
 def test_redact_chain_can_be_disabled(monkeypatch):
     monkeypatch.setenv("AGENT_MOSS_CHAIN_DETAIL", "full")
     chain = [["victim", 0, "cat secret", "ts"]]
-    assert sp.redact_chain(chain, "mine") == chain
+    assert sp.redact_chain(chain, "", "mine") == chain
 
 
 # ==================== LLM 配置校验 ====================
@@ -533,6 +588,7 @@ def test_pool_of_classifies_paths():
     assert sp.pool_of("/api/v1/analyze") == "biz"
     assert sp.pool_of("/api/v1/review") == "review"
     assert sp.pool_of("/console/api/config") == "ops"
+    # 裁剪版已移除 brain，不再断言 /api/v1/brain/* 的池分类
     assert sp.pool_of("/api/v1/health") == "health"
     assert sp.pool_of("/anything-else") == "other"
 

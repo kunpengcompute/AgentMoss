@@ -24,12 +24,11 @@ def _moss_token_path() -> Path:
     root = os.getenv("AGENT_MOSS_DATA_DIR", "").strip()
     if root:
         return Path(root) / "auth_token"
-    home = Path.home()
-    # 尊重 sudo：systemd/sudo 起的服务，HOME 是 /root，但 token 在真实用户目录
-    sudo_user = os.getenv("SUDO_USER", "").strip()
-    if sudo_user and Path(f"/home/{sudo_user}").exists():
-        home = Path(f"/home/{sudo_user}")
-    return home / ".config" / "agentmoss" / "auth_token"
+    # root（sudo/systemd/直接启动）下 Path.home() 就是 /root —— 与 AgentMoss
+    # `get_data_root()` 完全一致：**不再**按 SUDO_USER 猜测真实用户目录。
+    # 非 root 服务要访问 root 上 AgentMoss 的 token 时，必须显式配置
+    # AGENT_GATE_MOSS_TOKEN / AGENT_MOSS_AUTH_TOKEN_FILE。
+    return Path.home() / ".config" / "agentmoss" / "auth_token"
 
 
 def resolve_moss_token(force: bool = False) -> str:
@@ -55,9 +54,16 @@ def resolve_moss_token(force: bool = False) -> str:
             except OSError:
                 tok = ""
     if not tok:
+        token_path = _moss_token_path()
         try:
-            tok = _moss_token_path().read_text(encoding="utf-8").strip()
+            tok = token_path.read_text(encoding="utf-8").strip()
         except OSError:
+            logger.warning(
+                "AgentMoss 鉴权 token 未找到（尝试路径: %s）；"
+                "跨用户/跨机部署请用 AGENT_GATE_MOSS_TOKEN 或 "
+                "AGENT_MOSS_AUTH_TOKEN_FILE 显式指定",
+                token_path,
+            )
             tok = ""
 
     _MOSS_TOKEN_CACHE = (tok, now + _MOSS_TOKEN_TTL)
@@ -80,10 +86,11 @@ class MossClient:
         cfg = get_config()
         moss_cfg = cfg.agent_moss
 
-        # 地址解析（显式参数 > 环境变量 > 配置文件 > 默认）：
+        # 地址解析（与 V3 CLI 的 _resolve_moss_url、TS 版 moss-client 同序）：
         #   显式参数 > AGENT_MOSS_URL > MOSS_URL > 配置文件 agent_moss.url > 默认
-        # server 子命令会把 --security-url 落到 AGENT_MOSS_URL；分离部署时
-        # 也可以直接设环境变量，避免静默连到默认的 127.0.0.1:9090。
+        # V1 的 server 子命令不走 _resolve_moss_url（它没有 --security-url），
+        # 所以这里必须自己读环境变量 —— 否则 V1 部署在分离机器上时，
+        # `AGENT_MOSS_URL=http://...` 会被静默忽略，一直连默认的 127.0.0.1:9090。
         resolved = base_url or os.environ.get("AGENT_MOSS_URL") or os.environ.get("MOSS_URL")
         self._base_url = (resolved or moss_cfg.get("url", "http://127.0.0.1:9090")).rstrip("/")
         # timeout 默认 100s：需覆盖 AgentMoss 总超时（90s）+ 余量，避免 AgentMoss
@@ -109,6 +116,25 @@ class MossClient:
             timeout=httpx.Timeout(self._timeout),
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
         )
+
+    async def health(self, timeout: float = 3.0) -> dict:
+        """探活 AgentMoss（供 /api/v1/health 汇总，与 TS 的 fetchMossHealth 同构）。
+
+        任何失败都不抛异常：网关自身健康与否不能因为身后服务没起来而 500。
+        """
+        try:
+            resp = await self._client.get(
+                f"{self._base_url}/api/v1/health", timeout=timeout,
+            )
+            if resp.status_code != 200:
+                return {"moss_version": "N/A", "moss_status": "error"}
+            data = resp.json()
+            return {
+                "moss_version": str(data.get("version") or "unknown"),
+                "moss_status": str(data.get("status") or "unknown"),
+            }
+        except Exception:  # noqa: BLE001 — 探活失败只回报状态
+            return {"moss_version": "N/A", "moss_status": "unreachable"}
 
     async def analyze(self, request: dict) -> dict:
         """Send analysis request to AgentMoss.
@@ -186,7 +212,8 @@ class MossClient:
     async def review(self, agent_id: str = "", db_path: str = "") -> None:
         """低频回顾：让 AgentMoss 从 AgentGate 本地存储直读全量 tool_calls。
 
-        行为约定：
+        与 TS 版 ``callAgentMossReview`` **一一对应**（此前只有 TS 实现，Python
+        侧缺失属双端不一致，2026-10 补齐）：
 
         - **fire-and-forget**：调用方用 ``asyncio.create_task`` 触发、不 await；
           失败只记日志，绝不影响实时判定路径；
@@ -195,7 +222,7 @@ class MossClient:
 
         Args:
             agent_id: 目标 agent 标识（决定 AgentMoss 状态库分桶）。
-            db_path: AgentGate 存储路径；空串直接跳过。
+            db_path: AgentGate 存储路径；空串直接跳过（与 TS 版一致）。
         """
         if not db_path:
             return

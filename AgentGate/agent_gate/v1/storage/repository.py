@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .db import Database, get_db
+from agent_gate.v1.instance_id import get_instance_id
 
 
 class Repository:
@@ -233,6 +234,9 @@ class Repository:
                 "session_id": row["session_id"],
                 "agent_id": agent_type_by_key.get(str(row.get("agent_key") or ""), ""),
                 "action_history": self.get_action_history(row["session_id"], per_session_limit),
+                # 本库所有会话都属于本安装实例：展示层脱敏按此 ID 判断「同实例不
+                # 隐藏」（对齐 TS buildSessionHistory 的 instance_id 注入）。
+                "instance_id": get_instance_id(),
             })
         return result
 
@@ -349,7 +353,7 @@ class Repository:
     def get_agents_list(self, agent_type: Optional[str] = None) -> list[dict]:
         """每个 agent 的会话数与调用数（`/api/v1/agents` 与看板 agents 面板）。
 
-        按调用数降序，最多 20 条。
+        与 TS 侧 `getAgentsList` 同构：按调用数降序，最多 20 条。
         """
         where = "WHERE a.agent_type = ?" if agent_type else ""
         params = (agent_type,) if agent_type else ()
@@ -403,7 +407,15 @@ class Repository:
         }
 
     def clear_tool_calls(self) -> int:
-        """删除全部 tool_call 并把会话计数归零（与 TS 的 clearToolCalls 一致）。"""
+        """删除全部 tool_call 并把会话计数归零（与 TS 的 clearToolCalls 一致）。
+
+        sqlite 本连接启用了外键约束（PRAGMA foreign_keys=ON），而
+        system_snapshots.tool_call_id → tool_calls(id) —— 直接删 tool_calls
+        会抛 FOREIGN KEY constraint failed（xiaoO 实测 DELETE /tool_calls
+        返回 500）。TS 侧 better-sqlite3 默认不启用外键所以没踩到。这里先清
+        引用表再删主表，顺序满足外键约束。
+        """
+        self._db.execute_write("DELETE FROM system_snapshots")
         cursor = self._db.execute_write("DELETE FROM tool_calls")
         deleted = cursor.rowcount or 0
         self._db.execute_write("UPDATE sessions SET tool_call_count = 0")

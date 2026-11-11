@@ -1,0 +1,2 @@
+# Local Git worktrees are separate checkouts, not component source.
+.worktrees/

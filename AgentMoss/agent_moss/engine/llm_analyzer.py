@@ -4,6 +4,7 @@
 轻量化实现：直接注入 skill 规则到 prompt，进行深度语义分析。
 """
 
+import hashlib
 import json
 import logging
 import time
@@ -11,7 +12,14 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 
-from ..infra.config import Config, get_log_path, get_llm_timeout
+from ..infra.config import (
+    Config,
+    get_llm_action_detail_max_chars,
+    get_llm_history_max_items,
+    get_llm_max_prompt_tokens,
+    get_llm_timeout,
+    get_log_path,
+)
 from ..infra.llm_client import call_llm
 from .script_analyzer import (
     ScriptAnalysisResult,
@@ -84,7 +92,12 @@ class LLMAnalyzer:
         # 0. LLM 结果缓存查找
         action_type = a_next.get("action_type", "")
         action_detail = a_next.get("action_detail", "")
-        cache_key = f"{action_type}:{action_detail}"
+        # cache_key 用动作详情的 sha256：超长 tool call（如写文件，detail 里带整个
+        # 文件内容）若直接用全文当 key，200 条缓存会占几十 MB 内存。
+        detail_digest = hashlib.sha256(
+            action_detail.encode("utf-8", "ignore")
+        ).hexdigest()
+        cache_key = f"{action_type}:{detail_digest}"
         cached = self._cache.get(cache_key)
         if cached is not None:
             logger.debug("LLM cache hit: %s", cache_key)
@@ -93,9 +106,6 @@ class LLMAnalyzer:
         # 1. 匹配相关 Skill
         matched_skills = self._skill_engine.match_skills(a_next, reason)
         skills_text = self._skill_engine.format_skills_for_prompt(matched_skills)
-
-        # 2. 格式化历史动作
-        history_text = self._format_action_history(action_history)
 
         # 2.5 格式化交错历史 prompt（供 LLM 判断意图一致性，避免"继续"覆盖初始意图）
         # 只喂 prompt 文本 + 各轮动作类型/详情（截断），与 action_history 互补但不重复。
@@ -113,19 +123,72 @@ class LLMAnalyzer:
             script_analysis = analyze_script_content(action_type, action_detail)
             script_analysis_text = format_script_analysis_for_prompt(script_analysis)
 
-        # 4. 生成安全判断 prompt
-        judge_prompt = get_security_judge_prompt(
-            prompt_session=prompt_session,
-            action_history=history_text,
-            prompt_history_text=prompt_history_text,
-            a_next=a_next,
-            reason=reason,
-            skills_text=skills_text,
-            hints_text=hints_text,
-            script_analysis_text=script_analysis_text,
-            skip_l3_hints=skip_l3_hints,
-            path_context=path_context,
-        )
+        # 4. 生成安全判断 prompt。
+        #
+        # 背景（2026-11）：客户的写文件类 tool call 会把整个文件内容放进
+        # action_detail，历史累积几十条后 prompt 能到几十万字符。这里分两级兜底：
+        #   ① 历史按配置截断（条数 + 单条长度）—— 默认就生效；
+        #   ② 若设了 AGENT_MOSS_LLM_MAX_PROMPT_TOKENS 且仍超预算，先把历史压到
+        #      最小，最后才截断当前动作详情（保头保尾，判定仍以命令/路径为主）。
+        max_items = get_llm_history_max_items()
+        max_chars = get_llm_action_detail_max_chars()
+        max_prompt_tokens = get_llm_max_prompt_tokens()
+        prompt_a_next = a_next
+
+        for _attempt in range(4):
+            history_text = self._format_action_history(
+                action_history, max_items, max_chars
+            )
+            judge_prompt = get_security_judge_prompt(
+                prompt_session=prompt_session,
+                action_history=history_text,
+                prompt_history_text=prompt_history_text,
+                a_next=prompt_a_next,
+                reason=reason,
+                skills_text=skills_text,
+                hints_text=hints_text,
+                script_analysis_text=script_analysis_text,
+                skip_l3_hints=skip_l3_hints,
+                path_context=path_context,
+            )
+            if max_prompt_tokens <= 0:
+                break
+            if self._estimate_tokens(judge_prompt) <= max_prompt_tokens:
+                break
+            # 超预算：历史条数 / 单条长度减半后重建
+            max_items = max(2, max_items // 2) if max_items > 0 else 2
+            max_chars = max(100, max_chars // 2) if max_chars > 0 else 100
+        else:
+            # 历史已压到最小仍超预算 → 截断当前动作详情
+            if max_prompt_tokens > 0:
+                estimated = self._estimate_tokens(judge_prompt)
+                ratio = estimated / max_prompt_tokens
+                allowed = max(200, int(len(action_detail) / ratio))
+                prompt_a_next = dict(a_next)
+                prompt_a_next["action_detail"] = self._truncate_detail(
+                    action_detail, allowed
+                )
+                history_text = self._format_action_history(
+                    action_history, max_items, max_chars
+                )
+                judge_prompt = get_security_judge_prompt(
+                    prompt_session=prompt_session,
+                    action_history=history_text,
+                    prompt_history_text=prompt_history_text,
+                    a_next=prompt_a_next,
+                    reason=reason,
+                    skills_text=skills_text,
+                    hints_text=hints_text,
+                    script_analysis_text=script_analysis_text,
+                    skip_l3_hints=skip_l3_hints,
+                    path_context=path_context,
+                )
+                logger.warning(
+                    "L3 prompt 超 token 预算（估 %d > %d），当前动作详情截断至 %d 字符",
+                    estimated,
+                    max_prompt_tokens,
+                    len(prompt_a_next["action_detail"]),
+                )
 
         # 4.5 打印 prompt 到日志文件（如果配置了 AGENT_MOSS_LOG_PATH）
         # 优先级：per-request 注入的 llm_log_path（来自调用方 env，bridge 子进程有
@@ -202,7 +265,18 @@ class LLMAnalyzer:
                 except Exception:
                     pass  # token 统计失败不影响主流程
 
-                judgment = self._parse_llm_response(llm_result.content)
+                try:
+                    judgment = self._parse_llm_response(llm_result.content)
+                except Exception as parse_exc:
+                    # 解析失败时把 LLM 原始返回的前 300 字符打出来 —— 否则只有
+                    # 「无法提取 JSON」这类错误，无法判断是模型输出跑偏还是格式问题。
+                    logger.error(
+                        "LLM 返回内容解析失败 [%s]: %s | 原始返回前 300 字符: %r",
+                        type(parse_exc).__name__,
+                        parse_exc,
+                        llm_result.content[:300],
+                    )
+                    raise
                 judgment.source = "llm"
                 # 写入缓存（超出上限时淘汰最旧条目）
                 if len(self._cache) >= self._cache_max:
@@ -245,13 +319,27 @@ class LLMAnalyzer:
             except Exception as e:
                 # API 错误（如并发限制 500006、400/500 错误等），非超时
                 error_type = type(e).__name__
-                logger.warning(
-                    "LLM 安全分析第 %d/%d 次调用失败 [%s]: %s",
-                    attempt,
-                    max_retries,
-                    error_type,
-                    e,
-                )
+                # OpenAI SDK 的 APIStatusError 带 status_code / body：str(e) 往往
+                # 只有摘要，排查 4xx/5xx 需要网关返回的原始错误体。
+                status = getattr(e, "status_code", None)
+                body = getattr(e, "body", None)
+                if status is not None or body is not None:
+                    logger.warning(
+                        "LLM 安全分析第 %d/%d 次调用失败 [%s] status=%s body=%s",
+                        attempt,
+                        max_retries,
+                        error_type,
+                        status,
+                        str(body)[:300],
+                    )
+                else:
+                    logger.warning(
+                        "LLM 安全分析第 %d/%d 次调用失败 [%s]: %s",
+                        attempt,
+                        max_retries,
+                        error_type,
+                        e,
+                    )
                 if attempt < max_retries:
                     time.sleep(retry_interval)
                 else:
@@ -266,22 +354,64 @@ class LLMAnalyzer:
         return parse_security_judgment(response)
 
     @staticmethod
-    def _format_action_history(action_history: list[dict[str, object]]) -> str:
-        """格式化历史动作序列"""
+    def _truncate_detail(detail: str, max_chars: int) -> str:
+        """截断单条动作详情：保头 60% + 尾 40%，中间标注省略长度。
+
+        超长 tool call（写文件内容）对安全判定的价值集中在头部（命令/工具）
+        和尾部（结构），中间大段正文不需要逐字喂给模型。
+        """
+        if max_chars <= 0 or len(detail) <= max_chars:
+            return detail
+        head = max(1, int(max_chars * 0.6))
+        tail = max(0, max_chars - head)
+        omitted = len(detail) - max_chars
+        tail_part = detail[-tail:] if tail else ""
+        return f"{detail[:head]}...[省略 {omitted} 字符]...{tail_part}"
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """粗略估算 token 数（中英混合按 ~2.5 字符/token 保守估计）。
+
+        只用于「是否超过预算」的闸门判断，不追求精确 —— 精确计数需要
+        tokenizer 依赖，而这里只需避免 prompt 无限膨胀。
+        """
+        return int(len(text) / 2.5) + 1
+
+    @staticmethod
+    def _format_action_history(
+        action_history: list[dict[str, object]],
+        max_items: int = 0,
+        max_chars: int = 0,
+    ) -> str:
+        """格式化历史动作序列。
+
+        Args:
+            max_items: 最多保留最近多少条（0 = 不限）。更早的只计数量不展开。
+            max_chars: 单条 action_detail 最多保留多少字符（0 = 不截断）。
+        """
         if not action_history:
             return "（无历史动作）"
 
+        omitted_items = 0
+        items = action_history
+        if max_items > 0 and len(action_history) > max_items:
+            omitted_items = len(action_history) - max_items
+            items = action_history[-max_items:]
+
         lines = []
-        for i, action in enumerate(action_history, 1):
+        if omitted_items:
+            lines.append(f"（更早的 {omitted_items} 条历史动作已省略）")
+        for i, action in enumerate(items, 1):
             if isinstance(action, dict):
                 name = action.get("name", action.get("action_type", "未知"))
                 detail = action.get("action_detail", "")
                 if detail:
+                    detail = LLMAnalyzer._truncate_detail(str(detail), max_chars)
                     lines.append(f"  {i}. {name}: {detail}")
                 else:
                     lines.append(f"  {i}. {name}")
             else:
-                lines.append(f"  {i}. {action}")
+                lines.append(f"  {i}. {str(action)}")
         return "\n".join(lines)
 
     @staticmethod

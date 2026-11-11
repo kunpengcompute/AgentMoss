@@ -86,7 +86,7 @@ curl -s -H "Authorization: Bearer <token>" \
   | python3 -m json.tool
 ```
 
-预期 `tool_call_count: 3`，traces 数组有 3 条记录。
+预期 `tool_call_count: 3`，`tool_calls` 数组有 3 条记录。
 
 ### 2.4 自动化脚本
 

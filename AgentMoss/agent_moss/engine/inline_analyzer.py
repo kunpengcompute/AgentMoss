@@ -224,6 +224,48 @@ def _has_read_write_keyword(code: str) -> bool:
     return any(kw in code_lower for kw in _READ_WRITE_KEYWORDS)
 
 
+#: 危险片段（补位判定的准入闸）。单一事实源 inline_rules.json（双端共用）。
+_DANGER_EVIDENCE_RES = [
+    re.compile(p, re.IGNORECASE)
+    for p in ((_INLINE_RULES.get("danger_evidence_patterns") or {}).get("patterns") or [])
+]
+
+
+def has_inline_danger_evidence(command: str, profile=None) -> bool:
+    """内联脚本补位判定的准入闸 —— 代码里必须有敏感路径或危险片段。
+
+    背景（2026-11）：补位判定（coordinator）原先只要求"是内联脚本"，而
+    ``analyze_inline_script`` 的步骤 2 只看读写调用词（``open(`` / ``system(`` …），
+    于是 ``Image.open('/tmp/x.png')``、``print(open('/tmp/x').read())`` 这类正常
+    脚本被 critical 误杀（0.15.4 起，文案却写"含敏感路径"）。
+
+    证据（任一即可）：
+    1. 敏感路径完整出现（``profile.sensitive_paths``；``~/`` 前缀按相对形式再匹配一次）。
+       注意**不用 basename**：``/sys`` 的 ``sys`` 会命中 ``os.system``。
+    2. 危险片段正则命中（``danger_evidence_patterns``：rm -rf / mkfs / dd if= / …）。
+
+    提取不到代码 → False（不补位，交回上层原逻辑）。
+    """
+    code = _extract_inline_code(command)
+    if not code:
+        return False
+    lowered = code.lower()
+    if profile is not None:
+        for sp in getattr(profile, "sensitive_paths", []):
+            p = (getattr(sp, "path", "") or "").lower()
+            if not p:
+                continue
+            if p in lowered:
+                return True
+            rel = p[2:] if p.startswith("~/") else p
+            if rel != p and rel in lowered:
+                return True
+    for rex in _DANGER_EVIDENCE_RES:
+        if rex.search(code):
+            return True
+    return False
+
+
 def analyze_inline_script(command: str, profile=None) -> InlineAnalysisResult:
     """对内联脚本做静态语义判定。
 

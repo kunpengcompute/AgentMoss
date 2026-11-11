@@ -26,6 +26,7 @@ from .types import HeuristicResult
 # _is_write_operation 留在 logic_rules.py 作为单一事实源（read_before_write 也用），
 # 此处复用避免读写判定逻辑漂移。
 from .logic_rules import _is_write_operation, _SensitivePathMatcher, _is_directory_delete_action, _is_archive_read_of_dir, _is_ssh_keygen_generate
+from .logic_rules import has_exec_bypass_chain, ALL_QUOTES_RE
 # 引号感知命令段切分同样下沉 logic_rules（NEW-FN-M 起含单管道切分），单一事实源：
 from .logic_rules import _SEPARATOR_SEGMENTS, _split_shell_segments
 
@@ -924,6 +925,20 @@ def _strip_inline_python_literals(text: str) -> str:
     return out
 
 
+#: NEW-FP-R（2026-11，xiaoO 实测误报）：非交互式密码修改家族的真实语义要求
+#: 「管道/命令词出现在引号外」——`grep -E "password|passwd|secret" f` 的模式串
+#: 里 `|passwd` 是正则或关系，却被 `\\|\\s*passwd\\b` 误当"管道喂密码给 passwd"。
+#: 守卫：原始命中后，若剥离全部引号内容就不再命中 → 丢弃该模式命中。
+#: 绕过链（has_exec_bypass_chain）不适用此守卫（引号内载荷会被执行）。
+QUOTED_SAFE_PASSWORD_PATTERNS = frozenset(
+    {
+        r"\|\s*passwd\b",
+        r"\bpasswd\s+--stdin\b",
+        r"\bchpasswd\b",
+    }
+)
+
+
 def _strip_literal_text_segments(action_detail: str) -> str:
     """NEW-FP-I: 对首词 echo/printf 的命令段剥掉引号内容（字面量参数）。
 
@@ -954,15 +969,13 @@ def _strip_literal_text_segments(action_detail: str) -> str:
     # crontab/at 是"持久化消费者"：`echo '<schedule> <命令>' | crontab -` 里的内容会被
     # 写入定时任务**稍后执行**，等价于喂给解释器——剥离会把载荷当文本丢弃，导致
     # `@reboot /tmp/x.sh`、`wget ... && bash ...` 这类 cron 后门整体漏拦（2026-09 修复）。
-    _exec_after = r"&&|\|\||;|\n|\|"
-    if (re.search(r">\s*[/~]\S*\.(sh|py|pl|rb)\b", action_detail) and
-        re.search(rf"(?:{_exec_after})\s*(?:bash|sh|zsh|dash|python|perl|ruby|node)", action_detail)) or \
-       re.search(r"\|\s*(?:bash|sh|zsh|dash|python|perl|ruby|node|crontab|at)\b", action_detail):
+    if has_exec_bypass_chain(action_detail):
         return action_detail
     # 按命令分隔符分段，但跳过引号内的分隔符（echo "a; b" 的 ; 在引号内不分段）
     result_parts: list[str] = []
     for seg in _split_command_segments(action_detail):
-        fw = seg.strip().split()[0].lower() if seg.strip().split() else ""
+        words = seg.strip().split()
+        fw = words[0].lower() if words else ""
         if fw in ("echo", "printf"):
             # NEW-FP-Q（M21）：先剥 $() 内 python -c 纯输出（echo $(python3 -c 'print(1)')），
             # 否则下面的引号剥离只剥掉代码引号、$(python3 -c ) 骨架残留仍被 A51 命中；
@@ -1029,6 +1042,32 @@ def _path_scan_variants(action_detail_lower: str) -> list[str]:
     return variants
 
 
+_PATH_QUOTE_TOKEN_RE = re.compile(r"__Q([0-9]+)__")
+_PATH_PROTOCOL_TOKEN_RE = re.compile(r"__PROT([0-9]+)__")
+
+#: 占位令牌批量还原阈值：少于该值逐个 str.replace 更快（C 实现，无正则引擎
+#: 与回调开销），达到该值一次 re.sub 更快（避免每个编号都重新扫描全文）。
+#: 实测交叉点约 8 个令牌（随文本长度浮动，取偏保守值）。
+_PATH_RESTORE_BATCH_MIN_TOKENS = 8
+
+
+def _restore_path_tokens(
+    text: str, tokens: list[str], prefix: str, token_re: re.Pattern[str]
+) -> str:
+    """还原路径归一化占位令牌，按令牌数选择更快的还原策略。
+
+    少量令牌时批量正则反而比逐个 replace 慢（少量令牌 + 含 `//` 的输入
+    实测回退 1.4~1.75 倍），因此只在令牌较多时走批量正则。
+    """
+    if not tokens:
+        return text
+    if len(tokens) < _PATH_RESTORE_BATCH_MIN_TOKENS:
+        for i, token in enumerate(tokens):
+            text = text.replace(f"__{prefix}{i}__", token)
+        return text
+    return token_re.sub(lambda m: tokens[int(m.group(1))], text)
+
+
 def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
     """NORM-PATH: 折叠路径混淆段，堵路径穿越变体（对齐 CVE-2023-37274 攻击面）。
 
@@ -1049,6 +1088,12 @@ def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
         fold_quotes: 连引号内内容一起折叠。敏感路径检查用（引号内是真实路径参数，
             `cat "/etc//shadow"` 应同判 Deny），见 `_path_scan_variants`。
     """
+    # 原文中的 Q/PROT 可能与生成标记的边界拼出额外标记（如 'a' 'b'Q0'c'）。
+    # 保守地保留旧还原顺序；仅检查完整的 __Q/__PROT 前缀并不足够。
+    needs_legacy_restore = "Q" in text or "PROT" in text
+    if not needs_legacy_restore and "//" not in text and "/./" not in text:
+        return text
+
     # 1. 保护协议 URL 的 //（用不含 / 的令牌占位，避免被 /{2,} 折叠）
     prot_tokens: list[str] = []
     def _stash_prot(m: re.Match[str]) -> str:
@@ -1065,12 +1110,22 @@ def _normalize_path_segments(text: str, fold_quotes: bool = False) -> str:
     # 3. 折叠非 URL 的连续斜杠与单点段
     text = re.sub(r"/{2,}", "/", text)
     text = re.sub(r"/\./", "/", text)
-    # 4. 还原引号与协议
-    for i, q in enumerate(quote_tokens):
-        text = text.replace(f"__Q{i}__", q)
-    for i, p in enumerate(prot_tokens):
-        text = text.replace(f"__PROT{i}__", p)
+    # 4. 原文存在编号冲突时，保留逐次替换的兼容行为。
+    if needs_legacy_restore:
+        for i, quote in enumerate(quote_tokens):
+            text = text.replace(f"__Q{i}__", quote)
+        for i, protocol in enumerate(prot_tokens):
+            text = text.replace(f"__PROT{i}__", protocol)
+        return text
+
+    # 普通输入按令牌数择优还原：少量逐个 replace、大量批量正则（避免每个编号
+    # 都重新搜索全文）。引号内容可能含协议编号，因此必须先还原引号，再还原协议。
+    text = _restore_path_tokens(text, quote_tokens, "Q", _PATH_QUOTE_TOKEN_RE)
+    text = _restore_path_tokens(text, prot_tokens, "PROT", _PATH_PROTOCOL_TOKEN_RE)
     return text
+
+
+_COMMAND_SEGMENT_TOKEN_RE = re.compile(r"['\";\n]|&&|\|\|")
 
 
 def _split_command_segments(action_detail: str) -> list[str]:
@@ -1080,45 +1135,21 @@ def _split_command_segments(action_detail: str) -> list[str]:
     引号内 chmod/mkfs 等词会脱离 echo 段被当独立命令首词误匹配（NEW-FP-I）。
     """
     segments: list[str] = []
-    cur = []
-    i = 0
-    quote: str | None = None
-    while i < len(action_detail):
-        ch = action_detail[i]
-        if quote:
-            cur.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
+    start = cursor = 0
+    while match := _COMMAND_SEGMENT_TOKEN_RE.search(action_detail, cursor):
+        token = match.group()
+        if token in ("'", '"'):
+            # 保持旧状态机语义：同种引号关闭，不额外解释反斜杠转义。
+            end = action_detail.find(token, match.end())
+            if end < 0:
+                break
+            cursor = end + 1
             continue
-        if ch in ("'", '"'):
-            quote = ch
-            cur.append(ch)
-            i += 1
-            continue
-        # 检查分隔符 &&/||/;/换行（引号外）
-        if ch == ';' or ch == '\n':
-            segments.append("".join(cur))
-            segments.append(ch)
-            cur = []
-            i += 1
-            continue
-        if ch == '&' and i + 1 < len(action_detail) and action_detail[i + 1] == '&':
-            segments.append("".join(cur))
-            segments.append("&&")
-            cur = []
-            i += 2
-            continue
-        if ch == '|' and i + 1 < len(action_detail) and action_detail[i + 1] == '|':
-            segments.append("".join(cur))
-            segments.append("||")
-            cur = []
-            i += 2
-            continue
-        cur.append(ch)
-        i += 1
-    if cur:
-        segments.append("".join(cur))
+        segments.append(action_detail[start:match.start()])
+        segments.append(token)
+        start = cursor = match.end()
+    if start < len(action_detail):
+        segments.append(action_detail[start:])
     return segments
 
 
@@ -1208,10 +1239,19 @@ class CommandPatternScanner:
         # ssh-keygen 生成模式豁免：生成新私钥时 -f 后的私钥路径是写目标，不应命中
         # 「访问私钥」命令正则（如 .ssh/id_rsa）。读模式（-y/-l/-p）不受豁免。
         exempt_keygen = _is_ssh_keygen_generate(action_detail)
+        # NEW-FP-R：密码修改家族的命中必须经得起全量剥引号——真实语义的管道/命令词
+        # 都在引号外；只在引号内出现（grep 搜索模式串）是字面量误报。绕过链例外。
+        _pw_guard_off = has_exec_bypass_chain(action_detail)
+        _no_quotes = None if _pw_guard_off else ALL_QUOTES_RE.sub(" ", action_detail)
         hits = [
             p for p in active
             if any(p["regex"].search(t) for t in scan_texts)
             and not (exempt_keygen and p["risk_type"] == "file_access")
+            and (
+                p["pattern"] not in QUOTED_SAFE_PASSWORD_PATTERNS
+                or _no_quotes is None
+                or p["regex"].search(_no_quotes) is not None
+            )
         ]
         if not hits:
             return HeuristicResult(hit=False)

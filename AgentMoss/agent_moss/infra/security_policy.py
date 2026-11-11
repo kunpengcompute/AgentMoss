@@ -11,7 +11,7 @@
 | ``AGENT_MOSS_AUTH_TOKEN`` | 空 | 全局 Bearer token；**空 = 不鉴权（保持现状）** |
 | ``AGENT_MOSS_AUTH_TOKEN_FILE`` | 空 | 同上，从文件读（便于 0600 保存） |
 | ``AGENT_MOSS_AGENT_TOKENS`` | 空 | 每个 agent 一个 token，``agent=tok,agent2=tok2``；启用后 ``agent_id`` 必须与 token 匹配 |
-| ``AGENT_MOSS_LOG_ROOTS`` | ``$HOME,/tmp,$TMPDIR`` | ``metadata.llm_log_path`` 允许落盘的根目录 |
+| ``AGENT_MOSS_LOG_ROOTS`` | ``$HOME,/tmp,$TMPDIR`` | ``metadata.llm_log_path`` 允许落盘的根目录（root 下取真实用户家目录；多用户机器不猜，需显式配置） |
 | ``AGENT_MOSS_REVIEW_PATHS`` | AgentGate 标准目录 | ``/api/v1/review`` 的 ``db_path`` 允许读取的根目录 |
 | ``AGENT_MOSS_CHAIN_DETAIL`` | ``redacted`` | 组合链返回：``redacted`` 隐藏跨会话命令原文，``full`` 全量 |
 | ``AGENT_MOSS_MAX_BODY_BYTES`` | 16MB | 请求体上限 |
@@ -382,9 +382,33 @@ def principal_hash(principal: str) -> str:
 
 def _default_home() -> Path:
     try:
-        return Path.home()
+        home = Path.home()
     except Exception:  # noqa: BLE001
         return Path(tempfile.gettempdir())
+    # root（systemd 模式）下 Path.home() = /root，但真实用户的数据/日志在
+    # /home/<user>。0.17.0 引入 log_roots 白名单时漏了 systemd/root 部署：
+    #   - llm_log_path 落在 /home/<user> 被判越界（xiaoO hkl.log 无 [LLM_PROMPT]）；
+    #   - hardenExistingPaths 去 /root 下找根本不存在的文件、权限收紧从未生效。
+    #
+    # 分级判定（不能无条件用 _resolve_owner_home —— 它会猜）：
+    #   1. SUDO_USER / LOGNAME / USER 明确 → 该用户（sudo 启动）；
+    #   2. 只有一个普通用户 → 自动识别（单用户机器开箱即用）；
+    #   3. 多个普通用户 → **不猜**，保持 /root（安全）。
+    #      多用户共享同一 root 服务时，由安装脚本显式写 AGENT_MOSS_LOG_ROOTS
+    #      （每条目的用户装一次，累积进白名单）。
+    from .paths import (
+        _is_root,
+        _list_owner_homes,
+        _resolve_explicit_owner_home,
+    )
+    if _is_root():
+        explicit = _resolve_explicit_owner_home()
+        if explicit is not None:
+            return explicit
+        owners = _list_owner_homes()
+        if len(owners) == 1:
+            return owners[0]
+    return home
 
 
 def log_roots() -> list[Path]:
@@ -560,11 +584,56 @@ def chain_detail_mode() -> str:
     return (_env("AGENT_MOSS_CHAIN_DETAIL", "redacted") or "redacted").lower()
 
 
-def redact_chain(chain, current_session_id: str) -> list:
+def redact_graph(
+    graph,
+    current_instance_id: str = "",
+    current_session_id: str = "",
+) -> dict | None:
+    """结构化攻击链图的脱敏：同实例不隐藏，跨实例/跨会话隐藏命令原文。
+
+    判定优先级：
+    1. 节点有 instance_id 且与当前请求的 instance_id 相同 → 原样返回
+       （同一个人/同一个 agent 实例的多个会话，没必要对自己打码）。
+    2. 节点没有 instance_id（旧数据）→ 回退到 session 比较，只有当前会话可见。
+    3. 其他 → 隐藏 session_id / action_detail / resources。
+    """
+    if not graph:
+        return None
+    if chain_detail_mode() == "full":
+        return graph
+    nodes = []
+    for n in graph.get("nodes", []) or []:
+        m = dict(n)
+        inst = str(m.get("instance_id", "") or "")
+        sid = str(m.get("session_id", "") or "")
+        same_instance = bool(inst and current_instance_id and inst == str(current_instance_id))
+        same_session_fallback = bool(
+            not inst and current_session_id and sid == str(current_session_id)
+        )
+        if not (same_instance or same_session_fallback):
+            m["session_id"] = "<other-session>"
+            m["action_detail"] = "<已隐藏>"
+            m["resources"] = []
+        nodes.append(m)
+    out: dict = {"nodes": nodes, "edges": graph.get("edges", []) or []}
+    # 性质元信息/表达式只含性质名与节点索引，不含命令原文，脱敏时必须保留
+    # （否则前端无法展示"违反了哪条性质"与表达式对应关系）。
+    for key in ("property_id", "property_short", "property_name", "property_expression"):
+        if graph.get(key) is not None:
+            out[key] = graph[key]
+    return out
+
+
+def redact_chain(
+    chain,
+    current_instance_id: str = "",
+    current_session_id: str = "",
+) -> list:
     """跨会话节点只保留结构，去掉命令原文与会话标识。
 
-    节点形状为 ``[session_id, seq, action_detail, timestamp]``（见 formal_engine）。
-    当前会话的节点原样返回 —— 那些数据本来就是本次调用方自己提供的。
+    节点形状为 ``[session_id, seq, action_detail, timestamp, agent_id, instance_id]``。
+    同实例的节点原样返回（同一个人自己的多个会话）；旧数据没有 instance_id 时
+    回退到 session 比较。其他节点隐藏命令原文与资源。
     """
     if not chain:
         return []
@@ -575,7 +644,12 @@ def redact_chain(chain, current_session_id: str) -> list:
         if isinstance(step, (list, tuple)) and len(step) >= 3:
             sid, seq, detail = step[0], step[1], step[2]
             ts = step[3] if len(step) > 3 else ""
-            if str(sid) == str(current_session_id):
+            inst = str(step[5]) if len(step) > 5 else ""
+            same_instance = bool(inst and current_instance_id and inst == str(current_instance_id))
+            same_session_fallback = bool(
+                not inst and current_session_id and str(sid) == str(current_session_id)
+            )
+            if same_instance or same_session_fallback:
                 out.append(list(step))
             else:
                 out.append(["<other-session>", seq, "<已隐藏>", ts])

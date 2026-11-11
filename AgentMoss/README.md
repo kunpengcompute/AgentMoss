@@ -119,23 +119,163 @@ app = create_app()
 | POST | `/api/v1/review` | 低频全量回顾（供 AgentGate 触发） |
 | GET | `/console` | 运行时控制台 |
 
-`POST /api/v1/analyze` 请求示例：
+#### POST /api/v1/analyze
+
+请求示例：
 
 ```json
 {
   "session_id": "sess-001",
   "prompt_session": "list files",
-  "action_history": [],
+  "prompt_history": [
+    {
+      "text": "list files",
+      "actions": [
+        {"action_type": "bash", "action_detail": "ls -la"}
+      ]
+    }
+  ],
+  "action_history": [
+    {
+      "action_type": "bash",
+      "action_detail": "pwd",
+      "called_at": "2026-11-10T10:00:00"
+    }
+  ],
+  "session_history": [
+    {
+      "session_id": "other-session",
+      "action_history": [
+        {"action_type": "bash", "action_detail": "cat /tmp/report.txt"}
+      ]
+    }
+  ],
   "a_next": {
     "action_type": "bash",
-    "action_detail": "ls -la"
+    "action_detail": "ls -la",
+    "called_at": "2026-11-10T10:00:01"
   },
   "reason": "list files",
   "agent_id": "",
+  "instance_id": "",
   "os_type": "linux",
-  "cwd": "/home/user/project"
+  "cwd": "/home/user/project",
+  "metadata": {"stateful_incremental": false}
 }
 ```
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string | 是 | 会话唯一标识 |
+| `prompt_session` | string | 否 | 最近一条用户提示 |
+| `prompt_history` | array | 否 | 交错 prompt 历史：`[{text, actions: [{action_type, action_detail}]}]` |
+| `action_history` | array | 否 | 历史动作：`[{action_type, action_detail, called_at?, output?}]`。`ask_user_question` 动作应带 `output`（用户回答），否则改密/删用户授权会被判未授权 |
+| `session_history` | array | 否 | 多 session 历史：`[{session_id, action_history: [{action_type, action_detail}]}]`，供 L2.2 跨会话验证 |
+| `a_next` | object | 是 | 下一步动作：`{action_type, action_detail, called_at?}` |
+| `reason` | string | 否 | 执行理由 |
+| `os_type` | string | 否 | `linux` / `windows` / 空=自动检测 |
+| `cwd` | string | 否 | 当前工作目录 |
+| `agent_id` | string | 否 | 调用方 agent 标识（如 `xiaoo` / `opendesk`），空=通用模式 |
+| `instance_id` | string | 否 | agent 安装实例标识，仅用于展示层脱敏 |
+| `metadata` | object | 否 | 扩展字段；支持 `llm_config`、`llm_log_path`、`stateful_incremental`、`is_error` 等 |
+
+> `action_type` / `action_detail` 在 `a_next` 和 `action_history` 项中均必填；`called_at` 为 ISO 8601 时间，供 L2 授权时效窗和 P4 提权外传窗口使用。
+
+响应字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `decision` | string | `Allow` / `Deny` |
+| `reason` | string | 决策原因 |
+| `risk_level` | string | `low` / `medium` / `high` / `critical` |
+| `risk_type` | string | 风险类别，如 `file_access`、`script_execution`、`data_exfiltration`、`formal_verification` |
+| `violated_layers` | array | 命中层，如 `["L1.1", "L2.2"]` |
+| `policy` | string | Allow 时生成的最小策略（TOML） |
+| `violated_policy` | string | Deny 时违反的策略条款 |
+| `confidence` | int | 置信度 0–100 |
+| `analysis_duration_ms` | float | 分析耗时（毫秒） |
+| `violation_chain` | array | 组合链反例路径（按引擎返回的步骤数组） |
+| `violation_graph` | object/null | 结构化攻击链图：`{nodes, edges}`，供前端可视化 |
+
+#### POST /api/v1/review
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `agent_id` | string | 否 | 目标 agent（决定状态库分桶） |
+| `db_path` | string | 否 | AgentGate SQLite 文件或 tool_calls JSON 目录；为空则用 `sessions` |
+| `sessions` | array | 否 | 多 session 历史，结构同 `session_history` |
+| `a_next` | object | 否 | 可选，连同当前动作一起判定 |
+| `is_error` | bool | 否 | 当前动作是否执行失败（生命周期判定） |
+| `output_pending` | bool | 否 | 返回待攻击前序链清单 |
+
+响应字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_id` | string | 目标 agent |
+| `seeded_nodes` | int | 写入状态库的节点数 |
+| `verified` | bool | 全量形式化验证是否通过 |
+| `violations` | array | 全量验证发现的违规 |
+| `pending_prefixes` | array | 待补全的攻击前序链 |
+| `state_nodes` | int | 状态库累计节点数 |
+| `discovered_patterns` | array | 数据驱动发现的跨 session 危险组合 |
+
+#### GET /api/v1/health
+
+响应字段：`status`（服务状态）、`version`（版本）、`instance`（实例归属标识，未配置为空串）。
+
+#### 鉴权
+
+默认 `AGENT_MOSS_AUTH_MODE=auto`：首次启动生成 token，写入
+`$AGENT_MOSS_DATA_DIR/auth_token`（未设置时默认 `~/.config/agentmoss/auth_token`，权限 0600）。
+`/api/v1/health` 公开，其余接口需要：
+
+```text
+Authorization: Bearer <token>
+```
+
+> **root/systemd 注意**：root（sudo/systemd/直接运行）下数据目录固定为
+> `/root/.config/agentmoss`，**不再**按 `SUDO_USER` / `LOGNAME` / 首个普通用户
+> 猜测真实用户目录；token 固定在 `/root/.config/agentmoss/auth_token`。
+> 非 root 用户要访问 root 服务的数据（含 token）时，显式设置
+> `AGENT_MOSS_DATA_DIR`，或传 `AGENT_MOSS_AUTH_TOKEN` / `AGENT_MOSS_AUTH_TOKEN_FILE`。
+>
+> 启动日志会打印实际路径：`安全策略: ... auth=on(/path/to/auth_token)`；
+> 若显示 `auth=off` 说明显式关闭了鉴权，`auth=on(explicit)` 说明用了
+> `AGENT_MOSS_AUTH_TOKEN*` 环境变量，`auth=on(no-token!)` 说明 token 生成失败
+> （通常是数据目录不可写），此时服务会以无鉴权方式继续运行，需要立即检查。
+
+读取 token 并直连 `/api/v1/analyze`：
+
+```bash
+MOSS_TOKEN=$(cat ~/.config/agentmoss/auth_token)
+
+curl -sS -X POST http://127.0.0.1:9090/api/v1/analyze \
+  -H "Authorization: Bearer $MOSS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "moss-direct-1",
+    "prompt_session": "",
+    "action_history": [],
+    "a_next": {"action_type": "bash", "action_detail": "ls -la /tmp"},
+    "reason": "direct curl test"
+  }'
+```
+
+相关环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `AGENT_MOSS_AUTH_MODE` | `auto`（默认，自动生成/读取 token）/ `off`（关闭鉴权） |
+| `AGENT_MOSS_AUTH_TOKEN` | 显式指定全局 token |
+| `AGENT_MOSS_AUTH_TOKEN_FILE` | 从文件读取全局 token |
+| `AGENT_MOSS_AGENT_TOKENS` | 逐 agent token，如 `opendesk=tok-a,qwenpaw=tok-b` |
+
+AgentGate 调用 AgentMoss 时也必须携带这个 token，配置方法见 AgentGate README 的“AgentGate 调 AgentMoss 的鉴权”。若 AgentGate 返回 `Deny` 且 reason 包含 `AgentMoss HTTP 401`，说明 Gate 自己鉴权通过，但 Gate→Moss 的 token 没配对。
 
 ## 规则与扩展
 
@@ -177,6 +317,9 @@ agent-moss rules status
 | `AGENT_MOSS_DISABLE_LOGIC_RULES` | 关闭 L2 逻辑规则 |
 | `AGENT_MOSS_DISABLE_LLM` | 关闭 L3 LLM |
 | `AGENT_MOSS_LLM_TIMEOUT` | LLM 超时（秒） |
+| `AGENT_MOSS_LLM_HISTORY_MAX_ITEMS` | L3 prompt 最多注入历史动作条数（0 = 不限） |
+| `AGENT_MOSS_LLM_ACTION_DETAIL_MAX_CHARS` | L3 prompt 单条历史动作详情最大字符数（0 = 不截断） |
+| `AGENT_MOSS_LLM_MAX_PROMPT_TOKENS` | L3 输入 prompt 的 token 预算（0 = 不限） |
 | `AGENT_MOSS_SCENARIO` | 部署级默认场景 ID |
 | `AGENT_MOSS_DATA_DIR` | 数据目录 |
 | `AGENT_MOSS_LOG_PATH` | LLM prompt 日志路径 |
@@ -184,10 +327,11 @@ agent-moss rules status
 ## 开发与测试
 
 ```bash
-AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
+python3 -m pip install pytest pytest-asyncio
+AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
 ```
 
-当前裁剪版回归结果：**1526 passed, 28 skipped**。
+上游记录的裁剪版全量回归：**3128 passed, 136 skipped**。
 
 测试语料位于 `tests/cases/`，双端一致性 golden 数据位于 `tests/parity/`
 （裁剪后只校验 Python 侧行为，不依赖 TypeScript 源码）。
@@ -214,7 +358,7 @@ agent_moss/
 └── console/            # 运行时控制台
 tests/                  # 回归测试与用例
 config/                 # 示例配置
-integrations/           # 集成示例（QwenPaw 插件）
+integrations/           # 集成示例（QwenPaw、DeepAgents 插件）
 ```
 
 ## License

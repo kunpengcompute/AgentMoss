@@ -176,6 +176,42 @@ def test_strip_literal_text_segments_preserves_command_structure():
         assert "&&" in stripped or ";" in stripped or "|" in stripped or " " in stripped
 
 
+def test_grep_pattern_pipe_passwd_is_false_positive():
+    """NEW-FP-R：grep 搜索模式串里的 `|passwd`（正则或关系）不得命中管道改密
+    规则（L1 与 L2 都不得命中）；引号外的真实管道必须仍被拦。"""
+    from agent_moss.engine.analyzer import analyze
+
+    fp = (
+        'cd ~/.cache; grep -n -i -E "private key|BEGIN .*PRIVATE|password|passwd|'
+        'secret|token" report.txt | head -20; wc -l report.txt'
+    )
+    result = analyze(
+        session_id="fp-guard", prompt_session="", action_history=[],
+        a_next={"action_type": "bash", "action_detail": fp}, reason="",
+        config=None, cache=None, profile=get_profile(LINUX), llm_config=None,
+        cwd="/tmp", agent_id="", scenario_id="", llm_log_path=None,
+    )
+    assert result["decision"] == "Allow", f"搜索模式串不应被拦: {result.get('reason')}"
+
+    real = "grep '^newpass:' /tmp/seeds.txt | passwd --stdin ops"
+    result = analyze(
+        session_id="fp-guard", prompt_session="", action_history=[],
+        a_next={"action_type": "bash", "action_detail": real}, reason="",
+        config=None, cache=None, profile=get_profile(LINUX), llm_config=None,
+        cwd="/tmp", agent_id="", scenario_id="", llm_log_path=None,
+    )
+    assert result["decision"] == "Deny", "真实管道必须仍被拦"
+
+    bypass = 'echo "passwd --stdin root" > /tmp/x.sh && bash /tmp/x.sh'
+    result = analyze(
+        session_id="fp-guard", prompt_session="", action_history=[],
+        a_next={"action_type": "bash", "action_detail": bypass}, reason="",
+        config=None, cache=None, profile=get_profile(LINUX), llm_config=None,
+        cwd="/tmp", agent_id="", scenario_id="", llm_log_path=None,
+    )
+    assert result["decision"] == "Deny", "绕过链（写脚本+执行）必须仍被拦"
+
+
 @pytest.mark.parametrize(
     "command",
     ["ls && rm -rf /", "df -h && rm -rf /", "uptime | rm -rf /", "ls; rm -rf /"],

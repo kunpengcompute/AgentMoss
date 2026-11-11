@@ -511,6 +511,42 @@ def get_llm_timeout() -> int:
         return 300
 
 
+def _get_int_setting(key: str, default: int) -> int:
+    """读整型配置；非法值/未设置 → 默认值。"""
+    raw = get_agent_moss_setting(key, default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_llm_history_max_items() -> int:
+    """L3 prompt 最多注入多少条历史动作（0 = 不限，默认 20）。
+
+    客户的写文件类 tool call，`action_detail` 可能包含整个文件内容，历史
+    累积几十条后 prompt 会膨胀到几十万字符。只保留最近 N 条既够判断意图
+    偏离，又能把 prompt 控制在可用范围。
+    """
+    return _get_int_setting("AGENT_MOSS_LLM_HISTORY_MAX_ITEMS", 20)
+
+
+def get_llm_action_detail_max_chars() -> int:
+    """L3 prompt 中单条历史动作详情最多保留多少字符（0 = 不截断，默认 500）。
+
+    截断保留头部（命令本身）+ 尾部（结构），中间标注省略长度。
+    """
+    return _get_int_setting("AGENT_MOSS_LLM_ACTION_DETAIL_MAX_CHARS", 500)
+
+
+def get_llm_max_prompt_tokens() -> int:
+    """L3 输入 prompt 的 token 总预算（0 = 不限，默认 0）。
+
+    超限时按「历史条数减半 → 单条截断长度减半 → 截断当前动作详情」逐级压缩，
+    保证 prompt 不会因为超长 tool call 无限膨胀。
+    """
+    return _get_int_setting("AGENT_MOSS_LLM_MAX_PROMPT_TOKENS", 0)
+
+
 def get_log_path() -> str:
     """获取 LLM prompt 日志路径"""
     return get_agent_moss_setting("AGENT_MOSS_LOG_PATH", "")

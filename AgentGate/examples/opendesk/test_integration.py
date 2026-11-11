@@ -64,7 +64,7 @@ def test_session_history_accumulation():
     with urllib.request.urlopen(req, timeout=10) as resp:
         traces = json.loads(resp.read())
     print(f"  Session traces: {traces['tool_call_count']} 条记录")
-    for t in traces["traces"]:
+    for t in traces["tool_calls"]:
         print(f"    seq={t['seq']}  {t['tool_name']}:{t['command'][:40]} → {t['decision']}")
 
 

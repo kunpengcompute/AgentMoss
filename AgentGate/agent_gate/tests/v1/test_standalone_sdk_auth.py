@@ -69,3 +69,20 @@ def test_explicit_token_overrides_env(monkeypatch):
     client = GateClient(base_url="http://127.0.0.1:9100", api_token="tok-explicit")
     assert client._headers()["Authorization"] == "Bearer tok-explicit"
     client.close()
+
+
+def test_analyze_forwards_prompt_history():
+    """SDK 必须能把 prompt_history 透传到 /api/v1/analyze（与 HTTP API 对齐）。"""
+    GateClient = _load_sdk().GateClient
+    client = GateClient(base_url="http://127.0.0.1:9100")
+    prompt_history = [{
+        "text": "delete it",
+        "actions": [{"action_type": "bash", "action_detail": "rm -rf /tmp/x"}],
+    }]
+    with patch.object(client._client, "post", return_value=_fake_response()) as post:
+        client.analyze(
+            agent_type="x", session_id="s", tool_name="bash", command="rm -rf /tmp/x",
+            prompt_history=prompt_history,
+        )
+    assert post.call_args.kwargs["json"]["prompt_history"] == prompt_history
+    client.close()

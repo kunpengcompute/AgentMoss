@@ -24,6 +24,29 @@ from agent_moss.profiles import get_profile
 from conftest import _expand_placeholder, _prep_file_state
 
 
+@pytest.fixture
+def _cases_use_builtin_rules(monkeypatch):
+    """用例集固定使用内置规则：排除 runtime/Console 覆盖对判定的影响。
+
+    需求：用例覆盖的是仓库内置规则；runtime 配置（console 生成）可能启停/改写
+    规则，导致同一用例在不同机器上结果漂移。这里在用例执行期间强制
+    ``AGENT_MOSS_RULES_MODE=builtin``，并清掉规则模式/配置/规则缓存；
+    用例结束后恢复缓存，其他 runtime 专项测试仍按原模式运行。
+    """
+    monkeypatch.setenv("AGENT_MOSS_RULES_MODE", "builtin")
+    from agent_moss.infra import config as config_mod
+    from agent_moss.infra import rules_mode
+    from agent_moss import rules_loader
+    rules_mode.reset_cache()
+    rules_loader.clear_rules_cache()
+    config_mod.invalidate_default_config_cache()
+    yield
+    rules_mode.reset_cache()
+    rules_loader.clear_rules_cache()
+    config_mod.invalidate_default_config_cache()
+
+
+
 def _run_case(case: dict, config, profile=None, cwd=None) -> tuple[dict, dict]:
     """
     执行单个测试用例的 analyze 调用。
@@ -66,6 +89,7 @@ def _run_case(case: dict, config, profile=None, cwd=None) -> tuple[dict, dict]:
 
 # ========== Agent 专属规则用例（tests/cases/agent/*.json） ==========
 
+@pytest.mark.usefixtures("_cases_use_builtin_rules")
 class TestAgentCases:
     """Agent 定制规则（xiaoo/opendesk 的 extra_* / builtin_safe_*）看护。
 
@@ -108,6 +132,7 @@ class TestAgentCases:
 
 # ========== 场景定制规则用例（tests/cases/scenario/<scenario_id>/*.json） ==========
 
+@pytest.mark.usefixtures("_cases_use_builtin_rules")
 class TestScenarioCases:
     """场景定制规则（bank 沙箱的目录白名单/禁 ssh 等）看护。
 
@@ -156,6 +181,7 @@ class TestScenarioCases:
 
 # ========== 平台专属规则用例（tests/cases/os/*/*.json） ==========
 
+@pytest.mark.usefixtures("_cases_use_builtin_rules")
 class TestOSCases:
     """平台专属规则用例（windows / macos）看护。
 
@@ -212,6 +238,7 @@ class TestOSCases:
 
 # ========== 测试前两层（禁用 LLM，适合 CI 环境） ==========
 
+@pytest.mark.usefixtures("_cases_use_builtin_rules")
 class TestLayer1And2:
     """测试层1（特征匹配）+ 层2（逻辑规则），不依赖 LLM"""
 
@@ -563,10 +590,133 @@ class TestLayer1And2:
             ("combo-chain-deny.json", dict(decision="Deny", risk_level="high")),
             # 跨会话组合攻击链命中：多 session 各自无害，拼接成 LISTEN→EXEC→SCAN 被 L2.2 形式化引擎拦截
             ("combo-cross-session-deny.json", dict(decision="Deny", risk_level="high")),
+            # L2.2 形式化性质 P2-P8 一拦一放（每条性质各一个 deny + 一个 allow）
+            ("formal-p2-sensitive-data-flow-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p3-low-integrity-reachability-deny.json", dict(decision="Deny", risk_level="high")),
+            ("formal-p4-no-exfil-after-privesc-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p5-no-exfil-after-credential-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p6-mc-ltl-rules-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p7-low-integrity-command-exec-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("formal-p8-sensitive-data-aggregation-deny.json", dict(decision="Deny", risk_level="critical")),
             # PERSIST→EXFIL 组合链：管道装 cron（单步放行，见 l1/allow-155）后外传 → L2.1 拦截
             # 2026-09 更新：curl -T 外传规则升 critical（外传数据到外部服务器），risk_level 同步
             ("combo-persist-exfil-deny.json", dict(decision="Deny", risk_level="critical")),
             # 2026-09 Windows 适配：SAM 数据库 / SSH 私钥 / AWS 凭据读取拦截
+            ("deny-301-inject-002.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-302-inject-003.json", dict(decision="Deny", risk_level="high")),
+            ("deny-303-inject-004.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-304-inject-005.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-305-inject-006.json", dict(decision="Deny", risk_level="high")),
+            ("deny-306-inject-007.json", dict(decision="Deny", risk_level="high")),
+            ("deny-307-inject-008.json", dict(decision="Deny", risk_level="high")),
+            ("deny-308-inject-009.json", dict(decision="Deny", risk_level="high")),
+            ("deny-309-inject-010.json", dict(decision="Deny", risk_level="high")),
+            ("deny-310-inject-011.json", dict(decision="Deny", risk_level="high")),
+            ("deny-311-inject-012.json", dict(decision="Deny", risk_level="high")),
+            ("deny-312-inject-013.json", dict(decision="Deny", risk_level="high")),
+            ("deny-313-inject-014.json", dict(decision="Deny", risk_level="high")),
+            ("deny-314-inject-015.json", dict(decision="Deny", risk_level="high")),
+            ("deny-315-inject-016.json", dict(decision="Deny", risk_level="high")),
+            ("deny-316-inject-017.json", dict(decision="Deny", risk_level="high")),
+            ("deny-317-inject-018.json", dict(decision="Deny", risk_level="high")),
+            ("deny-319-inject-020.json", dict(decision="Deny", risk_level="high")),
+            ("deny-320-inject-021.json", dict(decision="Deny", risk_level="high")),
+            ("deny-322-inject-023.json", dict(decision="Deny", risk_level="high")),
+            ("deny-323-inject-024.json", dict(decision="Deny", risk_level="high")),
+            ("deny-324-inject-025.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-325-inject-026.json", dict(decision="Deny", risk_level="high")),
+            ("deny-326-inject-027.json", dict(decision="Deny", risk_level="high")),
+            ("deny-327-inject-028.json", dict(decision="Deny", risk_level="high")),
+            ("deny-328-inject-029.json", dict(decision="Deny", risk_level="high")),
+            ("deny-329-inject-030.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-330-inject-031.json", dict(decision="Deny", risk_level="high")),
+            ("deny-331-inject-032.json", dict(decision="Deny", risk_level="high")),
+            ("deny-332-inject-033.json", dict(decision="Deny", risk_level="high")),
+            ("deny-333-inject-034.json", dict(decision="Deny", risk_level="high")),
+            ("deny-334-inject-035.json", dict(decision="Deny", risk_level="high")),
+            ("deny-335-inject-036.json", dict(decision="Deny", risk_level="high")),
+            ("deny-336-inject-037.json", dict(decision="Deny", risk_level="high")),
+            ("deny-337-inject-038.json", dict(decision="Deny", risk_level="high")),
+            ("deny-338-inject-039.json", dict(decision="Deny", risk_level="high")),
+            ("deny-339-inject-040.json", dict(decision="Deny", risk_level="high")),
+            ("deny-340-inject-041.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-341-inject-042.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-342-inject-043.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-343-inject-044.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-344-inject-045.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-402-sens-002.json", dict(decision="Deny", risk_level="high")),
+            ("deny-405-sens-005.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-413-sens-013.json", dict(decision="Deny", risk_level="high")),
+            ("deny-415-sens-015.json", dict(decision="Deny", risk_level="high")),
+            ("deny-416-sens-016.json", dict(decision="Deny", risk_level="high")),
+            ("deny-417-sens-017.json", dict(decision="Deny", risk_level="high")),
+            ("deny-418-sens-018.json", dict(decision="Deny", risk_level="high")),
+            ("deny-419-sens-019.json", dict(decision="Deny", risk_level="high")),
+            ("deny-420-sens-020.json", dict(decision="Deny", risk_level="high")),
+            ("deny-421-sens-021.json", dict(decision="Deny", risk_level="high")),
+            ("deny-422-sens-022.json", dict(decision="Deny", risk_level="high")),
+            ("deny-423-sens-023.json", dict(decision="Deny", risk_level="high")),
+            ("deny-424-sens-024.json", dict(decision="Deny", risk_level="high")),
+            ("deny-426-sens-026.json", dict(decision="Deny", risk_level="high")),
+            ("deny-427-sens-027.json", dict(decision="Deny", risk_level="high")),
+            ("deny-428-sens-028.json", dict(decision="Deny", risk_level="high")),
+            ("deny-429-sens-029.json", dict(decision="Deny", risk_level="high")),
+            ("deny-430-sens-030.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-431-sens-031.json", dict(decision="Deny", risk_level="high")),
+            ("deny-432-sens-032.json", dict(decision="Deny", risk_level="high")),
+            ("deny-435-sens-035.json", dict(decision="Deny", risk_level="high")),
+            ("deny-437-sens-037.json", dict(decision="Deny", risk_level="high")),
+            ("deny-438-sens-038.json", dict(decision="Deny", risk_level="high")),
+            ("deny-451-sens-051.json", dict(decision="Deny", risk_level="medium")),
+            ("deny-452-sens-052.json", dict(decision="Deny", risk_level="medium")),
+            ("deny-453-sens-053.json", dict(decision="Deny", risk_level="medium")),
+            ("deny-455-sens-055.json", dict(decision="Deny", risk_level="high")),
+            ("deny-458-sens-058.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-460-sens-060.json", dict(decision="Deny", risk_level="high")),
+            ("deny-461-sens-061.json", dict(decision="Deny", risk_level="high")),
+            ("deny-634-danger-034.json", dict(decision="Deny", risk_level="high")),
+            ("deny-671-danger-071.json", dict(decision="Deny", risk_level="high")),
+            ("deny-675-danger-075.json", dict(decision="Deny", risk_level="high")),
+            ("deny-677-danger-077.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-678-danger-078.json", dict(decision="Deny", risk_level="high")),
+            ("deny-679-danger-079.json", dict(decision="Deny", risk_level="high")),
+            ("deny-680-danger-080.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-681-danger-081.json", dict(decision="Deny", risk_level="high")),
+            ("deny-683-danger-083.json", dict(decision="Deny", risk_level="high")),
+            ("deny-684-danger-084.json", dict(decision="Deny", risk_level="high")),
+            ("deny-685-danger-085.json", dict(decision="Deny", risk_level="high")),
+            ("deny-686-danger-086.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-687-danger-087.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-688-danger-088.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-689-danger-089.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-691-danger-091.json", dict(decision="Deny", risk_level="high")),
+            ("deny-692-danger-092.json", dict(decision="Deny", risk_level="high")),
+            ("deny-693-danger-093.json", dict(decision="Deny", risk_level="high")),
+            ("deny-695-danger-095.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-696-danger-096.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-697-danger-097.json", dict(decision="Deny", risk_level="high")),
+            ("deny-698-danger-098.json", dict(decision="Deny", risk_level="high")),
+            ("deny-699-danger-099.json", dict(decision="Deny", risk_level="high")),
+            ("deny-700-danger-100.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-703-danger-103.json", dict(decision="Deny", risk_level="high")),
+            ("deny-705-danger-105.json", dict(decision="Deny", risk_level="high")),
+            ("deny-706-danger-106.json", dict(decision="Deny", risk_level="high")),
+            ("deny-708-danger-108.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-771-danger-171.json", dict(decision="Deny", risk_level="high")),
+            ("deny-775-danger-175.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-783-danger-183.json", dict(decision="Deny", risk_level="high")),
+            # 2026-11：内联补位判定误报修复的正向对照（真实敏感路径仍拦）
+            ("deny-786-py-inline-open-shadow.json", dict(decision="Deny", risk_level="critical")),
+            # 2026-11：grep 引号模式串误报修复的正向对照（引号外真实管道仍拦）
+            ("deny-787-grep-pipe-real-passwd.json", dict(decision="Deny", risk_level="high")),
+            ("combo-listener-exec-cred-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("combo-listener-exec-exfil-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("combo-listener-exec-persist-deny.json", dict(decision="Deny", risk_level="high")),
+            ("combo-exec-scan-cred-deny.json", dict(decision="Deny", risk_level="high")),
+            ("combo-exec-privesc-cred-deny.json", dict(decision="Deny", risk_level="high")),
+            ("combo-privesc-cred-exfil-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("combo-exec-persist-exfil-deny.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-intent-query-modify.json", dict(decision="Deny", risk_level="high")),
         ],
     )
     def test_deny_cases(self, default_config, linux_profile, indirect_cwd, script_branch_cwd, python_script_branch_cwd, shell_shift_cwd, nested_script_branch_cwd, case_file, expected_parts):
@@ -677,6 +827,8 @@ class TestLayer1And2:
             ("logic-29-sed-readonly-allow.json", dict(decision="Allow", risk_level="low")),
             # M13 看护对照：file_write 创建新文件放行
             ("logic-31-file-write-new-file-allow.json", dict(decision="Allow", risk_level="low")),
+            # 2026-11：heredoc 内 XML 闭合 /> 被误当重定向写（read_before_write 误报）
+            ("logic-32-rbw-heredoc-xml-close-allow.json", dict(decision="Allow", risk_level="low")),
             # L1 缺口补齐放行用例（每条规则配一个不命中的放行变体）
             ("allow-53-rm-single.json", dict(decision="Allow", risk_level="low")),
             ("allow-54-group-read.json", dict(decision="Allow", risk_level="low")),
@@ -773,6 +925,14 @@ class TestLayer1And2:
             ("combo-chain-allow.json", dict(decision="Allow", risk_level="low")),
             # 跨会话组合攻击链放行：多 session 均无害（对照 combo-cross-session-deny）
             ("combo-cross-session-allow.json", dict(decision="Allow", risk_level="low")),
+            # L2.2 形式化性质 P2-P8 放行对照（各自不满足触发条件）
+            ("formal-p2-sensitive-data-flow-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p3-low-integrity-reachability-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p4-no-exfil-after-privesc-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p5-no-exfil-after-credential-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p6-mc-ltl-rules-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p7-low-integrity-command-exec-allow.json", dict(decision="Allow", risk_level="low")),
+            ("formal-p8-sensitive-data-aggregation-allow.json", dict(decision="Allow", risk_level="low")),
             # 2026-09 审查批次2：.ssh.bak 备份目录放行 / sticky-only 放行 / 相对 var/tmp 豁免对照
             ("allow-119-rm-ssh-bak-dir.json", dict(decision="Allow", risk_level="low")),
             ("allow-120-chmod-sticky-only.json", dict(decision="Allow", risk_level="low")),
@@ -886,6 +1046,302 @@ class TestLayer1And2:
             ("allow-235-npm-install-normal.json", dict(decision="Allow", risk_level="low")),
             ("allow-236-docker-pull-official.json", dict(decision="Allow", risk_level="low")),
             ("allow-237-mcp-safe-description.json", dict(decision="Allow", risk_level="low")),
+            ("allow-301-inject-000-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-301-inject-001-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-301-inject-002-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-302-inject-003-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-303-inject-004-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-304-inject-005-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-305-inject-006-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-306-inject-007-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-307-inject-008-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-308-inject-009-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-309-inject-010-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-310-inject-011-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-311-inject-012-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-312-inject-013-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-313-inject-014-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-314-inject-015-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-315-inject-016-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-316-inject-017-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-317-inject-018-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-318-inject-019-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-319-inject-020-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-320-inject-021-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-321-inject-022-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-322-inject-023-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-323-inject-024-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-324-inject-025-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-325-inject-026-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-326-inject-027-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-327-inject-028-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-328-inject-029-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-329-inject-030-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-330-inject-031-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-331-inject-032-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-332-inject-033-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-333-inject-034-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-334-inject-035-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-335-inject-036-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-336-inject-037-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-337-inject-038-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-338-inject-039-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-339-inject-040-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-340-inject-041-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-341-inject-042-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-342-inject-043-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-343-inject-044-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-344-inject-045-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-345-inject-046-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-345-inject-047-search.json", dict(decision="Allow", risk_level="low")),
+            ("allow-400-sens-000.json", dict(decision="Allow", risk_level="low")),
+            ("allow-401-sens-001.json", dict(decision="Allow", risk_level="low")),
+            ("allow-402-sens-002.json", dict(decision="Allow", risk_level="low")),
+            ("allow-403-sens-003.json", dict(decision="Allow", risk_level="low")),
+            ("allow-404-sens-004.json", dict(decision="Allow", risk_level="low")),
+            ("allow-405-sens-005.json", dict(decision="Allow", risk_level="low")),
+            ("allow-406-sens-006.json", dict(decision="Allow", risk_level="low")),
+            ("allow-407-sens-007.json", dict(decision="Allow", risk_level="low")),
+            ("allow-408-sens-008.json", dict(decision="Allow", risk_level="low")),
+            ("allow-409-sens-009.json", dict(decision="Allow", risk_level="low")),
+            ("allow-410-sens-010.json", dict(decision="Allow", risk_level="low")),
+            ("allow-411-sens-011.json", dict(decision="Allow", risk_level="low")),
+            ("allow-412-sens-012.json", dict(decision="Allow", risk_level="low")),
+            ("allow-413-sens-013.json", dict(decision="Allow", risk_level="low")),
+            ("allow-414-sens-014.json", dict(decision="Allow", risk_level="low")),
+            ("allow-415-sens-015.json", dict(decision="Allow", risk_level="low")),
+            ("allow-416-sens-016.json", dict(decision="Allow", risk_level="low")),
+            ("allow-417-sens-017.json", dict(decision="Allow", risk_level="low")),
+            ("allow-418-sens-018.json", dict(decision="Allow", risk_level="low")),
+            ("allow-419-sens-019.json", dict(decision="Allow", risk_level="low")),
+            ("allow-420-sens-020.json", dict(decision="Allow", risk_level="low")),
+            ("allow-421-sens-021.json", dict(decision="Allow", risk_level="low")),
+            ("allow-422-sens-022.json", dict(decision="Allow", risk_level="low")),
+            ("allow-423-sens-023.json", dict(decision="Allow", risk_level="low")),
+            ("allow-424-sens-024.json", dict(decision="Allow", risk_level="low")),
+            ("allow-425-sens-025.json", dict(decision="Allow", risk_level="low")),
+            ("allow-426-sens-026.json", dict(decision="Allow", risk_level="low")),
+            ("allow-427-sens-027.json", dict(decision="Allow", risk_level="low")),
+            ("allow-428-sens-028.json", dict(decision="Allow", risk_level="low")),
+            ("allow-429-sens-029.json", dict(decision="Allow", risk_level="low")),
+            ("allow-430-sens-030.json", dict(decision="Allow", risk_level="low")),
+            ("allow-431-sens-031.json", dict(decision="Allow", risk_level="low")),
+            ("allow-432-sens-032.json", dict(decision="Allow", risk_level="low")),
+            ("allow-433-sens-033.json", dict(decision="Allow", risk_level="low")),
+            ("allow-434-sens-034.json", dict(decision="Allow", risk_level="low")),
+            ("allow-435-sens-035.json", dict(decision="Allow", risk_level="low")),
+            ("allow-436-sens-036.json", dict(decision="Allow", risk_level="low")),
+            ("allow-437-sens-037.json", dict(decision="Allow", risk_level="low")),
+            ("allow-438-sens-038.json", dict(decision="Allow", risk_level="low")),
+            ("allow-439-sens-039.json", dict(decision="Allow", risk_level="low")),
+            ("allow-440-sens-040.json", dict(decision="Allow", risk_level="low")),
+            ("allow-441-sens-041.json", dict(decision="Allow", risk_level="low")),
+            ("allow-442-sens-042.json", dict(decision="Allow", risk_level="low")),
+            ("allow-443-sens-043.json", dict(decision="Allow", risk_level="low")),
+            ("allow-444-sens-044.json", dict(decision="Allow", risk_level="low")),
+            ("allow-445-sens-045.json", dict(decision="Allow", risk_level="low")),
+            ("allow-446-sens-046.json", dict(decision="Allow", risk_level="low")),
+            ("allow-447-sens-047.json", dict(decision="Allow", risk_level="low")),
+            ("allow-448-sens-048.json", dict(decision="Allow", risk_level="low")),
+            ("allow-449-sens-049.json", dict(decision="Allow", risk_level="low")),
+            ("allow-450-sens-050.json", dict(decision="Allow", risk_level="low")),
+            ("allow-451-sens-051.json", dict(decision="Allow", risk_level="low")),
+            ("allow-452-sens-052.json", dict(decision="Allow", risk_level="low")),
+            ("allow-453-sens-053.json", dict(decision="Allow", risk_level="low")),
+            ("allow-454-sens-054.json", dict(decision="Allow", risk_level="low")),
+            ("allow-455-sens-055.json", dict(decision="Allow", risk_level="low")),
+            ("allow-456-sens-056.json", dict(decision="Allow", risk_level="low")),
+            ("allow-457-sens-057.json", dict(decision="Allow", risk_level="low")),
+            ("allow-458-sens-058.json", dict(decision="Allow", risk_level="low")),
+            ("allow-459-sens-059.json", dict(decision="Allow", risk_level="low")),
+            ("allow-460-sens-060.json", dict(decision="Allow", risk_level="low")),
+            ("allow-461-sens-061.json", dict(decision="Allow", risk_level="low")),
+            ("allow-462-sens-062.json", dict(decision="Allow", risk_level="low")),
+            ("allow-463-sens-063.json", dict(decision="Allow", risk_level="low")),
+            ("allow-464-sens-064.json", dict(decision="Allow", risk_level="low")),
+            ("allow-465-sens-065.json", dict(decision="Allow", risk_level="low")),
+            ("allow-466-sens-066.json", dict(decision="Allow", risk_level="low")),
+            ("allow-467-sens-067.json", dict(decision="Allow", risk_level="low")),
+            ("allow-468-sens-068.json", dict(decision="Allow", risk_level="low")),
+            ("allow-900-danger-000.json", dict(decision="Allow", risk_level="low")),
+            ("allow-901-danger-001.json", dict(decision="Allow", risk_level="low")),
+            ("allow-902-danger-002.json", dict(decision="Allow", risk_level="low")),
+            ("allow-903-danger-003.json", dict(decision="Allow", risk_level="low")),
+            ("allow-904-danger-004.json", dict(decision="Allow", risk_level="low")),
+            ("allow-905-danger-005.json", dict(decision="Allow", risk_level="low")),
+            ("allow-906-danger-006.json", dict(decision="Allow", risk_level="low")),
+            ("allow-907-danger-007.json", dict(decision="Allow", risk_level="low")),
+            ("allow-908-danger-008.json", dict(decision="Allow", risk_level="low")),
+            ("allow-909-danger-009.json", dict(decision="Allow", risk_level="low")),
+            ("allow-910-danger-010.json", dict(decision="Allow", risk_level="low")),
+            ("allow-911-danger-011.json", dict(decision="Allow", risk_level="low")),
+            ("allow-912-danger-012.json", dict(decision="Allow", risk_level="low")),
+            ("allow-913-danger-013.json", dict(decision="Allow", risk_level="low")),
+            ("allow-914-danger-014.json", dict(decision="Allow", risk_level="low")),
+            ("allow-915-danger-015.json", dict(decision="Allow", risk_level="low")),
+            ("allow-916-danger-016.json", dict(decision="Allow", risk_level="low")),
+            ("allow-917-danger-017.json", dict(decision="Allow", risk_level="low")),
+            ("allow-918-danger-018.json", dict(decision="Allow", risk_level="low")),
+            ("allow-919-danger-019.json", dict(decision="Allow", risk_level="low")),
+            ("allow-920-danger-020.json", dict(decision="Allow", risk_level="low")),
+            ("allow-921-danger-021.json", dict(decision="Allow", risk_level="low")),
+            ("allow-922-danger-022.json", dict(decision="Allow", risk_level="low")),
+            ("allow-923-danger-023.json", dict(decision="Allow", risk_level="low")),
+            ("allow-924-danger-024.json", dict(decision="Allow", risk_level="low")),
+            ("allow-925-danger-025.json", dict(decision="Allow", risk_level="low")),
+            ("allow-926-danger-026.json", dict(decision="Allow", risk_level="low")),
+            ("allow-927-danger-027.json", dict(decision="Allow", risk_level="low")),
+            ("allow-928-danger-028.json", dict(decision="Allow", risk_level="low")),
+            ("allow-929-danger-029.json", dict(decision="Allow", risk_level="low")),
+            ("allow-930-danger-030.json", dict(decision="Allow", risk_level="low")),
+            ("allow-931-danger-031.json", dict(decision="Allow", risk_level="low")),
+            ("allow-932-danger-032.json", dict(decision="Allow", risk_level="low")),
+            ("allow-933-danger-033.json", dict(decision="Allow", risk_level="low")),
+            ("allow-934-danger-034.json", dict(decision="Allow", risk_level="low")),
+            ("allow-935-danger-035.json", dict(decision="Allow", risk_level="low")),
+            ("allow-936-danger-036.json", dict(decision="Allow", risk_level="low")),
+            ("allow-937-danger-037.json", dict(decision="Allow", risk_level="low")),
+            ("allow-938-danger-038.json", dict(decision="Allow", risk_level="low")),
+            ("allow-939-danger-039.json", dict(decision="Allow", risk_level="low")),
+            ("allow-940-danger-040.json", dict(decision="Allow", risk_level="low")),
+            ("allow-941-danger-041.json", dict(decision="Allow", risk_level="low")),
+            ("allow-942-danger-042.json", dict(decision="Allow", risk_level="low")),
+            ("allow-943-danger-043.json", dict(decision="Allow", risk_level="low")),
+            ("allow-944-danger-044.json", dict(decision="Allow", risk_level="low")),
+            ("allow-945-danger-045.json", dict(decision="Allow", risk_level="low")),
+            ("allow-946-danger-046.json", dict(decision="Allow", risk_level="low")),
+            ("allow-947-danger-047.json", dict(decision="Allow", risk_level="low")),
+            ("allow-948-danger-048.json", dict(decision="Allow", risk_level="low")),
+            ("allow-949-danger-049.json", dict(decision="Allow", risk_level="low")),
+            ("allow-950-danger-050.json", dict(decision="Allow", risk_level="low")),
+            ("allow-951-danger-051.json", dict(decision="Allow", risk_level="low")),
+            ("allow-952-danger-052.json", dict(decision="Allow", risk_level="low")),
+            ("allow-953-danger-053.json", dict(decision="Allow", risk_level="low")),
+            ("allow-954-danger-054.json", dict(decision="Allow", risk_level="low")),
+            ("allow-955-danger-055.json", dict(decision="Allow", risk_level="low")),
+            ("allow-956-danger-056.json", dict(decision="Allow", risk_level="low")),
+            ("allow-957-danger-057.json", dict(decision="Allow", risk_level="low")),
+            ("allow-958-danger-058.json", dict(decision="Allow", risk_level="low")),
+            ("allow-959-danger-059.json", dict(decision="Allow", risk_level="low")),
+            ("allow-960-danger-060.json", dict(decision="Allow", risk_level="low")),
+            ("allow-961-danger-061.json", dict(decision="Allow", risk_level="low")),
+            ("allow-962-danger-062.json", dict(decision="Allow", risk_level="low")),
+            ("allow-963-danger-063.json", dict(decision="Allow", risk_level="low")),
+            ("allow-964-danger-064.json", dict(decision="Allow", risk_level="low")),
+            ("allow-965-danger-065.json", dict(decision="Allow", risk_level="low")),
+            ("allow-966-danger-066.json", dict(decision="Allow", risk_level="low")),
+            ("allow-967-danger-067.json", dict(decision="Allow", risk_level="low")),
+            ("allow-968-danger-068.json", dict(decision="Allow", risk_level="low")),
+            ("allow-969-danger-069.json", dict(decision="Allow", risk_level="low")),
+            ("allow-970-danger-070.json", dict(decision="Allow", risk_level="low")),
+            ("allow-971-danger-071.json", dict(decision="Allow", risk_level="low")),
+            ("allow-972-danger-072.json", dict(decision="Allow", risk_level="low")),
+            ("allow-973-danger-073.json", dict(decision="Allow", risk_level="low")),
+            ("allow-974-danger-074.json", dict(decision="Allow", risk_level="low")),
+            ("allow-975-danger-075.json", dict(decision="Allow", risk_level="low")),
+            ("allow-976-danger-076.json", dict(decision="Allow", risk_level="low")),
+            ("allow-977-danger-077.json", dict(decision="Allow", risk_level="low")),
+            ("allow-978-danger-078.json", dict(decision="Allow", risk_level="low")),
+            ("allow-979-danger-079.json", dict(decision="Allow", risk_level="low")),
+            ("allow-980-danger-080.json", dict(decision="Allow", risk_level="low")),
+            ("allow-981-danger-081.json", dict(decision="Allow", risk_level="low")),
+            ("allow-982-danger-082.json", dict(decision="Allow", risk_level="low")),
+            ("allow-983-danger-083.json", dict(decision="Allow", risk_level="low")),
+            ("allow-984-danger-084.json", dict(decision="Allow", risk_level="low")),
+            ("allow-985-danger-085.json", dict(decision="Allow", risk_level="low")),
+            ("allow-986-danger-086.json", dict(decision="Allow", risk_level="low")),
+            ("allow-987-danger-087.json", dict(decision="Allow", risk_level="low")),
+            ("allow-988-danger-088.json", dict(decision="Allow", risk_level="low")),
+            ("allow-989-danger-089.json", dict(decision="Allow", risk_level="low")),
+            ("allow-990-danger-090.json", dict(decision="Allow", risk_level="low")),
+            ("allow-991-danger-091.json", dict(decision="Allow", risk_level="low")),
+            ("allow-992-danger-092.json", dict(decision="Allow", risk_level="low")),
+            ("allow-993-danger-093.json", dict(decision="Allow", risk_level="low")),
+            ("allow-994-danger-094.json", dict(decision="Allow", risk_level="low")),
+            ("allow-995-danger-095.json", dict(decision="Allow", risk_level="low")),
+            ("allow-996-danger-096.json", dict(decision="Allow", risk_level="low")),
+            ("allow-997-danger-097.json", dict(decision="Allow", risk_level="low")),
+            ("allow-998-danger-098.json", dict(decision="Allow", risk_level="low")),
+            ("allow-999-danger-099.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1000-danger-100.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1001-danger-101.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1002-danger-102.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1003-danger-103.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1004-danger-104.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1005-danger-105.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1006-danger-106.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1007-danger-107.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1008-danger-108.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1009-danger-109.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1010-danger-110.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1011-danger-111.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1012-danger-112.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1013-danger-113.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1014-danger-114.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1015-danger-115.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1070-danger-170.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1071-danger-171.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1074-danger-174.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1075-danger-175.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1076-danger-176.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1080-danger-180.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1081-danger-181.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1082-danger-182.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1083-danger-183.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1084-danger-184.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1085-danger-185.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1086-danger-186.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1087-danger-187.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1088-danger-188.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1089-danger-189.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1090-danger-190.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1091-danger-191.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1092-danger-192.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1093-danger-193.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1094-danger-194.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1095-danger-195.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1096-danger-196.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1097-danger-197.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1098-danger-198.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1099-danger-199.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1100-danger-200.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1101-danger-201.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1102-danger-202.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1103-danger-203.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1104-danger-204.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1105-danger-205.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1106-danger-206.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1107-danger-207.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1108-danger-208.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1109-danger-209.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1110-danger-210.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1111-danger-211.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1112-danger-212.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1113-danger-213.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1114-danger-214.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1115-danger-215.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1116-danger-216.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1117-danger-217.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1118-danger-218.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1119-danger-219.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1120-danger-220.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1121-danger-221.json", dict(decision="Allow", risk_level="low")),
+            # 2026-11：内联补位判定误报修复（0.15.4 起 Image.open / open('/tmp/x') 被 critical 误杀）
+            ("allow-1122-py-inline-image-open.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1123-py-inline-open-tmp.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1124-py-inline-os-system-ls.json", dict(decision="Allow", risk_level="low")),
+            # 2026-11：grep 搜索模式串里的 |passwd 是正则或关系，非管道改密
+            ("allow-1125-grep-pattern-pipe-passwd.json", dict(decision="Allow", risk_level="low")),
+            ("combo-listener-exec-scan-allow.json", dict(decision="Allow", risk_level="low")),
+            ("combo-listener-exec-cred-allow.json", dict(decision="Allow", risk_level="low")),
+            ("combo-listener-exec-exfil-allow.json", dict(decision="Allow", risk_level="low")),
+            ("combo-listener-exec-persist-allow.json", dict(decision="Allow", risk_level="low")),
+            ("combo-exec-scan-cred-allow.json", dict(decision="Allow", risk_level="low")),
+            ("combo-exec-privesc-cred-allow.json", dict(decision="Allow", risk_level="low")),
+            ("combo-privesc-cred-exfil-allow.json", dict(decision="Allow", risk_level="low")),
+            ("combo-persist-exfil-allow.json", dict(decision="Allow", risk_level="low")),
+            ("combo-exec-persist-exfil-allow.json", dict(decision="Allow", risk_level="low")),
+            ("allow-intent-query-read.json", dict(decision="Allow", risk_level="low")),
         ],
     )
     def test_allow_cases(self, default_config, linux_profile, script_branch_cwd, python_script_branch_cwd, nested_script_branch_cwd, case_file, expected_parts):
@@ -967,6 +1423,7 @@ class TestLayer1And2:
 
 # ========== 测试 LLM 层（需 API Key） ==========
 
+@pytest.mark.usefixtures("_cases_use_builtin_rules")
 class TestLayer3:
     """测试层3（LLM 语义分析）。
 
@@ -1005,6 +1462,10 @@ class TestLayer3:
             "llm-26-rsync-src-remote.json",
             "llm-27-command-substitution.json",
             "llm-28-unzip-normal.json",
+            ("llm-29-file-access-private.json"),
+            ("llm-30-indirect-allow.json"),
+            ("llm-31-intent-allow.json"),
+            ("llm-32-persistence-allow.json"),
         ],
     )
     def test_llm_cases(self, llm_config, linux_profile, llm_probe_available, case_file):
@@ -1277,12 +1738,11 @@ class TestLogicRules:
         assert result.hit
         assert result.risk_type == "file_access"
 
-    def test_password_consent_weak_when_question_on_topic(self):
-        """提问正文与密码相关但没上报 output → 弱授权放行。
+    def test_password_consent_denied_when_user_never_answered(self):
+        """提问正文相关但没上报 output → 仍拦截（弱授权已取消，2026-10）。
 
-        `output` 是 Agent 侧主动上报的字段，AgentGate 的请求模型此前没有它、
-        OpenDesk / xiaoO 也不收集，属于结构性缺失。继续拦就是误报。
-        注意：这层只在 **L1 未命中** 时执行（默认 L1 会先把这类命令拦掉）。
+        旧行为是「提问正文命中密码类关键词就放行」——但提问正文是 agent 自己写的，
+        等于 agent 自问自答即可绕过；且「问了没答」本来就不是授权。
         """
         result = self.checker._check_password_consent(
             action_history=[
@@ -1290,7 +1750,8 @@ class TestLogicRules:
             ],
             a_next={"action_type": "bash", "action_detail": "echo pass | passwd"},
         )
-        assert not result.hit
+        assert result.hit
+        assert result.risk_type == "consent_missing"
 
     def test_password_consent_rejects_unrelated_question(self):
         """无关提问不能当授权（历史 fail-open 回归的护栏）。"""
@@ -1433,10 +1894,14 @@ class TestLogicRules:
         assert result.risk_level == "high"
 
     def test_password_consent_allowed(self):
-        """非交互式密码修改有用户授权应放行"""
+        """非交互式密码修改有用户明确授权应放行（确认型提问 + 肯定回答）"""
         result = self.checker._check_password_consent(
             action_history=[
-                {"action_type": "ask_user_question", "output": "mypassword"},
+                {
+                    "action_type": "ask_user_question",
+                    "action_detail": "要修改 ops 的密码吗？",
+                    "output": "是，改成 mypassword",
+                },
             ],
             a_next={"action_type": "bash", "action_detail": "echo pass | passwd"},
         )

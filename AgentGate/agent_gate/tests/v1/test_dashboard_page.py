@@ -111,3 +111,11 @@ def test_refresh_does_not_clobber_text_selection():
     assert "_userIsSelecting" in DASHBOARD_HTML
     assert "_lastRecentKey" in DASHBOARD_HTML
     assert "_lastPageSig" in DASHBOARD_HTML
+
+
+def test_recent_table_shows_reason_column():
+    """记录表必须展示「原因」列（与 TS V1 看板对齐）。"""
+    header = DASHBOARD_HTML.split('<table id="recent-calls">', 1)[1].split("</thead>", 1)[0]
+    assert "<th>Reason</th>" in header
+    assert "reason-cell" in DASHBOARD_HTML
+    assert "escapeHtml(r.reason" in DASHBOARD_HTML

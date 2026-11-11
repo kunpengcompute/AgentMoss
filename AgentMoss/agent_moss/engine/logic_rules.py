@@ -177,19 +177,77 @@ PASSWORD_MODIFY_PATTERNS: list[str] = _load_l2_patterns("password_modify_consent
 # 用户/组删除命令模式（归一化自 rules/l2_rules.json）
 USER_DELETION_PATTERNS: list[str] = _load_l2_patterns("user_deletion_consent")
 
-#: 弱授权判定：``ask_user_question`` 的**提问正文**是否与本类操作相关。
+#: 授权提问的**相关性**判定：``ask_user_question`` 的提问正文是否与本类操作相关。
 #:
-#: 背景：``output``（用户回答）是 Agent 侧主动上报的字段，AgentGate 的请求模型
-#: 此前根本没有它、OpenDesk / xiaoO 也不收集 —— 「问了但拿不到回答」是结构性缺失。
-#: 若继续 Deny 就是确定性误报（改密码 / 删用户命令一律被拒）。
-#:
-#: 但不能简单「问过就放行」：那会退回历史 fail-open 行为（问一句「要重启吗？」
-#: 就能绕过改密码拦截，见 tests/test_entrypoint_parity.py 的回归用例）。
-#: 所以只在**提问正文命中了密码/账户类关键词**时视为弱授权。
+#: 只在提问正文命中了密码/账户类关键词时，这条提问才有资格作为授权来源。
 CONSENT_TOPIC_PATTERN = re.compile(
     r"密码|口令|passwd|password|凭据|凭证|用户|账户|账号|userdel|deluser|groupdel",
     re.IGNORECASE,
 )
+
+#: 用户回答的**否定词**。命中即视为拒绝 —— 优先于肯定词判定（「不，别删」含否定）。
+CONSENT_NEGATIVE_PATTERN = re.compile(
+    r"(?:"
+    r"否|不|别|取消|拒绝|停止|终止|算了|算了|"
+    r"\bno\b|\bnope\b|\bcancel\b|\babort\b|\bstop\b|\bdeny\b|\breject\b|"
+    r"\bdecline\b|\bdon'?t\b|\bdo\s+not\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: 用户回答的**肯定词**。否定词优先；两者都不命中 → 意图无法判定 → 不算授权。
+CONSENT_AFFIRMATIVE_PATTERN = re.compile(
+    r"(?:"
+    r"是|好|可以|行|嗯|对|确认|同意|继续|执行|删除|删掉|移除|修改|重置|改密|"
+    r"\byes\b|\by\b|\byep\b|\byeah\b|\bok\b|\bokay\b|\bconfirm(?:ed)?\b|"
+    r"\bproceed\b|\bcontinue\b|\bsure\b|\bapprove\b|\baccept\b|\bagree\b|"
+    r"\bdo\s+it\b|\bgo\s+ahead\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: **索取型**提问：agent 向用户**索取凭据/内容**（而不是征求同意）。
+#:
+#: 「请输入新的登录密码」这类提问，用户的回答就是密码本身（`mypassword`），
+#: 不可能出现「是/好/确认」——用户提供了内容即视为配合改密。区别于确认型提问
+#: （「确认删除用户 ops 吗？」），后者必须拿到肯定回答。
+CONSENT_INPUT_REQUEST_PATTERN = re.compile(
+    r"(?:请|输入|提供|填写|给出|告诉我).{0,8}(?:新的?)?(?:密码|口令|passwd|password)",
+    re.IGNORECASE,
+)
+
+#: 授权提问必须落在**最近 N 条动作**内。
+#:
+#: 防「预支授权」：一小时前问过「要重启服务吗」用户答「是」，不能拿来删今天的用户。
+#: 正常流程是「问 → 答 → 立刻执行」，中间隔着大量无关动作说明这条提问与本次操作无关。
+#: 取最近一条 ``ask_user_question`` 判定，更早的一律不认（不做「往前翻找任意一条」）。
+CONSENT_MAX_DISTANCE = 5
+
+#: 授权时效（秒）。仅当提问与本次动作**都**带 ``called_at`` 时生效；缺任一侧则跳过
+#: 时间窗，由 ``CONSENT_MAX_DISTANCE`` 兜底。可用环境变量覆盖。
+CONSENT_TTL_SECONDS = 300
+
+#: 「shell 工具」的动作类型集合。
+#:
+#: 与 L2 其他规则（read_before_write / 写意图判定）保持同一口径：OpenDesk 注册的
+#: ``executeBash``（以及旧版 ``terminal-executeBash``）同样是 shell 工具。授权类规则
+#: 只认裸 ``bash`` 时，经 AgentGate 透传的工具名会让整条规则**命中不了** ——
+#: 不是「判未授权」，而是「规则根本没跑」（OpenDesk 链路实测缺陷）。
+BASH_LIKE_ACTION_TYPES = ("bash", "executebash", "terminal-executebash")
+
+#: 「向用户提问」的动作类型：标准名 + OpenDesk 注册名。
+#:
+#: OpenDesk 的 AskUserTool 注册名是 ``askUser``（消息里也可能带 ``interaction-`` 前缀）。
+#: AgentGate 未做工具名归一化时，历史里的提问会以 ``askuser`` 出现 —— 只认
+#: ``ask_user_question`` 会把真实授权判成「没问过」，用户答「是」也照样拦。
+ASK_USER_ACTION_TYPES = ("ask_user_question", "askuser")
+
+
+def _is_ask_user_action(action_type: str) -> bool:
+    """动作类型是否为「向用户提问」。兼容裸名与 ``<ns>-askUser`` 命名空间前缀。"""
+    if action_type in ASK_USER_ACTION_TYPES:
+        return True
+    return action_type.endswith("-askuser")
 
 # ==================== 组合攻击链检测（combo_chain）====================
 # 单步操作（创建 Flask 服务 / 端口扫描 / 读 known_hosts）各自无害，但按 kill chain
@@ -268,6 +326,26 @@ def _match_dangerous_action(action_detail: str, action: str) -> bool:
     # 英文词走词边界 + 排除参数前缀
     escaped = re.escape(action)
     return bool(re.search(rf"(?<![-\w]){escaped}\b", action_detail, re.IGNORECASE))
+
+
+def has_exec_bypass_chain(action_detail: str) -> bool:
+    """是否含「写脚本 + 后续执行」或「管道喂解释器/持久化消费者」绕过链。
+
+    这两种链里的引号内容是**稍后会被执行的载荷**而非字面量，任何"引号内不算"
+    类守卫（heuristic 的 _strip_literal_text_segments 剥离、NEW-FP-R 引号守卫）
+    都必须对它失效，否则绕过链在 L1/L2 漏检（inline-09/10 依赖）。
+    """
+    _exec_after = r"&&|\|\||;|\n|\|"
+    return (
+        re.search(r">\s*[/~]\S*\.(sh|py|pl|rb)\b", action_detail)
+        and re.search(rf"(?:{_exec_after})\s*(?:bash|sh|zsh|dash|python|perl|ruby|node)", action_detail)
+    ) or re.search(r"\|\s*(?:bash|sh|zsh|dash|python|perl|ruby|node|crontab|at)\b", action_detail) is not None
+
+
+#: 全量剥引号内容（NEW-FP-R 引号守卫用）：剥**整条命令**的引号内容（不按首词
+#: 区分），只用于判断「命中是否纯在引号内」。与 heuristic 的
+#: _strip_literal_text_segments（首词 echo/printf 才剥）语义不同。
+ALL_QUOTES_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 
 def _is_write_operation(
@@ -365,7 +443,10 @@ def _is_write_operation(
         # 真实文件重定向：> 或 >> 后紧跟非空白、非 & 的文件目标字符。
         # `>{1,2}\s*(?!&)\S` 匹配 echo x > /file、cat in >file、sort in >> /file；
         # 排除 ls 2>&1、echo >&2（>& 紧邻或 > 后 & 是 fd 合并，非写文件）。
-        if re.search(r">{1,2}\s*(?!&)\S", detail_without_quotes):
+        # 另排除代码符号里的 >：`/>`（XML 闭合）、`->`（类型注解）、`=>`（箭头）。
+        # 2026-11 实测：python heredoc 里 `<a:alpha val="100"/>` 剥引号后剩 `val=/>`，
+        # 被当重定向写 → read_before_write 误判（xiaoO 生成 PPT 时被 Deny）。
+        if re.search(r"(?<![/\-=>])>{1,2}\s*(?!&)\S", detail_without_quotes):
             return True
     return False
 
@@ -819,7 +900,12 @@ class LogicRulesChecker:
                 detail_no_devnull,
             )
             detail_no_quotes = re.sub(r"'[^']*'|\"[^\"]*\"", "", detail_unquoted_redirect)
-            has_redirect_write = bool(re.search(r">{1,2}\s*(?!&)\S", detail_no_quotes))
+            # 排除代码符号里的 >：`/>`（XML 闭合）、`->`（类型注解）、`=>`（箭头）。
+            # 2026-11 实测：python heredoc 里 `<a:alpha val="100"/>` 剥引号后剩
+            # `val=/>`，被当重定向写 → read_before_write 误判。
+            has_redirect_write = bool(
+                re.search(r"(?<![/\-=>])>{1,2}\s*(?!&)\S", detail_no_quotes)
+            )
             has_write_seg = has_redirect_write
             if not has_write_seg:
                 for seg in _split_shell_segments(action_detail):
@@ -1582,54 +1668,118 @@ class LogicRulesChecker:
             risk_type="file_access",
         )
 
+    @staticmethod
+    def _consent_within_ttl(asked: dict, a_next: dict) -> bool:
+        """提问与本次动作的间隔是否在 ``CONSENT_TTL_SECONDS`` 内。
+
+        仅当两侧都带 ``called_at`` 时校验；缺任一侧（调用方未上报时间）返回 True，
+        由 ``CONSENT_MAX_DISTANCE`` 的距离窗口兜底。时间格式不合法同样返回 True ——
+        时间窗是增强项，不是主防线，不因解析失败额外拦截。
+        """
+        raw = os.getenv("AGENT_MOSS_CONSENT_TTL_SECONDS", "").strip()
+        try:
+            ttl = int(raw) if raw else CONSENT_TTL_SECONDS
+        except ValueError:
+            ttl = CONSENT_TTL_SECONDS
+        if ttl <= 0:
+            return True
+        asked_at = str(asked.get("called_at", "") or "").strip()
+        next_at = str(a_next.get("called_at", "") or "").strip()
+        if not asked_at or not next_at:
+            return True
+        try:
+            from datetime import datetime
+            a = datetime.fromisoformat(asked_at.replace("Z", "+00:00"))
+            b = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
+            return abs((b - a).total_seconds()) <= ttl
+        except (ValueError, TypeError):
+            return True
+
+    def _has_valid_consent(
+        self, action_history: list[dict[str, object]], a_next: dict[str, str]
+    ) -> bool:
+        """历史中是否存在**可采信**的用户授权。
+
+        有效授权必须同时满足 5 条（任一条不满足即视为未授权，fail-closed）：
+
+        1. 动作类型是 ``ask_user_question``；
+        2. ``output``（用户回答）非空 —— 只提问不回答不算授权；
+        3. 提问正文命中本类操作关键词（``CONSENT_TOPIC_PATTERN``）——
+           「要重启服务吗」不能给删用户背书；
+        4. 回答是**肯定**：否定词优先（回答「否」也曾被判为授权，实测缺陷），
+           既无否定也无肯定 → 意图无法判定 → 不算授权；
+        5. 提问落在最近 ``CONSENT_MAX_DISTANCE`` 条动作内，且（若带 ``called_at``）
+           与本次动作间隔不超过 ``CONSENT_TTL_SECONDS``。
+
+        ⚠️ 只看**最近一条** ``ask_user_question``，不往前翻找：正常流程是
+        「问 → 答 → 立刻执行」，更早的提问与本次操作无关。旧实现遍历整个
+        action_history、任意一条带 output 的提问就放行 —— 实测「用户回答『否』」
+        「问『要重启服务吗』答『是』」都能过，授权形同虚设。
+        """
+        if not action_history:
+            return False
+        for action in reversed(action_history[-CONSENT_MAX_DISTANCE:]):
+            if not isinstance(action, dict):
+                continue
+            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
+            if not _is_ask_user_action(hist_type):
+                continue
+            # 最近这条提问是唯一候选；它不合格就直接判未授权，不再往前找。
+            output = str(action.get("output", "") or "").strip()
+            if not output:
+                return False
+            question = str(action.get("action_detail", "") or "")
+            if not CONSENT_TOPIC_PATTERN.search(question):
+                return False
+            if CONSENT_NEGATIVE_PATTERN.search(output):
+                return False
+            # 索取型提问（「请输入新的登录密码」）：用户提供了内容即为授权；
+            # 确认型提问（「确认删除用户 ops 吗？」）：必须拿到肯定回答。
+            if not CONSENT_INPUT_REQUEST_PATTERN.search(question) and not CONSENT_AFFIRMATIVE_PATTERN.search(output):
+                return False
+            return self._consent_within_ttl(action, a_next)
+        return False
+
     def _check_password_consent(
         self, action_history: list[dict[str, object]], a_next: dict[str, str]
     ) -> LogicRuleResult:
         """
         密码修改授权检测：
-        非交互式密码修改命令必须在 action_history 中有 ask_user_question 且用户返回了密码。
+        非交互式密码修改命令必须在 action_history 中有 ask_user_question 且用户明确确认。
         交互式 passwd（无参数）不在此列，因为 LLM 无法完成交互式输入。
         """
         action_detail = a_next.get("action_detail", "").lower()
         action_type = a_next.get("action_type", "").lower()
 
-        # 只检测 bash 工具中的密码修改命令
-        if action_type != "bash":
+        # 只检测 shell 工具中的密码修改命令（executeBash 等同 bash）
+        if action_type not in BASH_LIKE_ACTION_TYPES:
             return LogicRuleResult(hit=False)
 
         is_password_modify = any(
             re.search(p, action_detail, re.IGNORECASE) for p in self._get_password_patterns()
         )
+        # NEW-FP-R：密码修改家族的命中必须经得起全量剥引号——真实语义的管道/命令词
+        # 都在引号外；只在引号内出现（grep 搜索模式串里的 |passwd）是字面量误报。
+        # 绕过链（写脚本+执行 / 管道喂解释器）例外：引号内载荷稍后会被执行。
+        if is_password_modify and not has_exec_bypass_chain(action_detail):
+            _no_quotes = ALL_QUOTES_RE.sub(" ", action_detail)
+            is_password_modify = any(
+                re.search(p, _no_quotes, re.IGNORECASE) for p in self._get_password_patterns()
+            )
         if not is_password_modify:
             return LogicRuleResult(hit=False)
 
-        # 检查 action_history 中是否有 ask_user_question 且用户返回了答案
-        asked_without_answer = False
-        for action in action_history:
-            if not isinstance(action, dict):
-                continue
-            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
-            output = str(action.get("output", ""))
-            if hist_type == "ask_user_question":
-                if output.strip():
-                    return LogicRuleResult(hit=False)  # 用户已授权，放行
-                # 无 output（Agent 未上报）：只有提问正文与密码/账户相关才算弱授权，
-                # 否则退回 Deny —— 「要重启服务吗？」这类无关提问不能当作授权。
-                if CONSENT_TOPIC_PATTERN.search(str(action.get("action_detail", ""))):
-                    asked_without_answer = True
-
-        # 弱授权：Agent 问了与操作相关的问题但没上报 output（结构性缺失），
-        # 继续拦截就是确定性误报。无关提问不会走到这里，见 CONSENT_TOPIC_PATTERN。
-        if asked_without_answer:
-            return LogicRuleResult(hit=False)
+        if self._has_valid_consent(action_history, a_next):
+            return LogicRuleResult(hit=False)  # 用户已明确授权，放行
 
         return LogicRuleResult(
             hit=True,
             violated_rule="password_modify_requires_consent",
             risk_level="high",
             reason=(
-                "执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 "
-                "ask_user_question 操作，可能存在未授权的密码修改风险"
+                "执行非交互式密码修改命令，但历史执行序列中未发现用户明确授权的 "
+                "ask_user_question（须用户正面回答且与本次操作相关），"
+                "可能存在未授权的密码修改风险"
             ),
             risk_type="consent_missing",
         )
@@ -1644,8 +1794,8 @@ class LogicRulesChecker:
         action_detail = a_next.get("action_detail", "").lower()
         action_type = a_next.get("action_type", "").lower()
 
-        # 只检测 bash 工具中的用户删除命令
-        if action_type != "bash":
+        # 只检测 shell 工具中的用户删除命令（executeBash 等同 bash）
+        if action_type not in BASH_LIKE_ACTION_TYPES:
             return LogicRuleResult(hit=False)
 
         is_user_deletion = any(
@@ -1654,32 +1804,17 @@ class LogicRulesChecker:
         if not is_user_deletion:
             return LogicRuleResult(hit=False)
 
-        # 检查 action_history 中是否有 ask_user_question 且用户确认了
-        asked_without_answer = False
-        for action in action_history:
-            if not isinstance(action, dict):
-                continue
-            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
-            output = str(action.get("output", ""))
-            if hist_type == "ask_user_question":
-                if output.strip():
-                    return LogicRuleResult(hit=False)  # 用户已授权，放行
-                # 无 output（Agent 未上报）：只有提问正文与密码/账户相关才算弱授权，
-                # 否则退回 Deny —— 「要重启服务吗？」这类无关提问不能当作授权。
-                if CONSENT_TOPIC_PATTERN.search(str(action.get("action_detail", ""))):
-                    asked_without_answer = True
-
-        # 同 password_consent：``output`` 结构性缺失时按弱授权放行，避免误报。
-        if asked_without_answer:
-            return LogicRuleResult(hit=False)
+        if self._has_valid_consent(action_history, a_next):
+            return LogicRuleResult(hit=False)  # 用户已明确授权，放行
 
         return LogicRuleResult(
             hit=True,
             violated_rule="user_deletion_requires_consent",
             risk_level="high",
             reason=(
-                "执行删除系统用户命令，但历史执行序列中未发现向用户确认的 "
-                "ask_user_question 操作，可能存在未授权的用户删除风险"
+                "执行删除系统用户命令，但历史执行序列中未发现用户明确授权的 "
+                "ask_user_question（须用户正面回答且与本次操作相关），"
+                "可能存在未授权的用户删除风险"
             ),
             risk_type="consent_missing",
         )

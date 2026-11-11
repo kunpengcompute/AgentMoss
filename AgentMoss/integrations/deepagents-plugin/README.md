@@ -165,4 +165,4 @@ uv run --with ruff ruff check src tests
 
 两个 Moss 解析器测试需额外设置 `PYTHONPATH=/path/to/AgentMoss`，指向可导入 `agent_moss` 的源码目录。
 
-[方案设计](../../../docs/superpowers/specs/2026-11-02-deepagents-session-history-design.md) · [官方 Middleware 文档](https://docs.langchain.com/oss/python/langchain/middleware/custom)
+[官方 Middleware 文档](https://docs.langchain.com/oss/python/langchain/middleware/custom)

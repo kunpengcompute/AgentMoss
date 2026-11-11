@@ -1,6 +1,6 @@
 # AgentMoss
 
-基于鲲鹏硬件的智能体运行时安全检测方案。
+面向 AI Agent 工具调用的运行时安全检测方案（Python 版）。
 
 ## 项目介绍
 
@@ -9,6 +9,15 @@
 AgentMoss 面向 AI Agent 的工具调用安全场景，在命令执行、文件读写等动作发生前，结合用户意图、调用历史和系统上下文进行安全分析，返回 `Allow` 或 `Deny` 判定，帮助接入方识别和阻断高风险操作。
 
 本项目包含 **AgentMoss** 和 **AgentGate** 两个组件：AgentMoss 提供多层安全分析能力，AgentGate 提供 Agent 接入、上下文采集与调用审计能力。两个组件通过 HTTP API 协同工作，接入方根据返回的判定决定是否执行原工具。
+
+当前代码同步自两个商业版仓库的 `main`（2026-11-11 核对）：
+
+| 目录 | 上游 | 提交 |
+| --- | --- | --- |
+| `AgentMoss/` | [AgentMoss-commercial](https://gitcode.com/kenhkl/AgentMoss-commercial) | `c01b6eb52b5b36178e2aca52f22449b54d2e7e9e` |
+| `AgentGate/` | [AgentGate-commercial](https://gitcode.com/kenhkl/AgentGate-commercial) | `16ff75ecfaa1516fa922d072d1382f3a456e3b42` |
+
+保留了本仓库的 DeepAgents 插件。当前同步版本不包含本地鲲鹏硬件加速扩展、Brain 自学习模块、TypeScript 实现和 AgentGate V3 代理能力。
 
 ### 架构
 
@@ -78,7 +87,7 @@ uv sync --project ./AgentMoss --python 3.12
 uv sync --project ./AgentGate --python 3.12
 ```
 
-两个组件分别使用各自目录下的 `.venv` 和 `uv.lock`，无需手动激活环境。首次同步会生成锁文件，应将其纳入版本控制；后续按锁定版本安装依赖：
+两个组件分别使用各自目录下的 `.venv` 和 `uv.lock`，无需手动激活环境。上游未提供 uv 锁文件，首次同步会在本地生成；保留这些文件后，可按本机锁定版本再次安装依赖：
 
 ```bash
 uv sync --project ./AgentMoss --locked
@@ -117,6 +126,18 @@ curl http://127.0.0.1:9090/api/v1/health
 curl http://127.0.0.1:9100/api/v1/health
 ```
 
+AgentGate 的健康响应中应有 `moss_status: "healthy"` 和实际的 `moss_version`。仅健康接口返回 HTTP 200 不代表检测链路可用；还需验证一次真实分析：
+
+```bash
+GATE_TOKEN=$(cat ~/.config/agentgate/auth_token)
+curl -sS http://127.0.0.1:9100/api/v1/analyze \
+  -H "Authorization: Bearer $GATE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_type":"readme-check","session_id":"readme-001","tool_name":"bash","command":"ls -la","user_prompt":"列出当前目录文件","action_history":[]}'
+```
+
+检查响应中的 `decision`、`reason` 和 `risk_type`。AgentMoss 无法连接或鉴权失败时，AgentGate 会返回 HTTP 200 和 `Deny`，其中 `risk_type` 为 `service_unavailable`；这表示服务故障，不能当作正常的安全拦截。令牌路径有自定义配置时，请相应调整上述命令。
+
 | 服务 | 默认入口 |
 | --- | --- |
 | AgentGate API | `http://127.0.0.1:9100/api/v1/analyze` |
@@ -126,7 +147,7 @@ curl http://127.0.0.1:9100/api/v1/health
 
 默认启用鉴权，首次启动会生成访问令牌。Linux 默认令牌路径分别为 `~/.config/agentgate/auth_token` 和 `~/.config/agentmoss/auth_token`；设置 `XDG_CONFIG_HOME`、`AGENT_MOSS_DATA_DIR` 或显式凭据配置时，以实际配置为准。
 
-API 调用使用 `Authorization: Bearer <token>`。浏览器可通过 `http://127.0.0.1:9100/dashboard/?token=<Gate令牌>` 登录看板；Console 使用对应的 Moss 令牌。更多请求示例与参数见组件使用文档。
+API 调用使用 `Authorization: Bearer <token>`。浏览器可通过 `http://127.0.0.1:9100/dashboard/?token=<Gate令牌>` 登录看板；Console 页面可直接打开，页面内 API 使用 Moss 令牌；若配置了 `AGENT_MOSS_CONSOLE_TOKEN`，还需满足该独立令牌校验。更多请求示例与参数见组件使用文档。
 
 ## 文档与接入
 

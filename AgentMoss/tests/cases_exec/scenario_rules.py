@@ -39,7 +39,21 @@ import shlex
 #   4) 注意排除 `://`（URL）—— 否则 `curl http://x` 会被当成路径访问（误报）。
 # 注意：模式里**不能留空格/换行**（Python re 非 VERBOSE 下是字面量，会破坏匹配）。
 _BANK_PATH_PATTERN = re.compile(
-    '(?<![\\w.:~/-])/(?:(?!home/sandbox(?:\\s|/|$)|opt/sandbox(?:\\s|/|$)|tmp(?:\\s|/|$)|dev/null(?=[\\s;&|<>)"\'`]|$)|dev/stdout(?=[\\s;&|<>)"\'`]|$)|dev/stderr(?=[\\s;&|<>)"\'`]|$))[^\\s;&|>"\'`]*|[^\\s;&|>"\'`]*/\\.\\.[^\\s;&|>"\'`]*)|(?:^|[\\s;&|<>=(`\'"!/])(?:\\.\\./|\\.\\.(?=\\s|$|[;&|]))|(?:^|[\\s;&|<>=(`\'"!])~(?!sandbox\\b)[\\w-]+',
+    '(?<![\\w.:~/-])/(?:(?!home/sandbox(?:\\s|/|$)|opt/sandbox(?:\\s|/|$)|tmp(?:\\s|/|$)|dev/null(?=[\\s;&|<>)"\'`]|$)|dev/stdout(?=[\\s;&|<>)"\'`]|$)|dev/stderr(?=[\\s;&|<>)"\'`]|$)|(?:usr/)?(?:local/)?s?bin/(?!.*\\.\\.)[^\\s;&|>"\'`]*(?=[\\s;&|<>)"\'`]|$))[^\\s;&|>"\'`]*|[^\\s;&|>"\'`]*/\\.\\.[^\\s;&|>"\'`]*)|(?:^|[\\s;&|<>=(`\'"!/])(?:\\.\\./|\\.\\.(?=\\s|$|[;&|]))|(?:^|[\\s;&|<>=(`\'"!])~(?!sandbox\\b)[\\w-]+',
+    re.IGNORECASE,
+)
+# bank：命令的**绝对路径写法**（`/bin/ls`、`/usr/bin/python3`）是正常执行，不算路径访问
+# —— 已在 _BANK_PATH_PATTERN 的白名单里豁免。但把它们当**写目标**仍然拦（否则
+# `cp /tmp/x /bin/evil` 就漏了）。这条只覆盖写入形态，`cat /bin/ls` 这类读取不拦。
+_BANK_WRITE_BIN_PATTERN = re.compile(
+    '(?:^|[\\s;&|(])(?:>|>>|\\btee\\b|\\bcp\\b|\\bmv\\b|\\binstall\\b|\\bln\\b)[^;&|\\n]*?/(?:usr/)?(?:local/)?s?bin/',
+    re.IGNORECASE,
+)
+# bank：写系统定时任务（crontab 安装/编辑/删除）→ 拦。写落在 /var/spool/cron（白名单外），
+# 且是持久化后门；`crontab -l` 只读放行。这条同时兜住「路径全在系统目录里、
+# 路径规则豁免后没人拦」的形态（如 `echo '... /usr/local/bin/backup.sh' | crontab -`）。
+_BANK_CRONTAB_PATTERN = re.compile(
+    '(?:^|[;&|(\\n])\\s*(?:sudo\\s+)?crontab\\s+(?!-l\\b)\\S',
     re.IGNORECASE,
 )
 # bank：禁止执行 ssh（横向移动/远程访问）→ 拦
@@ -51,7 +65,7 @@ _SCENARIO_ALLOWED_DIRS = {
     "bank": ("/home/sandbox", "/opt/sandbox", "/tmp"),
 }
 _SCENARIO_EXTRA_PATTERNS = {
-    "bank": (_BANK_PATH_PATTERN, _BANK_SSH_PATTERN),
+    "bank": (_BANK_PATH_PATTERN, _BANK_SSH_PATTERN, _BANK_WRITE_BIN_PATTERN, _BANK_CRONTAB_PATTERN),
 }
 
 

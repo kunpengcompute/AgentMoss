@@ -44,6 +44,9 @@ class ActionNode:
     #: 动作来源（哪个 agent 上报的）。**仅用于取证与告警展示，不参与链匹配** ——
     #: 组合攻击针对的是这台服务器，跨 agent 分步实施同样成立（见 AGENT_MOSS_CHAIN_SCOPE）。
     agent_id: str = ""
+    #: 来源实例（哪个 agent 安装/实例上报的）。**仅用于展示层脱敏**：
+    #: 同实例的历史节点不隐藏命令原文，跨实例才隐藏。不参与链匹配。
+    instance_id: str = ""
 
 
 @dataclass
@@ -115,6 +118,10 @@ class PropertyViolation:
     reason: str
     risk_level: str = "high"
     path: list = field(default_factory=list)  # [(session_id, seq, action_detail)] 反例路径
+    # 结构化攻击链图（前端可视化用）：
+    # {"nodes": [{session_id, seq, stage, action_detail, resources}],
+    #  "edges": [{from, to, type: "next"|"data", label?}]}
+    graph: dict | None = None
 
 
 @dataclass

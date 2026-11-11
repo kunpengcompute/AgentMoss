@@ -161,16 +161,31 @@ def _warn_scenario_blocked(blocked: list, scenario_id: str, user_home: str | Non
     必被拦，于是被剔除（不剔除的话客户跑 allow.sh 会判成「应放被拦」，虚低放行率且误导）。
     """
     dirs = ""
+    allowed_dirs: tuple = ()
     try:
         from scenario_rules import scenario_allowed_dirs  # 随 tests 分发
-        dirs = "、".join(scenario_allowed_dirs(scenario_id))
+        allowed_dirs = tuple(str(d) for d in scenario_allowed_dirs(scenario_id))
+        dirs = "、".join(allowed_dirs)
     except ImportError:
         pass
 
+    def _home_whitelisted() -> bool:
+        if not user_home:
+            return False
+        for d in allowed_dirs:
+            d = d.rstrip("/")
+            if user_home == d or user_home.startswith(d + "/"):
+                return True
+        return False
+
     # 分两类说清楚，别混在一起——两类成因完全不同，混着报会把客户带偏：
     #   家目录相关：换台家目录在白名单内的机器这几条**会保留**（条数随环境变，本次的重点）
-    #   其他：本来就访问白名单外的绝对路径（如 ls -la /home），到哪台机器都该剔除
-    home_rel = [c for c in blocked if user_home and user_home in c]
+    #   其他：被场景规则拦掉，但与「家目录不在白名单」无关
+    #
+    # 家目录本身就在白名单内时，第一类不成立 —— 这些条目被拦是别的原因（实测：
+    # `/bin/ls /home/sandbox` 里的**命令绝对路径** `/bin/ls` 被当成访问白名单外路径）。
+    # 继续按「家目录不在白名单」报，会让客户照着去改家目录，白折腾。
+    home_rel = [] if _home_whitelisted() else [c for c in blocked if user_home and user_home in c]
     others = [c for c in blocked if c not in home_rel]
 
     print(f"[warn] {len(blocked)} 条 allow 命令会被 {scenario_id} 场景规则拦截，已从 allow "
@@ -186,8 +201,7 @@ def _warn_scenario_blocked(blocked: list, scenario_id: str, user_home: str | Non
         if len(home_rel) > 3:
             print(f"[warn]     · …另有 {len(home_rel) - 3} 条")
     if others:
-        print(f"[warn]   其余 {len(others)} 条是访问白名单外绝对路径（与家目录无关，任何机器上"
-              f"都该剔除）：")
+        print(f"[warn]   其余 {len(others)} 条被 {scenario_id} 场景规则拦截（与家目录无关）：")
         for c in others[:3]:
             print(f"[warn]     · {c[:80]}")
         if len(others) > 3:
