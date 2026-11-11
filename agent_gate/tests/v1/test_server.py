@@ -756,6 +756,34 @@ class TestGlobalReadAPIs:
         assert r.json()["deleted"] >= 1
         assert client.get("/api/v1/tool_calls").json()["total"] == 0
 
+    def test_delete_selected_tool_calls(self, client, repo):
+        """传 ids 只删指定记录；快照与 session 计数一并维护。"""
+        self._seed(repo)
+        keep_id = repo.insert_tool_call("sess-global", {
+            "tool_name": "bash", "command": "pwd", "cwd": "/tmp",
+            "action_type": "bash", "action_detail": "pwd",
+        }, {"decision": "Allow", "reason": "ok", "risk_level": "low"})
+
+        rows = client.get("/api/v1/tool_calls").json()["data"]
+        victim = next(x for x in rows if x["command"] == "ls")
+        repo.insert_system_snapshot("sess-global", victim["id"], {})
+
+        r = client.request("DELETE", "/api/v1/tool_calls", json={"ids": [victim["id"]]})
+        assert r.status_code == 200
+        assert r.json()["deleted"] == 1
+
+        ids = {x["id"] for x in client.get("/api/v1/tool_calls").json()["data"]}
+        assert victim["id"] not in ids
+        assert keep_id in ids
+        assert repo.get_latest_snapshot("sess-global") is None
+        assert repo.get_session("sess-global")["tool_call_count"] == 1
+
+        # 显式空列表是 no-op，不能退化成清空全部
+        r = client.request("DELETE", "/api/v1/tool_calls", json={"ids": []})
+        assert r.status_code == 200
+        assert r.json()["deleted"] == 0
+        assert client.get("/api/v1/tool_calls").json()["total"] == 1
+
 
 # ============================================================
 # 6. Database Operations Tests

@@ -332,24 +332,35 @@ tr:hover { background:#F5F5F7; }
 .tab { padding:8px 20px; cursor:pointer; border:1px solid var(--border); border-bottom:none; background:var(--bg); color:var(--muted); border-radius:8px 8px 0 0; margin-right:-1px; font-weight:500; }
 .tab.active { background:var(--card-bg); color:var(--text); border-bottom-color:var(--card-bg); font-weight:600; }
 .tab:hover:not(.active) { color:var(--text); }
-/* ── 复制记录 ── */
-/* 入口靠 tabs 行右侧；tabs 是 flex，margin-left:auto 即可 */
-.tab-action { margin-left:auto; align-self:center; padding:5px 14px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--accent); font-size:12px; font-weight:500; cursor:pointer; }
+/* ── 多选操作（复制 / 删除） ── */
+/* 入口按钮组靠 tabs 行右侧；tabs 是 flex，margin-left:auto 即可 */
+.tab-actions { margin-left:auto; display:flex; align-items:center; gap:8px; align-self:center; }
+.tab-actions .tab-action { margin-left:0; }
+.tab-action { align-self:center; padding:5px 14px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--accent); font-size:12px; font-weight:500; cursor:pointer; }
 .tab-action:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
-/* 多选工具栏：默认隐藏，进复制模式才展开 */
+.tab-action.danger { color:var(--red); border-color:rgba(255,59,48,.35); }
+.tab-action.danger:hover { background:var(--red); color:#fff; border-color:var(--red); }
+/* 多选工具栏：默认隐藏，进多选模式才展开 */
 .copy-bar { display:none; align-items:center; gap:8px; padding:10px 16px; background:#FAFAFA; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted); }
 .copy-bar.on { display:flex; }
 .copy-bar .spacer { flex:1; }
 .copy-bar button { padding:4px 12px; border-radius:6px; border:1px solid var(--border); background:var(--card-bg); color:var(--text); font-size:12px; cursor:pointer; }
 .copy-bar button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
 .copy-bar button:disabled { opacity:.4; cursor:default; }
+.copy-bar button.ag-danger { color:var(--red); border-color:rgba(255,59,48,.35); }
+.copy-bar button.ag-danger:hover:not(:disabled) { background:var(--red); color:#fff; border-color:var(--red); }
+.bar-group { display:none; align-items:center; gap:8px; }
+.copy-bar .fmt-group { display:none; }
+.copy-bar.mode-copy .bar-group[data-mode="copy"],
+.copy-bar.mode-copy .fmt-group,
+.copy-bar.mode-delete .bar-group[data-mode="delete"] { display:inline-flex; }
 .fmt-group { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
 .fmt-group button { border:none; border-radius:0; padding:4px 10px; color:var(--muted); background:transparent; }
 .fmt-group button.active { background:var(--accent); color:#fff; }
 .fmt-group button:hover:not(:disabled):not(.active) { color:var(--text); }
-/* 勾选框列：只在复制模式出现 */
+/* 勾选框列：只在多选模式出现 */
 .col-check { display:none; width:34px; text-align:center; }
-table.copy-mode .col-check { display:table-cell; }
+table.select-mode .col-check { display:table-cell; }
 .col-check input { cursor:pointer; }
 /* 轻提示 */
 .toast { position:fixed; left:50%; bottom:32px; transform:translateX(-50%) translateY(8px); background:#1d1d1f; color:#fff; padding:8px 16px; border-radius:8px; font-size:13px; opacity:0; pointer-events:none; transition:opacity .18s, transform .18s; z-index:99; }
@@ -415,7 +426,10 @@ table.copy-mode .col-check { display:table-cell; }
   <div class="tab active" data-tab="recent">Recent Calls</div>
   <div class="tab" data-tab="agents">Agents</div>
   <div class="tab" data-tab="timeline">Timeline</div>
-  <button class="tab-action" id="enter-copy">Copy Records</button>
+  <span class="tab-actions">
+    <button class="tab-action danger" id="enter-delete">Delete Records</button>
+    <button class="tab-action" id="enter-copy">Copy Records</button>
+  </span>
 </div>
 
 <!-- Recent calls -->
@@ -429,13 +443,19 @@ table.copy-mode .col-check { display:table-cell; }
         <button id="fmt-json">JSON</button>
       </span>
       <span class="spacer"></span>
-      <button id="copy-selected" disabled>Copy Selected</button>
-      <button id="copy-page">Copy Current Page</button>
+      <span class="bar-group" data-mode="delete">
+        <button id="delete-selected" class="ag-danger" disabled>Delete Selected</button>
+        <button id="delete-all" class="ag-danger">Delete All</button>
+      </span>
+      <span class="bar-group" data-mode="copy">
+        <button id="copy-selected" disabled>Copy Selected</button>
+        <button id="copy-page">Copy Current Page</button>
+      </span>
       <button id="exit-copy">Cancel</button>
     </div>
     <div class="table-wrap">
       <table id="recent-calls"><thead><tr>
-        <th class="col-check"></th>
+        <th class="col-check"><input type="checkbox" id="select-all" disabled title="Select current page"></th>
         <th>Time</th><th>Agent</th><th>Session</th><th>Tool</th><th>Command</th>
         <th>Decision</th><th>Risk</th><th>Latency</th><th>Reason</th><th>Action</th>
       </tr></thead><tbody id="recent-table"></tbody></table>
@@ -484,13 +504,14 @@ let _totalRecords = 0;
 let _lastRecentKey = null;   // 上次渲染用的数据，用于跳过无谓重建
 let _lastPageSig = null;
 
-// ── 复制记录 ───────────────────────────────────────────────────────────
-let _copyMode = false;           // 多选模式开关
+// ── 多选操作（复制 / 删除）────────────────────────────────────────────
+let _selectMode = 'none';        // 'none' | 'copy' | 'delete'
 let _selectedIds = new Set();    // 已勾选记录的 id（跨刷新保持）
 let _copyFormat = 'tsv';         // 'tsv' | 'json'
 let _copying = false;
-let _currentPageRows = [];       // 当前页原始记录，复制时直接读它（不读 DOM，避免被列宽省略号截断）
-let _forceRecentRender = false;  // 进出复制模式要强刷一次（列结构变了）
+let _deleting = false;
+let _currentPageRows = [];       // 当前页原始记录，复制/删除时直接读它（不读 DOM）
+let _forceRecentRender = false;  // 进出多选模式要强刷一次（列结构变了）
 
 // 刷新是每 3 秒一次，而重建 DOM（innerHTML=…）会把正在进行的文字选择一并清掉
 // ——实测：在 Recent Calls 里选中命令后，不到 1 秒选区就没了，根本复制不了。
@@ -647,7 +668,7 @@ function updateRecent(data, force) {
   _lastRecentKey = key;
   _currentPageRows = data.slice();           // 复制时读这份原始数据，不读 DOM
 
-  const cols = _copyMode ? 11 : 10;
+  const cols = _selectMode !== 'none' ? 11 : 10;
   if (!data.length) {
     tb.innerHTML = `<tr><td colspan="${cols}" class="empty">No tool calls yet</td></tr>`;
     updateCopyBar();
@@ -655,7 +676,7 @@ function updateRecent(data, force) {
   }
   tb.innerHTML = data.map((r, idx) => `
     <tr>
-      ${_copyMode ? `<td class="col-check"><input type="checkbox" class="row-check" data-id="${r.id}"${_selectedIds.has(Number(r.id)) ? ' checked' : ''}></td>` : ''}
+      ${_selectMode !== 'none' ? `<td class="col-check"><input type="checkbox" class="row-check" data-id="${r.id}"${_selectedIds.has(Number(r.id)) ? ' checked' : ''}></td>` : ''}
       <td style="white-space:nowrap;font-size:12px;color:var(--muted)">${fmtTime(r.called_at)}</td>
       <td>${escapeHtml(r.agent_type||'-')}</td>
       <td class="session-cell" title="${escapeHtml(r.session_id||'')}">${escapeHtml(r.session_id||'-')}</td>
@@ -1041,12 +1062,28 @@ function setCopyFormat(fmt) {
   document.getElementById('fmt-json').classList.toggle('active', fmt === 'json');
 }
 
-function setCopyMode(on) {
-  _copyMode = on;
-  if (!on) _selectedIds.clear();
-  document.getElementById('copy-bar').classList.toggle('on', on);
-  document.getElementById('enter-copy').style.display = on ? 'none' : '';
-  document.getElementById('recent-calls').classList.toggle('copy-mode', on);
+function _selecting() { return _selectMode !== 'none'; }
+
+function _updateSelectAll() {
+  const cb = document.getElementById('select-all');
+  if (!cb) return;
+  const ids = _currentPageRows.map(r => Number(r.id));
+  const picked = ids.filter(id => _selectedIds.has(id)).length;
+  cb.disabled = !_selecting() || ids.length === 0;
+  cb.checked = ids.length > 0 && picked === ids.length;
+  cb.indeterminate = picked > 0 && picked < ids.length;
+}
+
+function setSelectMode(mode) {
+  _selectMode = mode;
+  if (!_selecting()) _selectedIds.clear();
+  const bar = document.getElementById('copy-bar');
+  bar.classList.toggle('on', _selecting());
+  bar.classList.toggle('mode-copy', mode === 'copy');
+  bar.classList.toggle('mode-delete', mode === 'delete');
+  document.getElementById('enter-copy').style.display = _selecting() ? 'none' : '';
+  document.getElementById('enter-delete').style.display = _selecting() ? 'none' : '';
+  document.getElementById('recent-calls').classList.toggle('select-mode', _selecting());
   _forceRecentRender = true;   // 列结构变了，必须重建表格
   refresh();
 }
@@ -1060,12 +1097,27 @@ function updateCopyBar() {
   document.getElementById('copy-page').disabled = _copying || _currentPageRows.length === 0;
   document.getElementById('fmt-tsv').disabled = _copying;
   document.getElementById('fmt-json').disabled = _copying;
+  document.getElementById('delete-selected').disabled = _deleting || n === 0;
+  document.getElementById('delete-all').disabled = _deleting || _totalRecords === 0;
+  _updateSelectAll();
 }
 
-document.getElementById('enter-copy').addEventListener('click', () => setCopyMode(true));
-document.getElementById('exit-copy').addEventListener('click', () => setCopyMode(false));
+document.getElementById('enter-copy').addEventListener('click', () => setSelectMode('copy'));
+document.getElementById('enter-delete').addEventListener('click', () => setSelectMode('delete'));
+document.getElementById('exit-copy').addEventListener('click', () => setSelectMode('none'));
 document.getElementById('fmt-tsv').addEventListener('click', () => setCopyFormat('tsv'));
 document.getElementById('fmt-json').addEventListener('click', () => setCopyFormat('json'));
+document.getElementById('select-all').addEventListener('change', (e) => {
+  const checked = !!e.target.checked;
+  _currentPageRows.forEach(r => {
+    const id = Number(r.id);
+    if (checked) _selectedIds.add(id); else _selectedIds.delete(id);
+  });
+  document.querySelectorAll('#recent-table input.row-check').forEach(cb => {
+    cb.checked = checked;
+  });
+  updateCopyBar();
+});
 document.getElementById('copy-selected').addEventListener('click', async () => {
   const want = new Set(_selectedIds);
   const rows = _currentPageRows.filter(r => want.has(Number(r.id)));
@@ -1076,6 +1128,43 @@ document.getElementById('copy-page').addEventListener('click', async () => {
   const rows = _currentPageRows.slice();
   if (!rows.length) { toast('No records on this page', true); return; }
   await doCopy(rows, `Copied ${rows.length} record(s) on this page`);
+});
+
+async function doDelete(ids) {
+  if (_deleting) return;
+  _deleting = true;
+  updateCopyBar();
+  try {
+    const opts = { method: 'DELETE' };
+    if (ids) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify({ ids: ids });
+    }
+    const r = await fetch(BASE + '/api/v1/tool_calls', opts);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const count = d && d.deleted != null ? d.deleted : 0;
+    toast('Deleted ' + count + ' record(s)', false);
+    _currentPage = 1;
+    setSelectMode('none');
+  } catch (e) {
+    toast('Delete failed: ' + String(e.message || e), true);
+  } finally {
+    _deleting = false;
+    updateCopyBar();
+  }
+}
+
+document.getElementById('delete-selected').addEventListener('click', async () => {
+  const ids = Array.from(_selectedIds);
+  if (!ids.length) { toast('No records selected', true); return; }
+  if (!window.confirm('确定删除所选 ' + ids.length + ' 条记录吗？此操作不可恢复。')) return;
+  await doDelete(ids);
+});
+document.getElementById('delete-all').addEventListener('click', async () => {
+  if (!_totalRecords) { toast('No records to delete', true); return; }
+  if (!window.confirm('确定删除全部 ' + _totalRecords + ' 条记录吗？此操作不可恢复。')) return;
+  await doDelete(null);
 });
 
 // Clock
