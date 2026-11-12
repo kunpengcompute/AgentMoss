@@ -488,6 +488,7 @@ class HomeDeletionChecker:
     )
     # 同段赋值：VAR=(~ | ~/ | $HOME | $HOME/ | /home/xxx | 命令替换 $() 含根 ~/$HOME)。
     # 捕获整个赋值值（到下一个 shell 分隔符），由 _is_home_value 判定是否主目录根。
+    _ASSIGN_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.IGNORECASE)
     _ASSIGN_RE = re.compile(
         r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
         r"(~[A-Za-z0-9_./-]*|\$HOME[A-Za-z0-9_./-]*|\$\{HOME\}[A-Za-z0-9_./-]*|/home/[^\s;|&]+"
@@ -605,8 +606,17 @@ class HomeDeletionChecker:
 
         # ② 同段赋值后删除命令引用：TARGET=$HOME; rm -rf $TARGET（文章同款变量间接形态）
         assigned: dict[str, str] = {}
-        for m in self._ASSIGN_RE.finditer(action_detail):
-            assigned[m.group(1)] = m.group(2)
+        pos = 0
+        while name := self._ASSIGN_NAME_RE.search(action_detail, pos):
+            # 一个完整名字只尝试一次。若其后的空白、等号或值不匹配，
+            # 从名字内部重新开始也不会成功；逐字符重试会使长输入反复回溯。
+            m = self._ASSIGN_RE.match(action_detail, name.start())
+            if m:
+                assigned[m.group(1)] = m.group(2)
+                # 保持 finditer 的非重叠语义，不重复识别值内部的赋值。
+                pos = m.end()
+            else:
+                pos = name.end()
         if assigned:
             for var, path in assigned.items():
                 if not self._is_home_value(path):
