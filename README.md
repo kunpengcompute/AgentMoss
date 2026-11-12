@@ -327,10 +327,11 @@ agent-moss rules status
 ## 开发与测试
 
 ```bash
-AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
+AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
 ```
 
-最近一次裁剪版全量回归：**3128 passed, 136 skipped**。
+2026-11-12 裁剪版全量回归（Python 3.11，禁用 LLM）：**3164 passed, 138 skipped, 0 failed**。
+请在仓库根目录运行上述命令；跳过项随环境变化，以实际测试输出为准。
 
 测试语料位于 `tests/cases/`，双端一致性 golden 数据位于 `tests/parity/`
 （裁剪后只校验 Python 侧行为，不依赖 TypeScript 源码）。
