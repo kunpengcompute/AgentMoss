@@ -31,14 +31,13 @@
 
 ### 场景定制规则用例（`scenario/<id>/` 子目录）
 
-**为什么单独建目录**：场景规则是**客户沙箱部署级约束**（如招行 bank：允许读写 `/home/sandbox`、
+**为什么单独建目录**：场景规则是**部署约束**（如 bank 场景：允许读写 `/home/sandbox`、
 `/opt/sandbox`、`/tmp`，其他根目录禁止读写；禁 ssh 命令），只对特定 `scenario_id` 生效，
 通用模式覆盖不到，故独立成 `scenario/<id>/` 子目录（子目录名即 scenario_id，如
 `scenario/bank/*.json` → `scenario_id="bank"`）。
 
 **关键机制**：每个场景用例的 `input.scenario_id` 指定加载哪个场景的定制规则，空串 = 通用模式。
-启用判定：调用方显式 `scenario_id` > 环境变量 `AGENT_MOSS_SCENARIO`（部署级，客户沙箱设一次，
-所有请求生效；可逗号分隔多场景）。双端加载器都支持：
+启用判定：调用方显式 `scenario_id` > 环境变量 `AGENT_MOSS_SCENARIO`。环境变量对所有请求生效，可用逗号分隔多个场景。双端加载器都支持：
 - TS `json-cases.test.ts` 递归扫 `scenario/` 目录，`toAnalysisInput` 把 `scenario_id` → `scenarioId`。
 - Python `test_all_cases.py::TestScenarioCases` 自动扫 `scenario/<id>/*.json`，`_run_case` 把
   `scenario_id` 传给 `analyze()`。
@@ -129,7 +128,7 @@
 
 ### `AM_YOUR_HOME` 占位符（路径可移植性）
 
-**背景**：用例里硬编码 `/home/me`、`/home/user` 等绝对路径，客户在别的机器跑时路径不存在，命令无法真实执行；且 `/home/xxx` 写死了用户名，不通用。
+**背景**：用例里硬编码 `/home/me`、`/home/user` 等绝对路径，在其他机器运行时路径不存在，命令无法真实执行；且 `/home/xxx` 写死了用户名，不通用。
 
 **规则**：涉及用户家目录的路径，**统一写成 `AM_YOUR_HOME` 占位符**（裸词，不带 `$`），例如：
 - `python3 AM_YOUR_HOME/project/build.py`（原 `/home/me/project/build.py`）
@@ -138,7 +137,7 @@
 
 **为什么不用 `~` / `$HOME` / `${HOME}`**：这些可能是**被测的关键词**（引擎要识别 `~/.bashrc`、`$HOME/config` 等路径语义），直接占坑会与测例冲突。`AM_YOUR_HOME` 是自定义裸词，不与任何被测关键词冲突。
 
-**加载器展开**：双端加载器读到 `AM_YOUR_HOME` 后，展开成**当前用户家目录的绝对路径**（如 `/home/hkl`）再传给引擎：
+**加载器展开**：双端加载器读到 `AM_YOUR_HOME` 后，展开成**当前用户家目录的绝对路径**（如 `/home/user`）再传给引擎：
 - Python `tests/conftest.py::_expand_placeholder`（`os.path.expanduser("~")`）
 - TS `ts/src/__tests__/json-cases.test.ts::expandPlaceholder`（`os.homedir()`）
 

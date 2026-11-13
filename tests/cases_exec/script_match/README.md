@@ -107,7 +107,7 @@ base64\s+(-d|--decode)\s*\|
 
 ```bash
 # 从引擎重新提取规则（引擎规则改动后重跑，本脚本从引擎动态读取，不再手写规则）
-python3 extract_rules.py                              # 默认引擎在 ~/gitcode/AgentMoss
+cd /path/to/AgentMoss/tests/cases_exec/script_match
 AGENT_MOSS_ROOT=/path/to/AgentMoss python3 extract_rules.py
 
 # 匹配基准：对 scripts/ 每个文件 × rules.txt 所有正则

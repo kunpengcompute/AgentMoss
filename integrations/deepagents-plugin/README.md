@@ -4,27 +4,27 @@ Moss 负责安全检测并返回判定，Gate 负责接收 Agent 请求、调用
 
 当前工具参数和模型调用说明按原文送检，Gate/Moss 需作为可信服务部署。
 
-使用 Python 3.11 或更新版本，依赖由安装工具按 [pyproject.toml](pyproject.toml) 解析。
+## 安装
 
-使用插件前，先启动 Gate 和 Moss 服务，配置方法见[部署说明](docs/deployment.md)。
-
-## 安装与配置
-
-插件要安装到**使用 DeepAgents 的 Python 项目**中。先进入你编写 Agent 调用代码的项目根目录，也就是该应用的 `pyproject.toml` 所在目录。
-
-例如，应用项目在 `~/code/my-agent`，本仓库在 `~/code/AgentMoss-commercial`：
+需要 Python 3.11 或更新版本。在运行 DeepAgents 的 Python 环境中安装：
 
 ```bash
-# 1. 进入你的 DeepAgents 应用项目
-cd ~/code/my-agent
-
-# 2. 将本仓库中的插件安装为应用依赖
-uv add ~/code/AgentMoss-commercial/integrations/deepagents-plugin
+python -m pip install 'agent-moss[deepagents-aio]'
 ```
 
-将上面两个路径换成实际位置。`uv add` 会将插件写入应用的 `pyproject.toml`，并安装到该项目的虚拟环境中。之后在应用项目目录使用 `uv run` 运行你的 DeepAgents 程序。
+也可以直接使用源码，将路径替换为实际的仓库目录：
 
-启动 Gate/Moss 后，配置 DeepAgents 进程的环境变量：
+```bash
+python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'
+```
+
+这两种方式都会安装插件所需的依赖，具体约束见 [pyproject.toml](pyproject.toml)。
+
+如果环境中单独安装过 `agentmoss-deepagents`，先卸载该包，再按上面的方式安装，避免同名模块相互覆盖。
+
+## 连接 Gate
+
+先启动 Gate 和 Moss 服务，步骤见[部署说明](docs/deployment.md)。然后配置 DeepAgents 进程的环境变量：
 
 ```bash
 export DEEPAGENTS_GATE_URL=http://127.0.0.1:9100
@@ -53,13 +53,7 @@ CubeSandbox 的完整接入流程见 [AIO 接入说明](docs/cubesandbox.md)。
 
 两种模式都使用 **AgentMossMiddleware → AgentGate → 外部 Moss Server**；只切换工具实际执行的位置。旧的 GateRuntime / AgentMossMiddleware 接入方式继续可用。
 
-local 使用上面的安装命令。aio 额外安装官方 `agent-sandbox` SDK：
-
-```bash
-uv add --extra aio ~/code/AgentMoss-commercial/integrations/deepagents-plugin
-```
-
-统一入口接收应用的 mapping，不自动读取配置文件。以下为 aio 配置：
+安装命令已包含两种模式所需的依赖。`DeepAgentsIntegration.load()` 接收配置字典，以下为 aio 配置：
 
 ```python
 import asyncio

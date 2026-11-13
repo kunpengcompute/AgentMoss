@@ -1,6 +1,6 @@
 # DeepAgents 外部插件与 CubeSandbox AIO 接入
 
-本插件通过 `agent-sandbox` SDK 连接 CubeSandbox AIO。安装、服务启动和镜像配置见[部署说明](deployment.md)。
+本插件通过 `agent-sandbox` SDK 连接 CubeSandbox AIO。Gate 和 Moss 服务的启动方法见[部署说明](deployment.md)。
 
 ## 两层检查分别部署
 
@@ -16,19 +16,25 @@ DeepAgents 主代理 / 子代理
     → 内部放行后执行 Bash
 ```
 
-Moss SDK 放在 AIO 进程内部，内部检查直接调用 SDK。外部 DeepAgents 插件通过 Gate → Moss Server 进行另一层检查。DeepAgents 客户端从 Moss wheel 安装插件和 AIO SDK，外部判定由 Gate → Moss Server 执行。
+外部插件把工具调用发送到 Gate，由 Moss Server 给出判定。沙箱内部的检查直接调用 Moss SDK，检查沙箱中的脚本内容。
 
 外部服务不能仅凭沙箱路径读取脚本，插件也不传输脚本内容。沙箱脚本的内容扫描由已接入 Moss 的 AIO 镜像承担。客户端健康检查和 `integration.status()` 展示外部服务及 backend 状态；镜像内部的检查需要单独配置。
 
 ## 安装与连接前提
 
-Moss wheel 已包含插件。如从源码安装，进入 DeepAgents 应用的 `pyproject.toml` 所在目录，执行以下命令，并替换仓库路径：
-
-```bash
-uv add --extra deepagents-aio /path/to/AgentMoss-commercial
-```
+在 DeepAgents 应用环境中安装插件，可通过 pip 安装发布包，也可使用源码，命令见[插件安装说明](../README.md#安装)。
 
 应用提前准备已启动的外部 Gate/Moss、已创建的 CubeSandbox 沙箱及可访问的 CubeProxy 地址。Gate token 与 CubeSandbox 流量 token 不同；AIO 端口/路由域名使用默认值时，插件发送 Host: 8080-<sandbox_id>.cube.app。
+
+## 沙箱中的脚本检查
+
+在构建 AIO 镜像时，将 Moss 安装到运行 `shell.py` 的 Python 环境中。可用 `python -m pip install agent-moss`，也可从源码安装，见[主项目安装说明](../../../README.md#安装)。
+
+安装后，在 `/v1/shell/exec` 的执行入口调用 `judge_security()`：允许后执行 Bash，拒绝时返回 HTTP 403，检查故障时返回 503。
+
+[执行入口适配示例](https://gitcode.com/wade_wolzzi/AgentMoss/tree/f1049f1c31ebf38facfe16bee37acb018ee9706c/delivery/aio-sdk-20261111/image)面向 AIO 1.11.0 ARM64 / Python 3.12。使用其他 AIO 版本或架构时，需要调整适配代码。用接入 Moss 的镜像创建沙箱；实例的创建和销毁由应用的控制面负责。
+
+文件上传 API 和 CubeSandbox `commands.run()` 不经过这个 shell 入口。DeepAgents 的文件工具调用仍由客户端插件发送到 Gate 检查。
 
 ## 完整的异步调用示例
 

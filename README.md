@@ -23,15 +23,28 @@
 
 ## 安装
 
-要求 Python >= 3.10。
+需要 Python 3.10 或更新版本。建议先创建虚拟环境：
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e .
 ```
 
-安装后会得到 `agent-moss` 命令行。
+通过 pip 安装：
+
+```bash
+python -m pip install agent-moss
+```
+
+也可以从源码安装：
+
+```bash
+git clone https://gitcode.com/kenhkl/AgentMoss-commercial.git AgentMoss
+cd AgentMoss
+python -m pip install -e .
+```
+
+`-e` 会直接使用当前目录的源码，修改代码后无需重新安装。安装完成后可使用 `agent-moss` 命令。
 
 ### 在 DeepAgents 中启用安全检查
 
@@ -42,13 +55,13 @@ pip install -e .
 接入分为三步：
 
 1. **启动 Gate 和 Moss 服务。** Gate 接收插件的检查请求，Moss 给出安全判定。部署方法见[部署说明](integrations/deepagents-plugin/docs/deployment.md)。
-2. **把插件装到运行 DeepAgents 的 Python 环境中。** 使用 Python 3.11 或更新版本，先激活该应用的虚拟环境，再进入本仓库根目录执行：
+2. **把插件装到运行 DeepAgents 的 Python 环境中。** 使用 Python 3.11 或更新版本，先激活该应用的虚拟环境，再执行：
 
    ```bash
-   python3 -m pip install '.[deepagents-aio]'
+   python -m pip install 'agent-moss[deepagents-aio]'
    ```
 
-   这条命令会安装 Moss、DeepAgents 插件及插件运行所需的依赖。
+   从源码安装时，改用 `python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'`，并替换为实际源码路径。
 
 3. **在 DeepAgents 应用代码中接入插件。** 配置 Gate 地址和访问令牌，并修改创建 Agent 的代码，为主代理和每个子代理添加插件的检查组件。完整代码见[插件接入说明](integrations/deepagents-plugin/README.md)。
 

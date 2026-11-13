@@ -1,16 +1,16 @@
 # integrations/ — 第三方 Agent 对接件
 
-本目录存放**对接第三方 Agent 平台**的集成件（插件/适配器）。这些不是 AgentMoss
-引擎的一部分，而是把 Agent 的每一次工具调用送到 AgentGate → AgentMoss 的采集端。
+本目录提供 Agent 接入插件，将工具调用发送给 Gate，由 Moss 检查并返回安全判定。
 
-**本仓库是私仓，这些文件只在这里维护**——不要拷贝到公开仓库/fork（QwenPaw 等
-上游仓库是公开的，推送即泄露）。
+Moss 支持通过 pip 或源码安装，见[安装说明](../README.md#安装)。Gate 和 Moss 的启动方法见[服务部署说明](deepagents-plugin/docs/deployment.md)。
 
----
+## deepagents-plugin/
+
+在 DeepAgents 应用中注册插件，执行工具前获取 Gate/Moss 的安全判定。安装与接入方法见 [DeepAgents 插件说明](deepagents-plugin/README.md)。
 
 ## qwenpaw-plugin/
 
-QwenPaw（Windows exe / 统信 Linux / 鸿蒙）的**零侵入**对接插件。
+通过 QwenPaw 的权限检查接口接入。安装与配置方法见 [QwenPaw 插件说明](qwenpaw-plugin/README.md)。
 
 ### 它做什么
 
@@ -20,8 +20,6 @@ QwenPaw（Windows exe / 统信 Linux / 鸿蒙）的**零侵入**对接插件。
 2. 打包上报 AgentGate `/api/v1/analyze`
 3. AgentMoss 判 `Deny` → 阻止执行；判 `Allow` → 放行
 4. AgentGate 不可用时 fail-open（可配 `fail_closed`）
-
-**不修改 QwenPaw 源码**，也不修改 AgentGate / AgentMoss 源码。
 
 ### 采集到的字段（与 AgentMoss 需求对齐）
 
@@ -41,32 +39,28 @@ QwenPaw（Windows exe / 统信 Linux / 鸿蒙）的**零侵入**对接插件。
 ### 安装
 
 ```bash
-# 拷到 QwenPaw 插件目录（Windows: %USERPROFILE%\.qwenpaw\plugins\）
-mkdir -p ~/.qwenpaw/plugins
-cp -r qwenpaw-plugin ~/.qwenpaw/plugins/agentmoss-gate
-# 可选：配置网关卡地址
+# 将源码路径换成实际位置
+mkdir -p ~/.qwenpaw/plugins/agentmoss-gate
+cp -R /path/to/AgentMoss/integrations/qwenpaw-plugin/. ~/.qwenpaw/plugins/agentmoss-gate/
+# 创建配置文件，填写 Gate 地址和令牌
 cp ~/.qwenpaw/plugins/agentmoss-gate/config.example.json \
    ~/.qwenpaw/plugins/agentmoss-gate/config.json
 ```
 
-> 目录名必须是 `agentmoss-gate`（与 `plugin.json` 的 `id` 一致）。
+目录名使用 `agentmoss-gate`，与 `plugin.json` 的 `id` 一致。Windows 插件目录为 `%USERPROFILE%\.qwenpaw\plugins\`。
 
 ### 测试
 
-插件依赖 AgentScope（由 QwenPaw 提供），用 QwenPaw 的 venv 跑：
+先激活 QwenPaw 的 Python 环境，再运行：
 
 ```bash
-# repo 里有 QwenPaw 检出时
-/home/hkl/github/QwenPaw/venv/bin/python integrations/qwenpaw-plugin/test_agentmoss_gate_plugin.py
+python /path/to/AgentMoss/integrations/qwenpaw-plugin/test_agentmoss_gate_plugin.py
 ```
 
-测试**自包含**（不依赖 QwenPaw 源码，只用 `agentscope` 的消息/权限类型），
-17 个用例覆盖：Deny 阻断 / Allow 放行 / fail-open / fail-closed /
-上下文提取（纯文本、真实工具调用、cwd、reason）/ 工具输入不被 JSON 转义。
+测试覆盖允许、拒绝、连接故障处理和调用上下文提取。
 
 ### 已知边界
 
 1. **被 QwenPaw 自己拦下的调用**：插件能看到（挂在权限检查外层），会一并上报
 2. **`run_tool_batch` 内层调用**：看不到——该功能的内层动作绕过了整条权限检查链路
-   （QwenPaw 自身的治理漏洞，已提交上游 PR）
 3. **工具不存在 / 参数解析失败**：看不到（未进入权限检查），非安全场景
