@@ -4,13 +4,13 @@ Moss 负责安全检测并返回判定，Gate 负责接收 Agent 请求、调用
 
 当前工具参数和模型调用说明按原文送检，Gate/Moss 需作为可信服务部署。
 
-版本 0.6.0；需要 Python 3.12+、DeepAgents 0.7.32。完整依赖见 [pyproject.toml](pyproject.toml)。
+插件版本为 `agentmoss-deepagents 0.6.0`，版本号独立于 Moss 主包和 DeepAgents。使用 Python 3.11 或更新版本，依赖由安装工具按 [pyproject.toml](pyproject.toml) 解析。
 
-Moss wheel 已包含本插件，客户端通过 `agent-moss[deepagents-aio]` 安装。Gate 与 Moss 两枚 wheel、AIO 镜像补丁的准备方式和端到端验收步骤见[部署与验收说明](docs/tester-deployment.md)。
+Moss wheel 已包含本插件，客户端通过 `agent-moss[deepagents-aio]` 安装。Gate/Moss 服务及 AIO 镜像的配置见[部署说明](docs/deployment.md)。
 
 ## 安装与配置
 
-测试交付直接安装统一的 `agent-moss[deepagents-aio]` wheel。下方从插件源码目录安装的命令保留给仓库开发使用，正式交付只需 Gate 与 Moss 两枚 wheel。
+可以通过 Moss wheel 安装，也可以在开发时直接从插件源码目录安装。
 
 插件要安装到**使用 DeepAgents 的 Python 项目**中。先进入你编写 Agent 调用代码的项目根目录，也就是该应用的 `pyproject.toml` 所在目录。
 
@@ -55,7 +55,7 @@ CubeSandbox 的完整接入流程见 [AIO 接入说明](docs/cubesandbox.md)。
 
 两种模式都使用 **AgentMossMiddleware → AgentGate → 外部 Moss Server**；只切换工具实际执行的位置。旧的 GateRuntime / AgentMossMiddleware 接入方式继续可用。
 
-local 使用原来的安装命令。aio 额外安装官方 SDK（固定 agent-sandbox==0.0.30）：
+local 使用上面的安装命令。aio 额外安装官方 `agent-sandbox` SDK：
 
 ```bash
 uv add --extra aio ~/code/AgentMoss-commercial/integrations/deepagents-plugin
@@ -105,7 +105,7 @@ agent = create_deep_agent(
 )
 ```
 
-固定 DeepAgents 版本为声明式子代理配置同一个 backend；每个隔离子代理仍须显式添加本插件中间件。自定义编译好的子代理图需要由应用自己绑定对应 backend 和中间件。
+DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理仍须显式添加本插件中间件。自定义编译好的子代理图需要由应用自己绑定对应 backend 和中间件。
 
 调用 agent.invoke/ainvoke 时仍传相同的 thread_id、session_id 和 moss_info，见下方原有示例。应用退出前停止并等待所有图调用，再执行 `await integration.aclose()`。load 是同步初始化入口，可能创建远端 shell 会话，异步应用如上在线程中初始化；初始化本身也应在退出前等待完成。
 
@@ -130,8 +130,6 @@ agent = create_deep_agent(
 文件 API 不经过沙箱内部 shell.py 的检查，但 DeepAgents 的文件工具调用仍先通过插件送 Gate。直接调用 backend.upload_files/download_files 等方法不经过工具中间件，不能据此认为已完成外部送检。
 
 外部 Moss Server 无法仅凭路径读取沙箱里的脚本，本插件不做文件共享或内容上传。沙箱脚本检测依赖部署时使用已接入 Moss 的 AIO 镜像；镜像内部集成与本插件独立。外部 Moss 若存在同名本地文件可能产生额外判断，此限制尚未解决。`integration.status()` 只展示 Gate 策略和 backend 会话状态，不证明镜像内 Moss 已启用。
-
-**历史验证状态（2026-11-11）：** 迁移来源版本在 devbox 完成插件完整回归 213 passed，外部 Gate/Moss 与真实 AIO 镜像直连的 9 项联调通过；CubeProxy → CubeSandbox 实例创建受 devbox 环境错误阻断。详见 [devbox 验证记录](docs/devbox-validation-2026-11-11.md)。这些记录不替代商业仓库迁移后的复测。
 
 ## 旧接口接入（以 local 为例）
 
@@ -243,18 +241,5 @@ agent = create_deep_agent(
 持久化历史最多保留 200 条动作、20 次用户输入和 32 KiB；应用可配置更小的窗口。超限时整条移除历史记录并标记 `truncated`，当前送检参数不会因此截短。同一次根调用另行保存已开始的执行 ID，历史被移除后，SDK 节点重试也不会再次执行相同工具调用。这份去重集合只在本次调用内有效，不写入 checkpoint；跨进程恢复仍需应用核对已发生的副作用。
 
 本版本使用 schema=4。已结束的 v3 历史会自动转换；升级前先结束请求，确认 checkpoint 没有待执行任务并备份。含 `attempted` 或 `unknown` 的旧历史需要先人工核对，插件会拒绝自动转换。旧插件不能读取新格式，回退时使用升级前备份或新会话。
-
-## 测试与复验
-
-0.6.0 已新增 AIO 专项测试并在 devbox 运行。以下命令可重跑普通回归；真实联调还需启动独立 Gate/Moss 和可访问的 AIO，并设置 `AGENTMOSS_AIO_LIVE_URL`、`AGENTMOSS_AIO_LIVE_SANDBOX_ID`、`AGENTMOSS_LIVE_GATE_URL`、`AGENTMOSS_LIVE_GATE_TOKEN_FILE`。完整条件及限制见验证记录。
-
-在插件目录执行：
-
-```bash
-PYTHONPATH=/path/to/AgentMoss uv run --extra aio --with pytest --with pytest-asyncio pytest -q
-uv run --with ruff ruff check src tests examples
-```
-
-两个 Moss 解析器测试需额外设置 `PYTHONPATH=/path/to/AgentMoss`，指向可导入 `agent_moss` 的源码目录。
 
 [官方 Middleware 文档](https://docs.langchain.com/oss/python/langchain/middleware/custom)

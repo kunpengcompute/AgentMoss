@@ -1,7 +1,9 @@
 """Smoke test the external Gate/Moss path and the AIO image's in-process Moss guard.
 
-Set the environment variables documented in docs/tester-deployment.md, then run this
-file with the Gate and Moss wheels installed. No model API is called.
+Set MOSS_GATE_URL, MOSS_GATE_TOKEN_FILE, MOSS_AIO_URL, and MOSS_SANDBOX_ID, then run
+this file with the Gate and Moss wheels installed. MOSS_AIO_ROUTE_HOST and
+MOSS_AIO_TRAFFIC_TOKEN_FILE are optional. Service and image setup is described in
+docs/deployment.md. No model API is called.
 """
 
 import asyncio

@@ -1,8 +1,6 @@
 # DeepAgents 外部插件与 CubeSandbox AIO 接入
 
-适用版本：agent-moss 0.17.6（内含 agentmoss-deepagents 0.6.0）、Python >=3.12、DeepAgents 0.7.32、agent-sandbox 0.0.30。
-
-迁移来源版本于 2026-11-11 在 devbox 通过插件回归和真实 AIO 镜像直连联调；CubeProxy 到 CubeSandbox 实例的完整联通仍受环境错误阻断。详见 [历史验证记录](devbox-validation-2026-11-11.md)。镜像构建、Moss 编译交付和沙箱创建/销毁属于另外的部署工作。
+本插件通过 `agent-sandbox` SDK 连接 CubeSandbox AIO。安装、服务启动和镜像配置见[部署说明](deployment.md)。
 
 ## 两层检查分别部署
 
@@ -18,13 +16,13 @@ DeepAgents 主代理 / 子代理
     → 内部放行后执行 Bash
 ```
 
-对应“方式一”，Moss SDK 放在 AIO 进程内部，不需要为内部检查启动 Gate 或独立 Moss Server。外部 DeepAgents 插件仍需要其自己的 Gate → Moss Server，二者不冲突。DeepAgents 客户端从统一 Moss wheel 安装插件和 AIO SDK；该 wheel 含引擎代码，但外部判定仍由 Gate → Moss Server 执行。
+Moss SDK 放在 AIO 进程内部，内部检查直接调用 SDK。外部 DeepAgents 插件通过 Gate → Moss Server 进行另一层检查。DeepAgents 客户端从 Moss wheel 安装插件和 AIO SDK，外部判定由 Gate → Moss Server 执行。
 
-外部服务不能仅凭沙箱路径读取脚本；本轮不传输脚本快照。沙箱脚本的内容扫描由已接入 Moss 的 AIO 镜像承担。客户端健康检查或 integration.status() 不证明镜像内 Moss 已启用，部署时需另行验收镜像检查入口。
+外部服务不能仅凭沙箱路径读取脚本，插件也不传输脚本内容。沙箱脚本的内容扫描由已接入 Moss 的 AIO 镜像承担。客户端健康检查和 `integration.status()` 展示外部服务及 backend 状态；镜像内部的检查需要单独配置。
 
 ## 安装与连接前提
 
-测试交付使用统一 Moss wheel，详见[部署与验收文档](tester-deployment.md)。如从源码安装，以下路径指向包含本插件 0.6.0 的实际检出；进入 DeepAgents 应用的 pyproject.toml 所在目录安装：
+Moss wheel 已包含插件。如从源码安装，进入 DeepAgents 应用的 `pyproject.toml` 所在目录，执行以下命令，并替换仓库路径：
 
 ```bash
 uv add --extra deepagents-aio /path/to/AgentMoss-commercial
@@ -84,7 +82,7 @@ async def run_once(model, existing_checkpointer, session_id, user_text):
         await integration.aclose()
 ```
 
-服务应用应在启动时创建并复用集成实例和 agent，而不是每条聊天消息重建；上面的单次函数用于展示完整的创建、送检和关闭关系。每个隔离子代理都要添加本插件中间件；固定版本会给声明式子代理配置同一 backend，自定义编译图则由应用负责。
+服务应用应在启动时创建并复用集成实例和 agent；上面的单次函数用于展示完整的创建、送检和关闭关系。每个隔离子代理都要添加本插件中间件；DeepAgents 给声明式子代理配置同一 backend，自定义编译图则由应用负责。
 
 不再额外下载官方 sandbox_backend.py，也不把独立 CubeSandbox SDK 的 commands.run() 混入这条路径；后者走 envd，不经过 AIO shell.py。
 
@@ -105,6 +103,4 @@ async def run_once(model, existing_checkpointer, session_id, user_text):
 - running、硬超时、连接中断或响应损坏：历史为 unknown，backend 停止接收新操作，不自动重试、不切换本地。先查询旧会话并清理，再创建新实例；新会话不意味着旧命令已经停止。
 - 初始化失败时，AIOStartupError 给出 sandbox_id、session_id、cleanup_confirmed 和脱敏失败类型，便于处理可能遗留的会话。
 - 文件工具仍经过外部插件，但 AIO 文件 API 不经过内部 shell.py。直接调用 backend.upload_files/download_files 等接口不经过插件中间件。
-- 外部 Moss 本地同名文件可能产生额外判断；本轮没有解决跨文件系统可见性，也不宣称 remote symlink 权限隔离。
-
-外部 Gate 拒绝、内部脚本拒绝、正常执行和故障处理已在 devbox 独立容器中测试；真实 CubeProxy 沙箱路由仍待验证。
+- 外部 Moss 本地同名文件可能产生额外判断。客户端与沙箱的文件系统不共享；backend 的工作目录不构成路径或符号链接的权限隔离。

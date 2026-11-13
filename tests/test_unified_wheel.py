@@ -6,6 +6,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
+from packaging.requirements import Requirement
 
 
 @pytest.mark.skipif(not os.getenv("AGENT_MOSS_UNIFIED_WHEEL"), reason="unified wheel not supplied")
@@ -20,9 +21,19 @@ def test_moss_wheel_contains_aio_plugin_and_optional_dependencies():
         metadata = BytesParser().parsebytes(wheel.read(metadata_path))
     assert metadata["Name"] == "agent-moss"
     assert "deepagents-aio" in metadata.get_all("Provides-Extra", [])
-    requirements = metadata.get_all("Requires-Dist", [])
-    assert any("deepagents==0.7.32" in value and 'extra == "deepagents-aio"' in value for value in requirements)
-    assert any("agent-sandbox==0.0.30" in value and 'extra == "deepagents-aio"' in value for value in requirements)
+    requirements = {
+        requirement.name: requirement
+        for value in metadata.get_all("Requires-Dist", [])
+        if (requirement := Requirement(value)).marker
+        and requirement.marker.evaluate({"extra": "deepagents-aio"})
+    }
+    deepagents = requirements["deepagents"]
+    assert all(version in deepagents.specifier for version in ("0.7.32", "0.7.33", "0.7.37"))
+    assert all(version not in deepagents.specifier for version in ("0.7.31", "0.8.0"))
+    aio = requirements["agent-sandbox"]
+    assert all(version in aio.specifier for version in ("0.0.30", "0.0.31"))
+    assert not deepagents.marker.evaluate({"extra": ""})
+    assert not aio.marker.evaluate({"extra": ""})
 
 
 @pytest.mark.skipif(not os.getenv("AGENT_MOSS_UNIFIED_WHEEL"), reason="unified wheel not supplied")

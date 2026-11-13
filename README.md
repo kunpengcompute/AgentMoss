@@ -35,16 +35,16 @@ pip install -e .
 
 ### DeepAgents 插件
 
-Moss wheel 同时包含 DeepAgents 插件 0.6.0；启用插件需要 Python >= 3.12。
+Moss wheel 同时包含 DeepAgents 插件；启用插件需要 Python >= 3.11。
 在 DeepAgents 应用环境安装可选依赖后，可通过配置选择本地 `local` 或 CubeSandbox `aio` 后端：
 
 ```bash
-python3.12 -m pip install '.[deepagents-aio]'
+python3 -m pip install '.[deepagents-aio]'
 ```
 
 这条命令从当前仓库安装；安装构建好的 wheel 时使用 `agent_moss-0.17.6-py3-none-any.whl[deepagents-aio]`。
 客户端通过插件调用外部 AgentGate → Moss Server，然后执行允许的工具调用。
-主代理和每个隔离子代理都需配置插件中间件。完整接入、安装方式与验证边界见
+主代理和每个隔离子代理都需配置插件中间件。完整接入、安装与配置方式见
 [DeepAgents 插件说明](integrations/deepagents-plugin/README.md)。
 
 ## 快速开始
@@ -344,8 +344,7 @@ agent-moss rules status
 AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
 ```
 
-2026-11-12 裁剪版全量回归（Python 3.11，禁用 LLM）：**3164 passed, 138 skipped, 0 failed**。
-请在仓库根目录运行上述命令；跳过项随环境变化，以实际测试输出为准。
+请在仓库根目录运行上述命令。
 
 测试语料位于 `tests/cases/`，双端一致性 golden 数据位于 `tests/parity/`
 （裁剪后只校验 Python 侧行为，不依赖 TypeScript 源码）。

@@ -18,6 +18,7 @@ htmlcov/
 *.db-wal
 *.db-shm
 *.log
+/tests/cases_exec/.last_run_*.txt
 
 # Local config / secrets
 secrets.yml

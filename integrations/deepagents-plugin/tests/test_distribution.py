@@ -9,6 +9,7 @@ from email.parser import BytesParser
 
 import pytest
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 
 pytestmark = pytest.mark.skipif(not os.getenv("AGENTMOSS_PLUGIN_WHEEL"), reason="built wheel not configured")
 
@@ -18,8 +19,15 @@ def test_wheel_contains_version_optional_dependency_and_licenses():
         names = wheel.namelist()
         metadata = BytesParser().parsebytes(wheel.read(next(n for n in names if n.endswith(".dist-info/METADATA"))))
         assert metadata["Version"] == "0.6.0"
+        python_versions = SpecifierSet(metadata["Requires-Python"])
+        assert "3.11" in python_versions and "3.10" not in python_versions
+        deepagents = next(
+            Requirement(d) for d in metadata.get_all("Requires-Dist") if Requirement(d).name == "deepagents"
+        )
+        assert all(version in deepagents.specifier for version in ("0.7.32", "0.7.33", "0.7.37"))
+        assert all(version not in deepagents.specifier for version in ("0.7.31", "0.8.0"))
         aio = [Requirement(d) for d in metadata.get_all("Requires-Dist") if Requirement(d).name == "agent-sandbox"]
-        assert len(aio) == 1 and str(aio[0].specifier) == "==0.0.30"
+        assert len(aio) == 1 and all(version in aio[0].specifier for version in ("0.0.30", "0.0.31"))
         assert aio[0].marker.evaluate({"extra": "aio"})
         assert not aio[0].marker.evaluate({"extra": ""})
         assert any(n.endswith("agent-infra-sandbox-Apache-2.0.txt") for n in names)

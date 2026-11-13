@@ -214,7 +214,7 @@ async def test_full_context_returns_from_children_and_checkpoints(tmp_path, mode
     assert len({e["event_id"] for e in result[KEY]["events"]}) == len(result[KEY]["events"])
 
 
-async def test_v2_diagnostic_channel_stays_separate_from_current_call_history(tmp_path):
+async def test_v2_diagnostic_channel_stays_separate_from_current_call_history(tmp_path, monkeypatch):
     import importlib
     import importlib.util
     import sys
@@ -232,7 +232,10 @@ async def test_v2_diagnostic_channel_stays_separate_from_current_call_history(tm
     module = importlib.util.module_from_spec(spec)
     sys.modules[prefix] = module
     spec.loader.exec_module(module)
-    old_create = importlib.import_module(prefix + ".assembly").create_guarded_agent
+    old_assembly = importlib.import_module(prefix + ".assembly")
+    # The archived fixture pins its original environment; this test checks history isolation.
+    monkeypatch.setattr(old_assembly, "validate_versions", lambda: None)
+    old_create = old_assembly.create_guarded_agent
     old_runtime_class = importlib.import_module(prefix + ".runtime").GateRuntime
     saver, cfg = (InMemorySaver(), config())
     backend = LocalShellBackend(root_dir=tmp_path)
