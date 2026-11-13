@@ -33,6 +33,20 @@ pip install -e .
 
 安装后会得到 `agent-moss` 命令行。
 
+### DeepAgents 插件
+
+Moss wheel 同时包含 DeepAgents 插件 0.6.0；启用插件需要 Python >= 3.12。
+在 DeepAgents 应用环境安装可选依赖后，可通过配置选择本地 `local` 或 CubeSandbox `aio` 后端：
+
+```bash
+python3.12 -m pip install '.[deepagents-aio]'
+```
+
+这条命令从当前仓库安装；安装构建好的 wheel 时使用 `agent_moss-0.17.6-py3-none-any.whl[deepagents-aio]`。
+客户端通过插件调用外部 AgentGate → Moss Server，然后执行允许的工具调用。
+主代理和每个隔离子代理都需配置插件中间件。完整接入、安装方式与验证边界见
+[DeepAgents 插件说明](integrations/deepagents-plugin/README.md)。
+
 ## 快速开始
 
 ### CLI
