@@ -4,7 +4,7 @@ Moss 负责安全检测并返回判定，Gate 负责接收 Agent 请求、调用
 
 当前工具参数和模型调用说明按原文送检，Gate/Moss 需作为可信服务部署。
 
-插件版本为 `agentmoss-deepagents 0.6.0`，版本号独立于 Moss 主包和 DeepAgents。使用 Python 3.11 或更新版本，依赖由安装工具按 [pyproject.toml](pyproject.toml) 解析。
+使用 Python 3.11 或更新版本，依赖由安装工具按 [pyproject.toml](pyproject.toml) 解析。
 
 Moss wheel 已包含本插件，客户端通过 `agent-moss[deepagents-aio]` 安装。Gate/Moss 服务及 AIO 镜像的配置见[部署说明](docs/deployment.md)。
 
@@ -240,6 +240,6 @@ agent = create_deep_agent(
 
 持久化历史最多保留 200 条动作、20 次用户输入和 32 KiB；应用可配置更小的窗口。超限时整条移除历史记录并标记 `truncated`，当前送检参数不会因此截短。同一次根调用另行保存已开始的执行 ID，历史被移除后，SDK 节点重试也不会再次执行相同工具调用。这份去重集合只在本次调用内有效，不写入 checkpoint；跨进程恢复仍需应用核对已发生的副作用。
 
-本版本使用 schema=4。已结束的 v3 历史会自动转换；升级前先结束请求，确认 checkpoint 没有待执行任务并备份。含 `attempted` 或 `unknown` 的旧历史需要先人工核对，插件会拒绝自动转换。旧插件不能读取新格式，回退时使用升级前备份或新会话。
+会话历史使用 schema=4。已结束的 v3 历史会自动转换；升级前先结束请求，确认 checkpoint 没有待执行任务并备份。含 `attempted` 或 `unknown` 的旧历史需要先人工核对，插件会拒绝自动转换。旧插件不能读取新格式，回退时使用升级前备份或新会话。
 
 [官方 Middleware 文档](https://docs.langchain.com/oss/python/langchain/middleware/custom)
