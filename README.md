@@ -52,8 +52,6 @@ pip install -e .
 
 3. **在 DeepAgents 应用代码中接入插件。** 配置 Gate 地址和访问令牌，并修改创建 Agent 的代码，为主代理和每个子代理添加插件的检查组件。完整代码见[插件接入说明](integrations/deepagents-plugin/README.md)。
 
-工具可以在运行 DeepAgents 的机器上执行，也可以在 CubeSandbox 沙箱中执行。沙箱连接方式见[CubeSandbox 接入说明](integrations/deepagents-plugin/docs/cubesandbox.md)。
-
 ## 快速开始
 
 ### CLI
