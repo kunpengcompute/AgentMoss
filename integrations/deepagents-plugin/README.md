@@ -6,11 +6,9 @@ Moss 负责安全检测并返回判定，Gate 负责接收 Agent 请求、调用
 
 使用 Python 3.11 或更新版本，依赖由安装工具按 [pyproject.toml](pyproject.toml) 解析。
 
-Moss wheel 已包含本插件，客户端通过 `agent-moss[deepagents-aio]` 安装。Gate/Moss 服务及 AIO 镜像的配置见[部署说明](docs/deployment.md)。
+使用插件前，先启动 Gate 和 Moss 服务，配置方法见[部署说明](docs/deployment.md)。
 
 ## 安装与配置
-
-可以通过 Moss wheel 安装，也可以在开发时直接从插件源码目录安装。
 
 插件要安装到**使用 DeepAgents 的 Python 项目**中。先进入你编写 Agent 调用代码的项目根目录，也就是该应用的 `pyproject.toml` 所在目录。
 
