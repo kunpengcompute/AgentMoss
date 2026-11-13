@@ -178,6 +178,8 @@ class RunHistory:
         self.value = validate_history(value, root)
         self.config = config
         self.seq = max((event["seq"] for event in self.value["events"]), default=0)
+        # Replay protection lasts for this invocation even when its audit window is pruned.
+        self._seen_event_ids = {event_key(event) for event in self.value["events"]}
         self._state_guard = threading.RLock()
         self.lock = threading.Lock()
 
@@ -191,7 +193,9 @@ class RunHistory:
 
     @synchronized
     def merge(self, value: dict) -> None:
-        self.value = self.trim(merge_history(self.value, value))
+        merged = merge_history(self.value, value)
+        self._seen_event_ids.update(event_key(event) for event in merged["events"])
+        self.value = self.trim(merged)
         self.seq = max(self.seq, max((event["seq"] for event in self.value["events"]), default=0))
 
     @synchronized
@@ -202,8 +206,9 @@ class RunHistory:
     def begin(self, run: RunContext, call_id: str, action: Action, original_name: str, *, event_id: str) -> dict:
         if run.session_id != self.value["root"]:
             raise ValueError("Cross-root tool call")
-        if not call_id or any(event_key(event) == event_id for event in self.value["events"]):
+        if not call_id or event_id in self._seen_event_ids:
             raise ValueError("Recorded tool call cannot be replayed")
+        self._seen_event_ids.add(event_id)
         self.seq += 1
         event = {
             "event_id": event_id,
