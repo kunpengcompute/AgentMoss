@@ -33,19 +33,26 @@ pip install -e .
 
 安装后会得到 `agent-moss` 命令行。
 
-### DeepAgents 插件
+### 在 DeepAgents 中启用安全检查
 
-Moss wheel 同时包含 DeepAgents 插件；启用插件需要 Python >= 3.11。
-在 DeepAgents 应用环境安装可选依赖后，可通过配置选择本地 `local` 或 CubeSandbox `aio` 后端：
+如果你的 Agent 使用 DeepAgents 开发，可以接入本插件，在执行工具前检查操作是否安全。
+插件把工具名称和参数发给 AgentGate，由 AgentGate 调用 Moss 分析。
+返回 `Allow` 时继续执行，返回 `Deny` 时拒绝这次工具调用。
 
-```bash
-python3 -m pip install '.[deepagents-aio]'
-```
+接入分为三步：
 
-这条命令从当前仓库安装；安装构建好的 wheel 时使用 `agent_moss-0.17.6-py3-none-any.whl[deepagents-aio]`。
-客户端通过插件调用外部 AgentGate → Moss Server，然后执行允许的工具调用。
-主代理和每个隔离子代理都需配置插件中间件。完整接入、安装与配置方式见
-[DeepAgents 插件说明](integrations/deepagents-plugin/README.md)。
+1. **启动 Gate 和 Moss 服务。** Gate 接收插件的检查请求，Moss 给出安全判定。部署方法见[部署说明](integrations/deepagents-plugin/docs/deployment.md)。
+2. **把插件装到运行 DeepAgents 的 Python 环境中。** 使用 Python 3.11 或更新版本，先激活该应用的虚拟环境，再进入本仓库根目录执行：
+
+   ```bash
+   python3 -m pip install '.[deepagents-aio]'
+   ```
+
+   这条命令会安装 Moss、DeepAgents 插件及插件运行所需的依赖。
+
+3. **在 DeepAgents 应用代码中接入插件。** 配置 Gate 地址和访问令牌，并修改创建 Agent 的代码，为主代理和每个子代理添加插件的检查组件。完整代码见[插件接入说明](integrations/deepagents-plugin/README.md)。
+
+工具可以在运行 DeepAgents 的机器上执行，也可以在 CubeSandbox 沙箱中执行。沙箱连接方式见[CubeSandbox 接入说明](integrations/deepagents-plugin/docs/cubesandbox.md)。
 
 ## 快速开始
 
