@@ -15,6 +15,7 @@ import pytest
 from agent_sandbox import Sandbox
 from langchain_core.messages import AIMessage
 from models import call
+from test_aio_backend import sdk_backend as sdk_backend
 from test_native_sdk import make_agent, run_args, setup
 
 from agentmoss_deepagents.aio_backend import AIOSandboxBackend
@@ -152,6 +153,54 @@ def test_python_stream_output_acknowledgement(atomic_service, tmp_path):
 
     service.transform = transform
     assert backend.write(str(tmp_path / "stream-result"), "ok").error is None
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("error", ["permission_denied", "already_exists", "not_found", "read_only_filesystem"])
+def test_file_error_body_cannot_confirm_code_api_rejection(atomic_service, tmp_path, malformed, error):
+    (backend, _), service = atomic_service
+    target = tmp_path / "written-before-broken-response"
+
+    def broken_response(data):
+        failure = {"path": str(target), "operation": "write", "error_type": error}
+        return httpx.Response(200, json={"success": False, "data": failure if malformed else {**data, **failure}})
+
+    service.transform = broken_response
+    with pytest.raises(AIOExecutionUncertain):
+        backend.write(str(target), "once")
+    assert target.read_text() == "once"
+    assert backend.status()["state"] == "uncertain"
+    with pytest.raises(AIOUnavailable):
+        backend.write(str(tmp_path / "second"), "must not run")
+    assert len(service.seen) == 1 and not (tmp_path / "second").exists()
+
+
+@pytest.mark.parametrize("code,error", [(403, "permission_denied"), (404, "file_not_found")])
+def test_explicit_code_http_rejection_is_recoverable(sdk_backend, code, error):
+    backend, submitted, replies = sdk_backend
+    replies.extend([
+        httpx.Response(code),
+        httpx.Response(200, json={"success": True, "data": {"file": "/home/gem/ok", "content": "ok"}}),
+    ])
+    assert backend.write("new", "data").error == error
+    assert backend.status()["state"] == "ready"
+    assert backend.read("ok").file_data["content"] == "ok"
+    assert [r.url.path for r in submitted] == ["/v1/code/execute", "/v1/file/read"]
+
+
+@pytest.mark.parametrize("error", ["permission_denied", "read_only_filesystem"])
+def test_verified_creation_receipt_is_a_recoverable_rejection(sdk_backend, error):
+    backend, _, replies = sdk_backend
+
+    def response(request):
+        return httpx.Response(200, json={"success": True, "data": {
+            "language": "python", "code": json.loads(request.content)["code"], "status": "ok", "exit_code": 0,
+            "stdout": json.dumps({"status": "rejected", "error": error}),
+        }})
+
+    replies.append(response)
+    assert backend.write("new", "data").error == error
+    assert backend.status()["state"] == "ready"
 
 
 @pytest.mark.parametrize("seconds,expected", [(5.9, 5), (900, 300), (0.5, None)])

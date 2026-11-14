@@ -138,8 +138,12 @@ class AIOSandboxBackend(SandboxBackendProtocol):
             except Exception as error:
                 code = error.status_code if isinstance(error, ApiError) else None
                 shell = isinstance(result, ExecuteResponse)
+                # Exclusive creation uses the code API. Its missing receipt is
+                # never a confirmed FileOperationError, even if the damaged
+                # response contains a familiar file-error category.
+                file_api = not isinstance(result, (ExecuteResponse, WriteResult))
                 failure = str(error) if isinstance(error, _AIOFileFailure) else None
-                if isinstance(error, ValidationError):
+                if file_api and isinstance(error, ValidationError):
                     # SDK 0.0.30 models success data only; expected file errors omit those fields.
                     failure = next(
                         (
@@ -153,7 +157,7 @@ class AIOSandboxBackend(SandboxBackendProtocol):
                     result.output, result.exit_code = f"AIO HTTP {code}: {self._redact(error.body)}", 126
                     if code == 409:
                         self._state = "uncertain"
-                elif not shell and failure:
+                elif file_api and failure:
                     result.error = failure
                 elif not shell and code in (403, 404):
                     result.error = "permission_denied" if code == 403 else "file_not_found"

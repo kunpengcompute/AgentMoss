@@ -546,7 +546,7 @@ def test_invalid_file_arguments_do_not_poison_session(backend, client, method, a
     assert backend.status()["state"] == "ready" and client.shell.calls == []
 
 
-@pytest.mark.parametrize("method", ["read", "ls", "write", "edit", "grep", "upload_files"])
+@pytest.mark.parametrize("method", ["read", "ls", "edit", "grep", "upload_files"])
 @pytest.mark.parametrize(
     "kind,status,want", [("not_found", 404, "file_not_found"), ("permission_denied", 403, "permission_denied")]
 )
@@ -566,7 +566,6 @@ def test_sdk_file_rejection_is_recoverable(sdk_backend, method, kind, status, wa
     args = {
         "read": ("missing",),
         "ls": ("missing",),
-        "write": ("missing", "x"),
         "edit": ("missing", "old", "new"),
         "grep": ("text", "missing"),
         "upload_files": ([("missing", b"x")],),
@@ -582,8 +581,6 @@ def test_sdk_file_rejection_is_recoverable(sdk_backend, method, kind, status, wa
         ("read", "invalid_target", "EISDIR"),
         ("ls", "invalid_target", "ENOTDIR"),
         ("read", "invalid_path", "EINVAL"),
-        ("write", "already_exists", "EEXIST"),
-        ("write", "read_only_filesystem", "EROFS"),
         ("read", "decode_error", None),
     ],
 )
@@ -610,7 +607,7 @@ def test_sdk_expected_file_failure_allows_next_operation(sdk_backend, method, ki
         ]
     )
 
-    args = ("/home/gem/invalid", "content") if method == "write" else ("/home/gem/invalid",)
+    args = ("/home/gem/invalid",)
     if kind == "decode_error":
         replies.insert(1, httpx.Response(200, content=b"\x00\xffbinary"))
     result = getattr(backend, method)(*args)
