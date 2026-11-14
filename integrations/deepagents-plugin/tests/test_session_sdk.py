@@ -94,7 +94,7 @@ async def test_async_sdk_distinguishes_same_ids_in_parallel_graphs(tmp_path, che
     inputs, config, context = run_args()
     try:
         result = await graph.ainvoke(inputs, config, context=context)
-        assert result[KEY]["schema"] == 4
+        assert result[KEY]["schema"] == 5
         entries = [e for e in result[KEY]["events"] if e["tool_call_id"] == "same"]
         assert len(entries) == (1 if mode == "main" else 2)
         assert len({e["event_id"] for e in entries}) == len(entries)
@@ -338,7 +338,7 @@ async def test_real_checkpoint_upgrade_preserves_finished_calls_and_rejects_unfi
         else:
             result = await graph.ainvoke({"messages": [("user", "next input")]}, config, context=context)
             assert (tmp_path / "upgraded").read_text() == "upgraded"
-            assert result[KEY]["schema"] == 4 and len(result[KEY]["events"]) == 2
+            assert result[KEY]["schema"] == 5 and len(result[KEY]["events"]) == 2
             assert len({event["event_id"] for event in result[KEY]["events"]}) == 2
             assert [turn["text"] for turn in result[KEY]["turns"]] == ["original user", "next input"]
             assert seen[0]["action_history"] == [{"action_type": "bash", "action_detail": "printf test"}]

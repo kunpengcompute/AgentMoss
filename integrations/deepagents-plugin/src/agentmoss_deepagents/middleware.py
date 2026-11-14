@@ -12,14 +12,14 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
-from langgraph.errors import GraphBubbleUp
+from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from . import __version__
 from .actions import ActionAdapter
 from .client import GateUnavailable
-from .context import RunContext, begin_run, current_run
+from .context import RunContext, begin_run, current_run, ensure_run, moss_info
 from .history import KEY, AgentMossState, make_event_id
 from .operation import tool_operation
 from .runtime import GateRuntime, drain
@@ -51,15 +51,19 @@ class AgentMossMiddleware(AgentMiddleware):
     def after_agent(self, state: dict, runtime: Runtime) -> dict | None:
         if not self.runtime.config.enabled:
             return None
-        run = current_run(runtime.context)
+        run = ensure_run(runtime.context, state, self.runtime)
         run.history.merge(state.get(KEY, {}))
         return {KEY: run.history.value}
 
     async def aafter_agent(self, state: dict, runtime: Runtime) -> dict | None:
         return self.after_agent(state, runtime)
 
-    @staticmethod
-    def _run(request: ToolCallRequest) -> RunContext:
+    def _run(self, request: ToolCallRequest) -> RunContext:
+        # Validate the explicit tool runtime thread before restoring from its
+        # state. An existing context still undergoes the ownership checks below.
+        info = moss_info(request.runtime.context, request.runtime.config.get("configurable", {}).get("thread_id"))
+        if "_agentmoss_run" not in info:
+            ensure_run(request.runtime.context, request.state, self.runtime)
         return current_run(request.runtime.context, request.runtime.config.get("configurable", {}).get("thread_id"))
 
     def _error(self, request: ToolCallRequest, reason: str) -> ToolMessage:
@@ -221,10 +225,22 @@ class AgentMossMiddleware(AgentMiddleware):
             return list(result.update)
         raise ValueError("Unsupported tool Command update")
 
-    async def _execute(self, request: ToolCallRequest, handler: AsyncToolHandler) -> ToolResult:
-        if request.tool_call["name"] == "task":
-            return await handler(request)
-        return await drain(handler(request), propagate_cancel=True)
+    @staticmethod
+    def _policy_request(request: ToolCallRequest) -> ToolCallRequest:
+        # Native batched HITL keeps the original AIMessage and stores edits in
+        # graph state. Its inner tool wrapper substitutes them only at execution.
+        # Inspect that same final action, leaving SDK execution/annotation intact.
+        edited = request.state.get("hitl_edited_tool_calls") or {}
+        action = edited.get(request.tool_call["id"])
+        if action is None:
+            return request
+        if (
+            not isinstance(action, dict)
+            or not isinstance(action.get("name"), str)
+            or not isinstance(action.get("args"), dict)
+        ):
+            raise ValueError("Invalid approved tool action")
+        return request.override(tool_call={**request.tool_call, "name": action["name"], "args": action["args"]})
 
     def wrap_tool_call(self, request: ToolCallRequest, handler: ToolHandler) -> ToolResult:
         if self.runtime.closing:
@@ -232,6 +248,8 @@ class AgentMossMiddleware(AgentMiddleware):
         if not self.runtime.config.enabled:
             return handler(request)
         try:
+            execution_request = request
+            request = self._policy_request(request)
             view = self._run(request).history
             lock = nullcontext() if request.tool_call["name"] == "task" else view.leaf_lock()
             with lock:
@@ -247,10 +265,13 @@ class AgentMossMiddleware(AgentMiddleware):
                     return denial
                 try:
                     with tool_operation() as outcome:
-                        result = handler(request)
-                except BaseException:
+                        result = handler(execution_request)
+                except BaseException as error:
                     view.finish(
-                        event, "unknown", decision=verdict["decision"], source=verdict.get("source", "agent_moss")
+                        event,
+                        "interrupted" if isinstance(error, GraphInterrupt) else "unknown",
+                        decision=verdict["decision"],
+                        source=verdict.get("source", "agent_moss"),
                     )
                     raise
                 return self._record(request, event, result, verdict, uncertain=outcome.uncertain)
@@ -265,6 +286,8 @@ class AgentMossMiddleware(AgentMiddleware):
         if not self.runtime.config.enabled:
             return await handler(request)
         try:
+            execution_request = request
+            request = self._policy_request(request)
             view = self._run(request).history
             lock = nullcontext() if request.tool_call["name"] == "task" else view.async_leaf_lock()
             async with lock:
@@ -283,10 +306,16 @@ class AgentMossMiddleware(AgentMiddleware):
                     return denial
                 try:
                     with tool_operation() as outcome:
-                        result = await self._execute(request, handler)
-                except BaseException:
+                        if request.tool_call["name"] == "task":
+                            result = await handler(execution_request)
+                        else:
+                            result = await drain(handler(execution_request), propagate_cancel=True)
+                except BaseException as error:
                     view.finish(
-                        event, "unknown", decision=verdict["decision"], source=verdict.get("source", "agent_moss")
+                        event,
+                        "interrupted" if isinstance(error, GraphInterrupt) else "unknown",
+                        decision=verdict["decision"],
+                        source=verdict.get("source", "agent_moss"),
                     )
                     raise
                 return self._record(request, event, result, verdict, uncertain=outcome.uncertain)

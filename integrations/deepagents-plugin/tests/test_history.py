@@ -29,7 +29,12 @@ def event(i, root="root"):
 
 
 def state(events):
-    return empty_history("root") | {"events": events, "turns": [{"id": "turn", "text": "user"}]}
+    return empty_history("root") | {
+        "events": events,
+        "turns": [{"id": "turn", "text": "user", "order": 1}],
+        "current_turn": {"id": "turn", "order": 1},
+        "clock": max([1, *(event["seq"] for event in events)]),
+    }
 
 
 def test_idempotent_merge_keeps_latest_status_in_original_call_order():
@@ -94,7 +99,10 @@ def test_pruning_history_never_allows_a_started_execution_to_replay(tmp_path, li
     view.finish(first, "executed_success", decision="Allow")
     if limit == "actions":
         second = view.begin(
-            ctx, "second", Action("bash", "printf second", "/"), "execute",
+            ctx,
+            "second",
+            Action("bash", "printf second", "/"),
+            "execute",
             event_id=make_event_id("root", "tools:node", "second"),
         )
         view.finish(second, "executed_success", decision="Allow")

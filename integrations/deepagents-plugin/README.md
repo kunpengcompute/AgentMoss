@@ -121,6 +121,8 @@ DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理�
 
 读取、写入、编辑、目录列表、grep 和二进制传输直接使用 `agent-sandbox` 文件 API；删除调用一次 AIO shell。glob 直接复用 DeepAgents `BaseSandbox.glob`，保持与模型收到的工具说明一致，包括递归文件名匹配和 `{a,b}` 模式。写入仍拒绝覆盖已有文件。
 
+删除目录会递归删除其内容，送 Gate 的合成命令与 AIO 执行共用 `rm -r -- <路径>`。文本读取保留当前页的源文件行号；空白页不表示整文件为空，超出文件末尾的非零 offset 返回读取错误。
+
 异步方法复用 DeepAgents 的 `SandboxBackendProtocol`。通过图调用工具时，中间件会等待已取消的工具执行结束；直接调用 backend 异步方法遵循 DeepAgents 的默认取消行为，取消等待不会终止工作线程。`integration.aclose()` 仍会等待正在进行的 SDK 请求结束后再关闭 shell 和 HTTP 连接。
 
 文件 API 不经过沙箱内部 shell.py 的检查，但 DeepAgents 的文件工具调用仍先通过插件送 Gate。直接调用 backend.upload_files/download_files 等方法不经过工具中间件，不能据此认为已完成外部送检。
@@ -230,12 +232,30 @@ agent = create_deep_agent(
 - 如果有修改工具参数的 Middleware，将它放在 AgentMossMiddleware 之前。
 - 使用 `DeepAgentsIntegration.load()` 时，等请求结束后调用 `await integration.aclose()`，清理 backend 和 Gate 连接；手动管理 `GateRuntime` 时调用 `await runtime.aclose()` 关闭 Gate 连接。
 
+## 审批暂停与恢复
+
+配置应用的 checkpointer 和 DeepAgents `interrupt_on` 后，可以用原生 `Command(resume=...)` 恢复审批。恢复时仍新建 `moss_info` 字典，保持原来的 `session_id`、`thread_id` 和该轮原始 `user_prompt`；插件从 checkpoint 恢复当前轮次，不把审批恢复计为一次新用户输入。
+
+```python
+from langgraph.types import Command
+
+result = await agent.ainvoke(
+    Command(resume={"decisions": [{"type": "approve"}]}),
+    {"configurable": {"thread_id": session_id}},
+    context={"moss_info": {"session_id": session_id, "user_prompt": original_user_text}},
+)
+```
+
+以上为默认批量审批的单个待审批调用；多个调用需按 SDK 的顺序提供对应决定。审批人修改工具名称或参数后，插件检查修改后的动作，Gate Deny 仍然阻止执行。子代理暂停时，父 `task` 可记录为 `interrupted` 并恢复委派；这不会放开普通工具的执行 ID 去重检查。
+
+如果显式使用 `HumanInTheLoopMiddleware(interrupt_mode="per_call", ...)`，将其放在 `AgentMossMiddleware` 之前，保证审批和参数修改先完成，再进入 Gate 检查。该模式按 SDK 返回的 interrupt ID 提交决定。
+
 ## 会话历史与升级
 
 同一会话的主agent 和 subagent 共用调用历史，由应用已有的 checkpointer 保存。插件不再记录主agent/subagent 的身份关系。
 
-持久化历史最多保留 200 条动作、20 次用户输入和 32 KiB；应用可配置更小的窗口。超限时整条移除历史记录并标记 `truncated`，当前送检参数不会因此截短。同一次根调用另行保存已开始的执行 ID，历史被移除后，SDK 节点重试也不会再次执行相同工具调用。这份去重集合只在本次调用内有效，不写入 checkpoint；跨进程恢复仍需应用核对已发生的副作用。
+持久化历史最多保留 200 条动作、20 次用户输入和 32 KiB；应用可配置更小的窗口。运行时和 checkpoint 使用相同的窗口规则，稳定轮次顺序和裁剪边界防止旧快照恢复已淘汰的记录。超限时整条移除历史记录并标记 `truncated`，当前送检参数不会因此截短。`history_bytes` 必须容纳会话标识和裁剪元数据；过小会在请求开始时明确报错。同一次根调用另行保存已开始的执行 ID，历史被移除后，SDK 节点重试也不会再次执行相同工具调用。这份去重集合只在本次调用内有效，不写入 checkpoint；跨进程恢复仍需应用核对已发生的副作用。
 
-会话历史使用 schema=4。已结束的 v3 历史会自动转换；升级前先结束请求，确认 checkpoint 没有待执行任务并备份。含 `attempted` 或 `unknown` 的旧历史需要先人工核对，插件会拒绝自动转换。旧插件不能读取新格式，回退时使用升级前备份或新会话。
+会话历史使用 schema=5。已结束的 v3/v4 历史会自动转换，保留动作内容和执行 ID；升级前先结束请求，确认 checkpoint 没有待执行任务并备份。含 `attempted`、`unknown` 或 `interrupted` 的旧历史需要先人工核对，插件会拒绝自动转换。旧插件不能读取新格式，回退时使用升级前备份或新会话。
 
 [官方 Middleware 文档](https://docs.langchain.com/oss/python/langchain/middleware/custom)

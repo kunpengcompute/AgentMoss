@@ -47,8 +47,8 @@ the current operation. Middleware reads this after the SDK handler returns.
 
 ### Task 2: Bounded history and native approval recovery
 
-**Files:** plugin `history.py`, `context.py`, `middleware.py`;
-`tests/test_review_fixes.py`, history/context/session SDK tests; plugin README.
+**Files:** plugin `history.py`, new `history_schema.py`, `context.py`, `middleware.py`;
+new `tests/test_history_limits.py`, `tests/test_resume.py`, history/context/session SDK tests; plugin README.
 
 **Interfaces:** schema 5 preserves existing events and adds stable ordered turns,
 limits, a monotonic clock, prune cursors, and current turn identity. `ensure_run`

@@ -72,8 +72,9 @@ def test_legacy_migration_preserves_data_and_distinguishes_same_child_call_ids()
     )
     before = deepcopy(original)
     result = history.migrate_history(original, "chat")
-    assert result["schema"] == 4
-    assert result["root"] == "chat" and result["turns"] == before["turns"]
+    assert result["schema"] == 5
+    assert result["root"] == "chat"
+    assert [{key: turn[key] for key in ("id", "text")} for turn in result["turns"]] == before["turns"]
     assert result["events"][0]["event_id"] == "dad29b69-d57b-55b6-a813-c3814632ea80"
     assert len({event["event_id"] for event in result["events"]}) == 2
     assert [event["status"] for event in result["events"]] == ["executed_success", "denied"]
@@ -114,13 +115,17 @@ def test_legacy_corrupt_or_cross_session_data_is_not_silently_normalized(mutatio
         history.migrate_history(legacy_history(legacy_event()) | mutation, "chat")
 
 
-def test_empty_history_and_invalid_v4_are_checked():
+def test_empty_history_and_invalid_current_history_are_checked():
     assert history.migrate_history({}, "chat") == {
-        "schema": 4,
+        "schema": 5,
         "root": "chat",
         "events": [],
         "turns": [],
         "truncated": False,
+        "limits": {"actions": 200, "turns": 20, "bytes": 32768},
+        "clock": 0,
+        "pruned": {"events": -1, "turns": -1},
+        "current_turn": None,
     }
     value = history.migrate_history(legacy_history(legacy_event()), "chat")
     for field in ["scope", "output"]:
@@ -141,7 +146,11 @@ def test_repeated_or_stale_graph_updates_cannot_revert_a_completed_event():
 
 
 def test_turn_window_keeps_last_twenty_complete_prompts():
-    value = history.empty_history("chat") | {"turns": [{"id": str(i), "text": f"user-{i}"} for i in range(21)]}
+    value = history.empty_history("chat") | {
+        "turns": [{"id": str(i), "text": f"user-{i}", "order": i + 1} for i in range(21)],
+        "clock": 21,
+        "current_turn": {"id": "20", "order": 21},
+    }
     result = history.merge_history({}, value)
     assert len(result["turns"]) == 20
     assert result["turns"][0]["text"] == "user-1"
