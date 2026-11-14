@@ -146,6 +146,8 @@ class AIOSandboxBackend(SandboxBackendProtocol):
                     result.error = "permission_denied" if code == 403 else "file_not_found"
                 elif isinstance(result, EditResult) and code in (400, 409, 422):
                     result.error = "AIO edit rejected: " + self._redact(error.body)
+                elif isinstance(result, GrepResult) and code in (400, 422):
+                    result.error = "AIO grep rejected: " + self._redact(error.body)
                 else:
                     self._state = "uncertain"
                     mark_uncertain()
@@ -285,7 +287,8 @@ class AIOSandboxBackend(SandboxBackendProtocol):
         if self.grep_exclude_dirs:
             options["exclude"] = list(self.grep_exclude_dirs)
         if max_count is not None:
-            options["max_results"] = max_count + 1
+            # AIO accepts at most 10000 results and reports any further truncation.
+            options["max_results"] = min(max_count + 1, 10000)
         result = GrepResult()
         with self._operation(result):
             data = self._data(self.client.file.grep_files(**options))

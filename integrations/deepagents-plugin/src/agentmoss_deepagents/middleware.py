@@ -123,11 +123,14 @@ class AgentMossMiddleware(AgentMiddleware):
         )
         try:
             messages = request.state.get("messages", [])
+            # Empty or block-based content belongs to this call too; never
+            # substitute a previous action's explanation for the current one.
             reason = next(
                 (
-                    m.content
+                    m.text
                     for m in reversed(messages)
-                    if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content
+                    if isinstance(m, AIMessage)
+                    and any(call.get("id") == request.tool_call["id"] for call in m.tool_calls)
                 ),
                 "",
             )
