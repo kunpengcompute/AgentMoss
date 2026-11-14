@@ -632,7 +632,8 @@ def sdk_backend():
         if request.method == "DELETE":
             return httpx.Response(200, json={"success": True})
         submitted.append(request)
-        return replies.pop(0)
+        reply = replies.pop(0)
+        return reply(request) if callable(reply) else reply
 
     with httpx.Client(transport=httpx.MockTransport(transport)) as http:
         backend = AIOSandboxBackend(

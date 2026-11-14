@@ -21,7 +21,7 @@ from .actions import ActionAdapter
 from .client import GateUnavailable
 from .context import RunContext, begin_run, current_run, ensure_run, moss_info
 from .history import KEY, AgentMossState, make_event_id
-from .operation import tool_operation
+from .operation import async_tool_operation, tool_operation
 from .runtime import GateRuntime, drain
 
 logger = logging.getLogger(__name__)
@@ -305,7 +305,7 @@ class AgentMossMiddleware(AgentMiddleware):
                 if (denial := self._check(request, event, verdict)) is not None:
                     return denial
                 try:
-                    with tool_operation() as outcome:
+                    async with async_tool_operation() as outcome:
                         if request.tool_call["name"] == "task":
                             result = await handler(execution_request)
                         else:

@@ -36,7 +36,7 @@ from .actions import delete_command
 from .aio_errors import AIOExecutionUncertain, AIOStartupError, AIOUnavailable
 from .aio_paths import normalize_aio_path
 from .backend_config import AIOBackendConfig, positive_timeout
-from .operation import mark_uncertain
+from .operation import mark_uncertain, track_operation
 
 
 class _AIOFileFailure(AIOUnavailable):
@@ -114,7 +114,7 @@ class AIOSandboxBackend(SandboxBackendProtocol):
     @contextmanager
     def _operation(self, result):
         """Serialize SDK calls and distinguish confirmed rejection from lost results."""
-        with self._lock:
+        with track_operation(), self._lock:
             self._ready()
             try:
                 yield

@@ -125,6 +125,8 @@ DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理�
 
 异步方法复用 DeepAgents 的 `SandboxBackendProtocol`。通过图调用工具时，中间件会等待已取消的工具执行结束；直接调用 backend 异步方法遵循 DeepAgents 的默认取消行为，取消等待不会终止工作线程。`integration.aclose()` 仍会等待正在进行的 SDK 请求结束后再关闭 shell 和 HTTP 连接。
 
+AIO 的 glob/grep 达到上游搜索等待期限后，图调用仍会等本次工具已提交的 SDK 请求结束，再保存历史状态；响应丢失记为 `unknown`。工具调用结束后才开始的排队请求会被阻止提交，因此搜索超时后的返回可能晚于上游等待期限。
+
 文件 API 不经过沙箱内部 shell.py 的检查，但 DeepAgents 的文件工具调用仍先通过插件送 Gate。直接调用 backend.upload_files/download_files 等方法不经过工具中间件，不能据此认为已完成外部送检。
 
 外部 Moss Server 无法仅凭路径读取沙箱里的脚本，本插件不做文件共享或内容上传。沙箱脚本检测依赖部署时使用已接入 Moss 的 AIO 镜像；镜像内部集成与本插件独立。外部 Moss 若存在同名本地文件可能产生额外判断，此限制尚未解决。`integration.status()` 只展示 Gate 策略和 backend 会话状态，不证明镜像内 Moss 已启用。
