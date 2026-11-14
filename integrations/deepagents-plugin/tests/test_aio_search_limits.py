@@ -126,18 +126,21 @@ async def test_rejected_grep_keeps_next_graph_command_usable(sdk_backend, tmp_pa
         await runtime.aclose()
 
 
-@pytest.mark.parametrize("failure", ["timeout", "server_error", "malformed_validation"])
+@pytest.mark.parametrize("failure", ["timeout", "server_error", "malformed_validation", "malformed_json"])
 def test_unconfirmed_grep_failure_still_stops_session(sdk_backend, failure):
     backend, submitted, replies = sdk_backend
 
     def timeout(request):
         raise httpx.ReadTimeout("traffic-secret")
 
-    replies.append(
-        timeout
-        if failure == "timeout"
-        else httpx.Response(500 if failure == "server_error" else 422, json={"detail": "malformed: traffic-secret"})
-    )
+    if failure == "malformed_json":
+        replies.append(httpx.Response(422, content=b"{", headers={"content-type": "application/json"}))
+    else:
+        replies.append(
+            timeout
+            if failure == "timeout"
+            else httpx.Response(500 if failure == "server_error" else 422, json={"detail": "malformed: traffic-secret"})
+        )
     with pytest.raises(AIOExecutionUncertain) as error:
         backend.grep("needle")
     assert "traffic-secret" not in str(error.value)

@@ -16,6 +16,7 @@ import uuid
 from contextlib import contextmanager
 
 from agent_sandbox.core.api_error import ApiError
+from agent_sandbox.errors import UnprocessableEntityError
 from deepagents.backends.protocol import (
     DeleteResult,
     EditResult,
@@ -146,7 +147,9 @@ class AIOSandboxBackend(SandboxBackendProtocol):
                     result.error = "permission_denied" if code == 403 else "file_not_found"
                 elif isinstance(result, EditResult) and code in (400, 409, 422):
                     result.error = "AIO edit rejected: " + self._redact(error.body)
-                elif isinstance(result, GrepResult) and code in (400, 422):
+                elif isinstance(result, GrepResult) and (code == 400 or isinstance(error, UnprocessableEntityError)):
+                    # A malformed 422 body raises generic ApiError instead; its
+                    # result remains uncertain, just like other broken responses.
                     result.error = "AIO grep rejected: " + self._redact(error.body)
                 else:
                     self._state = "uncertain"
