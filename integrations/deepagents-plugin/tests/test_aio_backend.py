@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -386,6 +387,16 @@ def disk_backend(tmp_path, client):
         target.write_bytes(base64.b64decode(content) if kwargs.get("encoding") == "base64" else content.encode())
         return response()
 
+    def execute_code(**kwargs):
+        result = subprocess.run(
+            [sys.executable, "-"], input=kwargs["code"], cwd=tmp_path,
+            capture_output=True, text=True, timeout=10,
+        )
+        return response(
+            language="python", code=kwargs["code"], status="ok" if result.returncode == 0 else "error",
+            exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr, outputs=[], traceback=None,
+        )
+
     def replace(**kwargs):
         target = Path(kwargs["path"])
         old = target.read_text()
@@ -396,11 +407,9 @@ def disk_backend(tmp_path, client):
         return response(old_content=old)
 
     client.shell.exec_command = execute
+    client.code = SimpleNamespace(execute_code=execute_code)
     client.file.write_file = write_file
     client.file.download_file = lambda **kwargs: iter([Path(kwargs["path"]).read_bytes()])
-    client.file.find_files = lambda **kwargs: response(
-        files=[str(p) for p in Path(kwargs["path"]).glob(kwargs["glob"])]
-    )
     client.file.str_replace_editor = replace
     value = AIOSandboxBackend(
         client, config=AIOBackendConfig("http://proxy.test", "sandbox-1", working_dir=str(tmp_path))
@@ -490,7 +499,15 @@ async def test_cancelled_write_worker_finishes_before_close(backend, client, tmp
 
     client.file.write_file = write_file
     runtime, _ = setup(tmp_path)
-    client.file.find_files = lambda **kwargs: response(files=[])
+
+    def create_file(**kwargs):
+        write_file()
+        return response(
+            language="python", status="ok", exit_code=0, outputs=[], traceback=None,
+            stdout=json.dumps({"status": "created", "path": "/a"}),
+        )
+
+    client.code = SimpleNamespace(execute_code=create_file)
     agent = make_agent(
         runtime,
         tmp_path,
@@ -572,8 +589,6 @@ def test_sdk_file_rejection_is_recoverable(sdk_backend, method, kind, status, wa
 )
 def test_sdk_expected_file_failure_allows_next_operation(sdk_backend, method, kind, errno):
     backend, submitted, replies = sdk_backend
-    if method == "write":
-        replies.append(httpx.Response(200, json={"success": True, "data": {"path": "/home/gem", "files": []}}))
     replies.extend(
         [
             httpx.Response(
@@ -604,7 +619,7 @@ def test_sdk_expected_file_failure_allows_next_operation(sdk_backend, method, ki
         assert base64.b64decode(result.file_data["content"]) == b"\x00\xffbinary"
     assert backend.status()["state"] == "ready"
     assert backend.read("/home/gem/ok.txt").file_data["content"] == "ok"
-    assert len(submitted) == (3 if method == "write" or kind == "decode_error" else 2) and not replies
+    assert len(submitted) == (3 if kind == "decode_error" else 2) and not replies
 
 
 @pytest.mark.parametrize("kind", ["invalid_target", "decode_error"])
@@ -660,7 +675,6 @@ def test_sdk_write_failure_with_possible_partial_effects_stops_session(sdk_backe
     backend, submitted, replies = sdk_backend
     replies.extend(
         [
-            httpx.Response(200, json={"success": True, "data": {"path": "/home/gem", "files": []}}),
             httpx.Response(
                 200,
                 json={
@@ -681,7 +695,7 @@ def test_sdk_write_failure_with_possible_partial_effects_stops_session(sdk_backe
     assert backend.status()["state"] == "uncertain"
     with pytest.raises(AIOUnavailable):
         backend.execute("must-not-submit")
-    assert len(submitted) == 2 and not replies
+    assert len(submitted) == 1 and not replies
 
 
 @pytest.mark.parametrize("output,code,truncated", [("crashed", 1, False), ("not-json", 0, False), ("", 0, True)])

@@ -9,7 +9,6 @@ uncertain-execution handling. See THIRD_PARTY_NOTICES.md and LICENSES/.
 from __future__ import annotations
 
 import base64
-import glob as globlib
 import mimetypes
 import posixpath
 import threading
@@ -37,6 +36,7 @@ from pydantic import ValidationError
 from .actions import delete_command
 from .aio_errors import AIOExecutionUncertain, AIOStartupError, AIOUnavailable
 from .aio_paths import normalize_aio_path
+from .aio_write import create_code, creation_error
 from .backend_config import AIOBackendConfig, positive_timeout
 from .operation import mark_uncertain, track_operation
 
@@ -266,15 +266,23 @@ class AIOSandboxBackend(SandboxBackendProtocol):
 
     def write(self, file_path: str, content: str) -> WriteResult:
         path = self.normalize_path(file_path)
+        code = create_code(path, content)
+        # The code API accepts only whole seconds in [1, 300]. Never round up
+        # past the application's configured execution ceiling.
+        timeout = int(min(self.config.default_timeout, self.config.hard_timeout, 300))
+        if timeout < 1:
+            return WriteResult(error="AIO atomic creation requires a timeout of at least one second")
         result = WriteResult()
         with self._operation(result):
-            found = self._data(
-                self.client.file.find_files(path=posixpath.dirname(path), glob=globlib.escape(posixpath.basename(path)))
+            data = self._data(
+                self.client.code.execute_code(
+                    language="python", code=code, cwd=self.working_dir, stateful=False, timeout=timeout,
+                    request_options={"timeout_in_seconds": timeout + 15},
+                )
             )
-            if any(self.normalize_path(p) == path for p in found.files):
-                return WriteResult(error="File already exists")
-            self._data(self.client.file.write_file(file=path, content=content))
-            result.path = path
+            result.error = creation_error(data, path)
+            if result.error is None:
+                result.path = path
         return result
 
     def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:

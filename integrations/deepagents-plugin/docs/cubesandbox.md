@@ -34,7 +34,7 @@ DeepAgents 主代理 / 子代理
 
 [执行入口适配示例](https://gitcode.com/wade_wolzzi/AgentMoss/tree/f1049f1c31ebf38facfe16bee37acb018ee9706c/delivery/aio-sdk-20261111/image)面向 AIO 1.11.0 ARM64 / Python 3.12。使用其他 AIO 版本或架构时，需要调整适配代码。用接入 Moss 的镜像创建沙箱；实例的创建和销毁由应用的控制面负责。
 
-文件上传 API 和 CubeSandbox `commands.run()` 不经过这个 shell 入口。DeepAgents 的文件工具调用仍由客户端插件发送到 Gate 检查。
+文件 API、用于独占创建文件的 `/v1/code/execute` 和 CubeSandbox `commands.run()` 不经过这个 shell 入口。DeepAgents 的文件工具调用仍由客户端插件发送到 Gate 检查。`write_file` 要求 AIO 的 Python 代码执行接口可用，并显式使用 `stateful=false`；不创建持久 Python 会话。
 
 ## 完整的异步调用示例
 

@@ -119,7 +119,9 @@ DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理�
 
 命令或文件操作响应丢失、网络超时、连接中断、running/未完成或硬超时不能当作成功：工具结果报告错误或 unknown，会话禁止继续提交操作，且插件不自动重试或切换到本地执行。应用先查询旧 shell 会话、确认旧命令状态并清理旧会话，再创建新实例；仅创建新会话并不意味着旧命令已经停止。关闭失败要保留沙箱和 shell_session_id 以便人工处理。若初始化失败，`AIOStartupError` 提供 `sandbox_id`、`session_id`、`cleanup_confirmed` 和脱敏的失败类型；清理未确认时必须先检查该会话，不能假定已关闭。
 
-读取、写入、编辑、目录列表、grep 和二进制传输直接使用 `agent-sandbox` 文件 API；删除调用一次 AIO shell。glob 直接复用 DeepAgents `BaseSandbox.glob`，保持与模型收到的工具说明一致，包括递归文件名匹配和 `{a,b}` 模式。写入仍拒绝覆盖已有文件。
+读取、编辑、目录列表、grep 和二进制传输直接使用 `agent-sandbox` 文件 API；删除调用一次 AIO shell。glob 直接复用 DeepAgents `BaseSandbox.glob`，保持与模型收到的工具说明一致，包括递归文件名匹配和 `{a,b}` 模式。
+
+`write_file` 使用官方 SDK 的 `/v1/code/execute` Python 接口，在沙箱内执行固定的独占创建操作，拒绝覆盖已有文件；多个实例并发创建同一路径时也只能有一个成功。文件内容作为数据传递，不作为 Python 代码执行，也不上传临时文件。该接口使用 `stateful=false`，要求沙箱提供 Python 代码执行能力；超时取 default_timeout、hard_timeout 和 300 秒的最小值并向下取整，配置不足 1 秒时返回错误。收到不确定或损坏的执行结果仍停止当前会话，不自动重试。
 
 删除目录会递归删除其内容，送 Gate 的合成命令与 AIO 执行共用 `rm -r -- <路径>`。文本读取保留当前页的源文件行号；空白页不表示整文件为空，超出文件末尾的非零 offset 返回读取错误。
 
@@ -131,7 +133,7 @@ AIO 的 glob/grep 达到上游搜索等待期限后，图调用仍会等本次�
 
 grep 单次最多返回 10000 条匹配；超过服务端或调用方的结果上限时，保留截断提示，可收窄搜索条件继续查询。grep 的 HTTP 400/422 参数拒绝会作为普通工具错误返回，后续操作仍可继续。
 
-文件 API 不经过沙箱内部 shell.py 的检查，但 DeepAgents 的文件工具调用仍先通过插件送 Gate。直接调用 backend.upload_files/download_files 等方法不经过工具中间件，不能据此认为已完成外部送检。
+文件 API 和用于独占创建的代码 API 不经过沙箱内部 shell.py 的检查，但 DeepAgents 的文件工具调用仍先通过插件送 Gate。直接调用 backend.upload_files/download_files 等方法不经过工具中间件，不能据此认为已完成外部送检。
 
 外部 Moss Server 无法仅凭路径读取沙箱里的脚本，本插件不做文件共享或内容上传。沙箱脚本检测依赖部署时使用已接入 Moss 的 AIO 镜像；镜像内部集成与本插件独立。外部 Moss 若存在同名本地文件可能产生额外判断，此限制尚未解决。`integration.status()` 只展示 Gate 策略和 backend 会话状态，不证明镜像内 Moss 已启用。
 
