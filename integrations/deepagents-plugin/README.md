@@ -117,7 +117,9 @@ DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理�
 
 正常完成返回 Bash 真实退出码。AIO HTTP 403、409、503 返回适配器生成的退出码 126，并保留脱敏原因；126 不是 Bash 真实执行结果。409 表明可能已有活动命令，因此该 backend 也停止接收后续操作，需先检查并处理旧会话。不能只看 ToolMessage.status，插件通过结构化 exit_code 记录成功或失败。
 
-网络超时、连接中断、running/未完成或硬超时不能当作成功：历史记录 unknown，会话禁止继续提交命令，且插件不自动重试或切换到本地执行。应用先查询旧 shell 会话、确认旧命令状态并清理旧会话，再创建新实例；仅创建新会话并不意味着旧命令已经停止。关闭失败要保留沙箱和 shell_session_id 以便人工处理。若初始化失败，`AIOStartupError` 提供 `sandbox_id`、`session_id`、`cleanup_confirmed` 和脱敏的失败类型；清理未确认时必须先检查该会话，不能假定已关闭。
+命令或文件操作响应丢失、网络超时、连接中断、running/未完成或硬超时不能当作成功：工具结果报告错误或 unknown，会话禁止继续提交操作，且插件不自动重试或切换到本地执行。应用先查询旧 shell 会话、确认旧命令状态并清理旧会话，再创建新实例；仅创建新会话并不意味着旧命令已经停止。关闭失败要保留沙箱和 shell_session_id 以便人工处理。若初始化失败，`AIOStartupError` 提供 `sandbox_id`、`session_id`、`cleanup_confirmed` 和脱敏的失败类型；清理未确认时必须先检查该会话，不能假定已关闭。
+
+通配搜索复用 DeepAgents `BaseSandbox`，通过 AIO shell 执行；读取、目录列表、替换、文本搜索及二进制传输使用官方 `agent-sandbox` 文件 API。删除保留单次 shell 调用，避免预检查吞掉服务拒绝原因。保留专用适配以支持远端路径、目录元数据和结构化搜索；写入仍拒绝覆盖已有文件。工具执行与关闭共用取消等待逻辑，取消调用方协程后仍等正在进行的操作结束。
 
 文件 API 不经过沙箱内部 shell.py 的检查，但 DeepAgents 的文件工具调用仍先通过插件送 Gate。直接调用 backend.upload_files/download_files 等方法不经过工具中间件，不能据此认为已完成外部送检。
 

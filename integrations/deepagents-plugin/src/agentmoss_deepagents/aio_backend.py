@@ -42,7 +42,7 @@ class _AIOFileFailure(AIOUnavailable):
 
 
 class AIOSandboxBackend(BaseSandbox):
-    """Borrow a synchronous SDK client; own exactly one shell session."""
+    """Use SDK I/O and BaseSandbox file algorithms; own one serialized shell session."""
 
     def __init__(self, client, *, config: AIOBackendConfig, secrets: tuple[str, ...] = ()):
         self.client, self.config = client, config
@@ -65,20 +65,14 @@ class AIOSandboxBackend(BaseSandbox):
             if data.session_id != self.session_id:
                 raise AIOUnavailable("AIO returned an unexpected shell session")
         except Exception as error:
-            cleanup_confirmed = False
             try:
-                cleanup = client.shell.cleanup_session(session_id=self.session_id, request_options={"max_retries": 0})
-                cleanup_confirmed = getattr(cleanup, "success", None) is True
-            except ApiError as cleanup_error:
-                cleanup_confirmed = cleanup_error.status_code == 404
-            except Exception:
+                self.close()
+            except AIOUnavailable:
                 pass
-            self._closing.set()
-            self._state = "closed" if cleanup_confirmed else "cleanup_failed"
             raise AIOStartupError(
                 sandbox_id=config.sandbox_id,
                 session_id=self.session_id,
-                cleanup_confirmed=cleanup_confirmed,
+                cleanup_confirmed=self._state == "closed",
                 failure_type=type(error).__name__,
             ) from None
         self._state = "ready"
@@ -121,10 +115,17 @@ class AIOSandboxBackend(BaseSandbox):
             self._ready()
             try:
                 yield
-            except (ApiError, AIOUnavailable, AIOExecutionUncertain):
+            except _AIOFileFailure:
+                raise
+            except ApiError as error:
+                if error.status_code not in (403, 404):
+                    self._state = "uncertain"
                 raise
             except Exception:
-                raise AIOUnavailable("AIO file operation failed; no automatic retry was performed") from None
+                self._state = "uncertain"
+                raise AIOExecutionUncertain(
+                    "AIO file operation result is unknown; inspect the old session before retrying"
+                ) from None
 
     def status(self) -> dict:
         with self._lock:
@@ -255,6 +256,8 @@ class AIOSandboxBackend(BaseSandbox):
 
     def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
         path = self.normalize_path(file_path)
+        if not old_string:
+            return EditResult(error="old_string must not be empty")
         with self._operation():
             try:
                 values = {
@@ -267,6 +270,8 @@ class AIOSandboxBackend(BaseSandbox):
                 if replace_all:
                     values["replace_mode"] = "ALL"
                 data = self._data(self.client.file.str_replace_editor(**values))
+                if getattr(data, "error", None):
+                    return EditResult(error=self._redact(data.error))
                 old = getattr(data, "old_content", None)
                 return EditResult(path=path, occurrences=old.count(old_string) if isinstance(old, str) else None)
             except (ApiError, _AIOFileFailure) as error:
@@ -276,15 +281,7 @@ class AIOSandboxBackend(BaseSandbox):
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         path = self.normalize_path(self.working_dir if path is None else path)
         with self._operation():
-            try:
-                data = self._data(
-                    self.client.file.find_files(path=path, glob=pattern, request_options={"max_retries": 0})
-                )
-            except (ApiError, _AIOFileFailure) as error:
-                return GlobResult(error=self._file_error(error))
-            if data.files is None:
-                raise AIOUnavailable("AIO glob omitted matches")
-            return GlobResult(matches=[{"path": self.normalize_path(p)} for p in data.files])
+            return super().glob(pattern, path)
 
     def glob_info(self, pattern: str, path: str = "/") -> list:
         result = self.glob(pattern, path)
@@ -334,12 +331,16 @@ class AIOSandboxBackend(BaseSandbox):
         result = self.grep(pattern, path, glob)
         return result.error if result.error else result.matches
 
-    def delete(self, file_path: str):
+    def delete(self, file_path: str) -> DeleteResult:
         import shlex
 
         path = self.normalize_path(file_path)
         result = self.execute("rm -r -- " + shlex.quote(path))
-        return DeleteResult(path=path) if result.exit_code == 0 else DeleteResult(error=result.output)
+        return (
+            DeleteResult(path=path)
+            if result.exit_code == 0
+            else DeleteResult(error=result.output or "AIO delete failed")
+        )
 
     def _file_error(self, error, *, edit: bool = False) -> str:
         if isinstance(error, _AIOFileFailure):
@@ -367,16 +368,8 @@ class AIOSandboxBackend(BaseSandbox):
                         )
                     )
                 results.append(FileUploadResponse(path=original))
-            except (ApiError, _AIOFileFailure) as error:
-                try:
-                    message = self._file_error(error)
-                except AIOUnavailable:
-                    message = "AIO upload service unavailable; result not confirmed"
-                results.append(FileUploadResponse(path=original, error=message))
-            except ValueError:
-                results.append(FileUploadResponse(path=original, error="invalid_path"))
-            except Exception:
-                results.append(FileUploadResponse(path=original, error="AIO upload failed; result not confirmed"))
+            except Exception as error:
+                results.append(FileUploadResponse(path=original, error=self._transfer_error(error)))
         return results
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
@@ -387,28 +380,23 @@ class AIOSandboxBackend(BaseSandbox):
                 with self._operation():
                     content = b"".join(self.client.file.download_file(path=path, request_options={"max_retries": 0}))
                 results.append(FileDownloadResponse(path=original, content=content))
-            except ApiError as error:
-                try:
-                    message = self._file_error(error)
-                except AIOUnavailable:
-                    message = "AIO download service unavailable"
-                results.append(FileDownloadResponse(path=original, error=message))
-            except ValueError:
-                results.append(FileDownloadResponse(path=original, error="invalid_path"))
-            except Exception:
-                results.append(FileDownloadResponse(path=original, error="AIO download failed; result not confirmed"))
+            except Exception as error:
+                results.append(FileDownloadResponse(path=original, error=self._transfer_error(error)))
         return results
 
-    async def _async(self, method, *args, **kwargs):
-        pending = asyncio.create_task(asyncio.to_thread(method, *args, **kwargs))
-        try:
-            return await asyncio.shield(pending)
-        except asyncio.CancelledError:
+    def _transfer_error(self, error: Exception) -> str:
+        if isinstance(error, ValueError):
+            return "invalid_path"
+        if isinstance(error, (ApiError, _AIOFileFailure)):
             try:
-                await drain(pending)
-            except Exception:
+                return self._file_error(error)
+            except AIOUnavailable:
                 pass
-            raise
+        return "AIO file transfer failed; result not confirmed"
+
+    # BaseSandbox's async methods bypass the SDK/path overrides below.
+    async def _async(self, method, *args, **kwargs):
+        return await drain(asyncio.to_thread(method, *args, **kwargs), propagate_cancel=True)
 
     async def aexecute(self, command: str, *, timeout: int | None = None):
         return await self._async(self.execute, command, timeout=timeout)

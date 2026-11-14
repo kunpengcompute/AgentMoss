@@ -112,11 +112,4 @@ class DeepAgentsIntegration:
             self.backend.begin_close()
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
-        try:
-            await asyncio.shield(self._close_task)
-        except asyncio.CancelledError:
-            try:
-                await drain(self._close_task)
-            except Exception:
-                pass
-            raise
+        await drain(self._close_task, propagate_cancel=True)

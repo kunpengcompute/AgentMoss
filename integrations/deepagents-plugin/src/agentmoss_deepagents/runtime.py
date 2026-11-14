@@ -11,16 +11,25 @@ from .client import GateClient
 from .config import GateConfig
 
 
-async def drain(awaitable: Awaitable[Any]) -> Any:
+async def drain(awaitable: Awaitable[Any], *, propagate_cancel: bool = False) -> Any:
     """Wait through repeated cancellation; a thread-backed leaf may still be live."""
     task = asyncio.ensure_future(awaitable)
+    cancellation = None
     while not task.done():
         try:
             await asyncio.shield(task)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            cancellation = error
             continue
         except BaseException:
             break
+    if cancellation is not None and propagate_cancel:
+        # Retrieve any worker failure, but cancellation remains the caller's outcome.
+        try:
+            task.result()
+        except BaseException:
+            pass
+        raise cancellation
     return task.result()
 
 

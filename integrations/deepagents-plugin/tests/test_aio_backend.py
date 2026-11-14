@@ -1,24 +1,27 @@
 """AIO contract, Gate integration and lifecycle regression tests; no external models."""
 
+import asyncio
+import base64
 import json
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from agent_sandbox.core.api_error import ApiError
-from langchain_core.messages import AIMessage
-from models import call
-from test_native_sdk import make_agent, run_args, setup
-
 from agentmoss_deepagents import DeepAgentsIntegration
 from agentmoss_deepagents.actions import create_action_adapter
 from agentmoss_deepagents.aio_backend import AIOSandboxBackend
 from agentmoss_deepagents.aio_errors import AIOExecutionUncertain, AIOStartupError, AIOUnavailable
 from agentmoss_deepagents.backend_config import AIOBackendConfig, IntegrationConfig
 from agentmoss_deepagents.history import KEY
+from langchain_core.messages import AIMessage
+from models import call
+from test_native_sdk import make_agent, run_args, setup
 
 
 def response(**fields):
@@ -331,3 +334,379 @@ def test_grep_uses_structured_api_not_pty_null_delimiters(backend, client):
     assert seen[0]["include"] == ["*.txt"]
     assert seen[0]["request_options"]["max_retries"] == 0
     assert client.shell.calls == []
+
+
+@pytest.mark.parametrize("offset,limit,expected", [(1, 1, "second\n"), (-1, 1, "first\n"), (9, 2, ""), (0, 0, "")])
+def test_read_keeps_line_bounds(backend, client, offset, limit, expected):
+    def read_file(**kwargs):
+        lines = ["first\n", "second\n", "third\n"]
+        return response(content="".join(lines[kwargs["start_line"] : kwargs["end_line"]]))
+
+    client.file.read_file = read_file
+    result = backend.read("foo.txt", offset, limit)
+    assert result.error is None and result.file_data["content"] == expected
+    assert bool(result.no_lines_requested) == (limit == 0)
+
+
+def test_listing_preserves_remote_metadata(backend, client):
+    client.file.list_path = lambda **kwargs: response(
+        files=[SimpleNamespace(path="目录/a b.txt", is_directory=False, size=7, modified_time="2026-01-01T00:00:00Z")]
+    )
+    assert backend.ls(".").entries == [
+        {"path": "/home/gem/目录/a b.txt", "is_dir": False, "size": 7, "modified_at": "2026-01-01T00:00:00Z"}
+    ]
+
+
+def test_execute_preserves_transport_truncation(backend, client):
+    client.shell.answer = response(status="completed", exit_code=7, output="partial", full_output_file_path="/tmp/out")
+    result = backend.execute("command")
+    assert (result.output, result.exit_code, result.truncated) == ("partial", 7, True)
+
+
+@pytest.fixture
+def disk_backend(tmp_path, client):
+    """Run real BaseSandbox commands on temporary files; not a live AIO server."""
+
+    def execute(**kwargs):
+        client.shell.calls.append(kwargs)
+        result = subprocess.run(
+            kwargs["command"], shell=True, cwd=kwargs["exec_dir"], capture_output=True, text=True, timeout=10
+        )
+        # Exercise JSON output with the line endings of a POSIX terminal.
+        return response(
+            status="completed",
+            exit_code=result.returncode,
+            output=(result.stdout + result.stderr).replace("\n", "\r\n"),
+        )
+
+    def write_file(**kwargs):
+        target = Path(kwargs["file"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = kwargs["content"]
+        target.write_bytes(base64.b64decode(content) if kwargs.get("encoding") == "base64" else content.encode())
+        return response()
+
+    def replace(**kwargs):
+        target = Path(kwargs["path"])
+        old = target.read_text()
+        count = old.count(kwargs["old_str"])
+        if not count or (count > 1 and kwargs.get("replace_mode") != "ALL"):
+            raise ApiError(status_code=400, body="replacement mismatch")
+        target.write_text(old.replace(kwargs["old_str"], kwargs["new_str"]))
+        return response(old_content=old)
+
+    client.shell.exec_command = execute
+    client.file.write_file = write_file
+    client.file.download_file = lambda **kwargs: iter([Path(kwargs["path"]).read_bytes()])
+    client.file.find_files = lambda **kwargs: response(
+        files=[str(p) for p in Path(kwargs["path"]).glob(kwargs["glob"])]
+    )
+    client.file.str_replace_editor = replace
+    value = AIOSandboxBackend(
+        client, config=AIOBackendConfig("http://proxy.test", "sandbox-1", working_dir=str(tmp_path))
+    )
+    try:
+        yield value
+    finally:
+        value.close()
+
+
+def test_create_only_write_and_binary_transfer(disk_backend, tmp_path):
+    target = tmp_path / "目录 ' [x].txt"
+    assert disk_backend.write(target.name, "first").error is None
+    assert disk_backend.write(target.name, "overwrite").error is not None
+    assert target.read_text() == "first"
+    data = b"\x00\xff\x01binary\r\n"
+    result = disk_backend.upload_files([("binary.bin", data), ("bad\x00path", b"no")])
+    assert result[0].error is None and result[1].error == "invalid_path"
+    assert disk_backend.download_files(["binary.bin"])[0].content == data
+
+
+@pytest.mark.parametrize("size", [1, 60000])
+def test_edit_preserves_unique_and_replace_all_contract(disk_backend, tmp_path, size):
+    target = tmp_path / "目录 ' [x].txt"
+    old = "a" * size
+    target.write_text(old + "\n" + old)
+    rejected = disk_backend.edit(target.name, old, "new")
+    assert rejected.error and target.read_text() == old + "\n" + old
+    accepted = disk_backend.edit(target.name, old, "new", replace_all=True)
+    assert accepted.error is None and accepted.occurrences == 2
+    assert accepted.path == str(target) and target.read_text() == "new\nnew"
+    assert disk_backend.edit(target.name, "absent", "new").error
+
+
+def test_glob_and_delete_operate_on_remote_working_directory(disk_backend, tmp_path):
+    directory = tmp_path / "目录 '"
+    directory.mkdir()
+    target = directory / "a b.txt"
+    target.write_text("keep")
+    result = disk_backend.glob("*.txt", directory.name)
+    assert result.error is None and [m["path"] for m in result.matches] == [str(target)]
+    assert disk_backend.glob("*.txt").error is None
+    assert disk_backend.delete(directory.name).error is None and not directory.exists()
+    assert disk_backend.delete(directory.name).error
+
+
+def test_empty_edit_never_modifies_file(disk_backend, tmp_path):
+    target = tmp_path / "empty.txt"
+    target.write_text("")
+    result = disk_backend.edit(target.name, "", "inserted")
+    assert result.error and target.read_text() == ""
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout("traffic-secret"), ApiError(status_code=500, body="private")])
+def test_lost_upload_response_blocks_remaining_submissions(disk_backend, tmp_path, failure):
+    original = disk_backend.client.file.write_file
+
+    def lost(**kwargs):
+        original(**kwargs)
+        raise failure
+
+    disk_backend.client.file.write_file = lost
+    result = disk_backend.upload_files([("first", b"written"), ("second", b"must not run")])
+    assert all(item.error for item in result)
+    assert (tmp_path / "first").read_bytes() == b"written"
+    assert not (tmp_path / "second").exists()
+    assert disk_backend.status()["state"] == "uncertain"
+    with pytest.raises(AIOUnavailable):
+        disk_backend.execute("printf must-not-submit")
+
+
+async def test_cancelled_upload_drains_before_close(backend, client):
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def write_file(**kwargs):
+        started.set()
+        assert release.wait(5)
+        finished.set()
+        return response()
+
+    client.file.write_file = write_file
+    operation = asyncio.create_task(backend.aupload_files([("a", b"x")]))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        operation.cancel()
+        await asyncio.sleep(0)
+        operation.cancel()
+        close = asyncio.create_task(asyncio.to_thread(backend.close))
+        assert await asyncio.to_thread(backend._closing.wait, 5)
+        assert not operation.done() and not finished.is_set()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    await close
+    assert finished.is_set() and backend.status()["state"] == "closed"
+
+
+@pytest.mark.parametrize(
+    "method,args", [("edit", ("", "x", "y")), ("glob", ("*", "~bad")), ("delete", ("bad\x00path",))]
+)
+def test_invalid_file_arguments_do_not_poison_session(backend, client, method, args):
+    with pytest.raises(ValueError):
+        getattr(backend, method)(*args)
+    assert backend.status()["state"] == "ready" and client.shell.calls == []
+
+
+@pytest.mark.parametrize("method", ["read", "ls", "write", "grep", "upload_files"])
+@pytest.mark.parametrize("kind", ["file_not_found", "permission_denied"])
+def test_structured_file_errors_never_report_success(backend, client, method, kind):
+    def rejected(**kwargs):
+        return response(error_type=kind)
+
+    client.file.read_file = client.file.list_path = client.file.find_files = rejected
+    client.file.grep_files = client.file.write_file = rejected
+    args = {
+        "read": ("missing",),
+        "ls": ("missing",),
+        "write": ("missing", "x"),
+        "grep": ("text", "missing"),
+        "upload_files": ([("missing", b"x")],),
+    }
+    result = getattr(backend, method)(*args[method])
+    assert (result[0] if isinstance(result, list) else result).error == kind
+    assert backend.status()["state"] == "ready"
+
+
+@pytest.mark.parametrize("output,code,truncated", [("crashed", 1, False), ("not-json", 0, False), ("", 0, True)])
+def test_glob_does_not_hide_errors_or_truncation(backend, client, output, code, truncated):
+    client.shell.answer = response(
+        status="completed", output=output, exit_code=code, full_output_file_path="/tmp/out" if truncated else None
+    )
+    result = backend.glob("*")
+    assert result.truncated if truncated else result.error
+
+
+@pytest.mark.parametrize("cleanup", [True, False, 404, 500])
+def test_failed_startup_reports_cleanup_outcome_and_session(client, cleanup):
+    def create_session(**kwargs):
+        raise httpx.ReadTimeout("private-token")
+
+    def cleanup_session(**kwargs):
+        client.shell.cleaned.append(kwargs)
+        if type(cleanup) is int:
+            raise ApiError(status_code=cleanup, body="private-token")
+        return SimpleNamespace(success=cleanup)
+
+    client.shell.create_session, client.shell.cleanup_session = create_session, cleanup_session
+    with pytest.raises(AIOStartupError) as caught:
+        AIOSandboxBackend(client, config=AIOBackendConfig("http://proxy.test", "sandbox-1"))
+    assert caught.value.cleanup_confirmed == (cleanup is True or cleanup == 404)
+    assert client.shell.cleaned[0]["session_id"] == caught.value.session_id
+    assert "private-token" not in str(caught.value)
+
+
+@pytest.mark.parametrize("operation", ["execute", "upload_files"])
+def test_official_sdk_never_retries_uncertain_mutations(operation):
+    from agent_sandbox import Sandbox
+
+    submitted = []
+
+    def transport(request):
+        if request.url.path.endswith("/create"):
+            body = json.loads(request.content)
+            return httpx.Response(
+                200, json={"success": True, "data": {"session_id": body["id"], "working_dir": body["exec_dir"]}}
+            )
+        if request.method == "DELETE":
+            return httpx.Response(200, json={"success": True})
+        submitted.append(request)
+        # 500 is retryable by the SDK unless the adapter explicitly disables retries.
+        return httpx.Response(500, json={"error": "traffic-secret"})
+
+    with httpx.Client(transport=httpx.MockTransport(transport)) as http:
+        backend = AIOSandboxBackend(
+            Sandbox(base_url="http://proxy.test", httpx_client=http),
+            config=AIOBackendConfig("http://proxy.test", "sandbox-1", traffic_token="traffic-secret"),
+        )
+        try:
+            if operation == "execute":
+                with pytest.raises(AIOExecutionUncertain):
+                    backend.execute("mutate-once")
+            else:
+                assert backend.upload_files([("a", b"x")])[0].error
+            assert len(submitted) == 1
+            assert backend.status()["state"] == "uncertain"
+            with pytest.raises(AIOUnavailable):
+                backend.execute("must-not-submit")
+            assert len(submitted) == 1
+            assert "traffic-secret" not in json.dumps(backend.status())
+        finally:
+            backend.close()
+
+
+@pytest.mark.parametrize("child", [False, True])
+@pytest.mark.parametrize("tool", ["execute", "edit_file", "delete"])
+async def test_gate_deny_protects_aio_files_in_parent_and_child(tmp_path, disk_backend, child, tool):
+    from models import ScriptedModel
+
+    target = tmp_path / "protected.txt"
+    target.write_text("original")
+    args = {
+        "execute": {"command": f"printf changed > {target}"},
+        "edit_file": {"file_path": str(target), "old_string": "original", "new_string": "changed"},
+        "delete": {"file_path": str(target)},
+    }
+
+    def verdict(request):
+        payload = json.loads(request.content)
+        return httpx.Response(200, json={"decision": "Allow" if payload["metadata"].get("orchestration") else "Deny"})
+
+    runtime, seen = setup(tmp_path, verdict)
+    calls = [call(tool, args[tool], "protected"), AIMessage(content="done")]
+    options = {}
+    if child:
+        options["subagents"] = [{"name": "worker", "description": "worker", "model": ScriptedModel(responses=calls)}]
+        calls = [
+            call("task", {"description": "work", "subagent_type": "worker"}, "delegate"),
+            AIMessage(content="done"),
+        ]
+    agent = make_agent(runtime, tmp_path, calls, backend=disk_backend, **options)
+    inputs, config, context = run_args()
+    try:
+        result = await agent.ainvoke(inputs, config, context=context)
+        event = next(e for e in result[KEY]["events"] if e["tool_call_id"] == "protected")
+        assert event["decision"] == "Deny" and event["status"] == "denied"
+        assert seen[-1]["metadata"]["sandbox_id"] == "sandbox-1"
+        assert target.read_text() == "original" and disk_backend.client.shell.calls == []
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize("code,truncated", [(7, False), (0, True)])
+def test_edit_never_trusts_partial_shell_success(disk_backend, tmp_path, code, truncated):
+    target = tmp_path / "edit.txt"
+    target.write_text("before")
+    disk_backend.client.shell.exec_command = lambda **kwargs: response(
+        status="completed",
+        exit_code=code,
+        output='{"count":1}',
+        full_output_file_path="/tmp/out" if truncated else None,
+    )
+    result = disk_backend.edit(target.name, "before", "after")
+    # A confirmed success must reflect the actual file, not a plausible shell payload.
+    assert result.error or target.read_text() == "after"
+
+
+def test_edit_lost_result_stops_future_submissions(disk_backend, tmp_path):
+    target = tmp_path / "edit.txt"
+    target.write_text("before")
+    shell = disk_backend.client.shell.exec_command
+    editor = disk_backend.client.file.str_replace_editor
+
+    def lost_shell(**kwargs):
+        result = shell(**kwargs)
+        result.data.output = "invalid-result"
+        return result
+
+    def lost_editor(**kwargs):
+        editor(**kwargs)
+        raise httpx.ReadTimeout("private-token")
+
+    disk_backend.client.shell.exec_command = lost_shell
+    disk_backend.client.file.str_replace_editor = lost_editor
+    with pytest.raises(AIOExecutionUncertain):
+        disk_backend.edit(target.name, "before", "after")
+    assert target.read_text() == "after" and disk_backend.status()["state"] == "uncertain"
+    with pytest.raises(AIOUnavailable):
+        disk_backend.execute("must-not-submit")
+
+
+def test_large_edit_does_not_leave_sensitive_partial_uploads(disk_backend, tmp_path):
+    target = tmp_path / "large.txt"
+    old = "a" * 60000
+    target.write_text(old)
+    partial_uploads = {}
+
+    def upload(**kwargs):
+        if partial_uploads:
+            raise ApiError(status_code=403, body="denied")
+        partial_uploads[kwargs["file"]] = kwargs["content"]
+        return response()
+
+    disk_backend.client.file.write_file = upload
+    result = disk_backend.edit(target.name, old, "after")
+    assert not partial_uploads
+    assert result.error is None and target.read_text() == "after"
+
+
+@pytest.mark.parametrize("code", [403, 503])
+def test_delete_preserves_aio_rejection_reason(backend, client, code):
+    client.shell.answer = ApiError(status_code=code, body="service rejected deletion")
+    result = backend.delete("file.txt")
+    assert result.error and f"AIO HTTP {code}" in result.error
+
+
+def test_editor_error_field_is_not_success(backend, client):
+    from agent_sandbox.types import StrReplaceEditorResult
+
+    client.file.str_replace_editor = lambda **kwargs: SimpleNamespace(
+        success=True,
+        data=StrReplaceEditorResult(
+            output="", error="cannot replace gate-secret", path="/home/gem/file", prev_exist=True
+        ),
+    )
+    backend._secrets = ("gate-secret",)
+    result = backend.edit("file", "before", "after")
+    assert result.error and "cannot replace" in result.error
+    assert "gate-secret" not in result.error and backend.status()["state"] == "ready"

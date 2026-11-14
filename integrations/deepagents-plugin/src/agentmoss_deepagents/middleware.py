@@ -221,15 +221,7 @@ class AgentMossMiddleware(AgentMiddleware):
     async def _execute(self, request: ToolCallRequest, handler: AsyncToolHandler) -> ToolResult:
         if request.tool_call["name"] == "task":
             return await handler(request)
-        execution = asyncio.ensure_future(handler(request))
-        try:
-            return await asyncio.shield(execution)
-        except asyncio.CancelledError:
-            try:
-                await drain(execution)
-            except BaseException:
-                pass
-            raise
+        return await drain(handler(request), propagate_cancel=True)
 
     def wrap_tool_call(self, request: ToolCallRequest, handler: ToolHandler) -> ToolResult:
         if self.runtime.closing:
