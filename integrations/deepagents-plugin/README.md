@@ -51,7 +51,7 @@ export DEEPAGENTS_GATE_FAIL_CLOSED=true
 
 CubeSandbox 的完整接入流程见 [AIO 接入说明](docs/cubesandbox.md)。
 
-两种模式都使用 **AgentMossMiddleware → AgentGate → 外部 Moss Server**；只切换工具实际执行的位置。旧的 GateRuntime / AgentMossMiddleware 接入方式继续可用。
+两种模式都使用 **AgentMossMiddleware → AgentGate → 外部 Moss Server**；只切换工具实际执行的位置。也可以按[手动接入](#手动接入本地执行)的方式创建 Gate 连接和检查组件。
 
 安装命令已包含两种模式所需的依赖。`DeepAgentsIntegration.load()` 接收配置字典，以下为 aio 配置：
 
@@ -99,7 +99,7 @@ agent = create_deep_agent(
 
 DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理仍须显式添加本插件中间件。自定义编译好的子代理图需要由应用自己绑定对应 backend 和中间件。
 
-调用 agent.invoke/ainvoke 时仍传相同的 thread_id、session_id 和 moss_info，见下方原有示例。应用退出前停止并等待所有图调用，再执行 `await integration.aclose()`。load 是同步初始化入口，可能创建远端 shell 会话，异步应用如上在线程中初始化；初始化本身也应在退出前等待完成。
+调用 `agent.invoke()` / `agent.ainvoke()` 时，`thread_id` 与 `moss_info.session_id` 使用同一会话编号，参数写法见下方[调用示例](#手动接入本地执行)。应用退出前停止并等待所有图调用，再执行 `await integration.aclose()`。`DeepAgentsIntegration.load()` 是同步初始化入口，可能创建远端 shell 会话，异步应用如上在线程中初始化；初始化本身也应在退出前等待完成。
 
 完整的应用函数见 [local 示例](examples/local.py) 和 [aio 示例](examples/aio.py)，model 和 checkpointer 由应用提供。示例不会创建额外模型客户端，也不负责创建或销毁 CubeSandbox 实例。
 
@@ -123,9 +123,9 @@ DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理�
 
 外部 Moss Server 无法仅凭路径读取沙箱里的脚本，本插件不做文件共享或内容上传。沙箱脚本检测依赖部署时使用已接入 Moss 的 AIO 镜像；镜像内部集成与本插件独立。外部 Moss 若存在同名本地文件可能产生额外判断，此限制尚未解决。`integration.status()` 只展示 Gate 策略和 backend 会话状态，不证明镜像内 Moss 已启用。
 
-## 旧接口接入（以 local 为例）
+## 手动接入（本地执行）
 
-以下使用应用已有的 `model`、`workspace` 和 `existing_checkpointer`：
+分别创建 `GateRuntime`、`LocalShellBackend` 和 `AgentMossMiddleware`，再传给 `create_deep_agent()`。以下使用应用已有的 `model`、`workspace` 和 `existing_checkpointer`：
 
 ```python
 from deepagents import create_deep_agent
@@ -224,7 +224,7 @@ agent = create_deep_agent(
 - `moss_info` 由应用生成，调用历史由插件维护，不直接接受外部请求传入这两项。
 - 同一会话的请求按顺序执行，等上一个请求结束后再开始下一个。
 - 如果有修改工具参数的 Middleware，将它放在 AgentMossMiddleware 之前。
-- 使用统一入口时，等请求结束后调用 `await integration.aclose()`，清理 backend 和 Gate 连接；旧方式直接管理 GateRuntime 时调用 `await runtime.aclose()`。
+- 使用 `DeepAgentsIntegration.load()` 时，等请求结束后调用 `await integration.aclose()`，清理 backend 和 Gate 连接；手动管理 `GateRuntime` 时调用 `await runtime.aclose()` 关闭 Gate 连接。
 
 ## 会话历史与升级
 
