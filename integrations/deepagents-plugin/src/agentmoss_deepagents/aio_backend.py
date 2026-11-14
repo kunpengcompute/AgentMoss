@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import base64
 import glob as globlib
+import mimetypes
 import posixpath
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 
 from agent_sandbox.core.api_error import ApiError
 from agent_sandbox.errors import UnprocessableEntityError
@@ -38,6 +39,17 @@ from .aio_errors import AIOExecutionUncertain, AIOStartupError, AIOUnavailable
 from .aio_paths import normalize_aio_path
 from .backend_config import AIOBackendConfig, positive_timeout
 from .operation import mark_uncertain, track_operation
+
+_MAX_MEDIA_BYTES = 20 * 1024 * 1024
+
+
+def _is_media(path: str) -> bool:
+    mime = mimetypes.guess_type(path)[0] or ""
+    # Also cover the document/video suffixes used by DeepAgents on systems
+    # whose platform MIME database does not know those extensions.
+    return mime.startswith(("image/", "audio/", "video/")) or posixpath.splitext(path)[1].lower() in {
+        ".pdf", ".ppt", ".pptx", ".heic", ".heif", ".mkv", ".3gpp", ".flv",
+    }
 
 
 class _AIOFileFailure(AIOUnavailable):
@@ -218,6 +230,8 @@ class AIOSandboxBackend(SandboxBackendProtocol):
         path = self.normalize_path(file_path)
         if type(offset) is not int or type(limit) is not int:
             raise ValueError("offset and limit must be integers")
+        if _is_media(path):
+            return self._read_binary(path)
         if limit <= 0:
             return ReadResult(file_data={"content": "", "encoding": "utf-8"}, no_lines_requested=True)
         result = ReadResult()
@@ -234,6 +248,20 @@ class AIOSandboxBackend(SandboxBackendProtocol):
                 result.end_line = max(0, offset) + lines
                 if lines == limit:
                     result.next_offset = result.end_line
+        if result.error == "decode_error":
+            return self._read_binary(path)
+        return result
+
+    def _read_binary(self, path: str) -> ReadResult:
+        result = ReadResult()
+        with self._operation(result):
+            content = bytearray()
+            with closing(self.client.file.download_file(path=path)) as stream:
+                for chunk in stream:
+                    if len(content) + len(chunk) > _MAX_MEDIA_BYTES:
+                        return ReadResult(error=f"Binary file exceeds maximum read size of {_MAX_MEDIA_BYTES} bytes")
+                    content.extend(chunk)
+            result.file_data = {"content": base64.b64encode(content).decode("ascii"), "encoding": "base64"}
         return result
 
     def write(self, file_path: str, content: str) -> WriteResult:

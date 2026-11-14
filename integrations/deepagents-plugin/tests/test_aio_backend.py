@@ -596,11 +596,15 @@ def test_sdk_expected_file_failure_allows_next_operation(sdk_backend, method, ki
     )
 
     args = ("/home/gem/invalid", "content") if method == "write" else ("/home/gem/invalid",)
+    if kind == "decode_error":
+        replies.insert(1, httpx.Response(200, content=b"\x00\xffbinary"))
     result = getattr(backend, method)(*args)
-    assert result.error == kind
+    assert result.error == (None if kind == "decode_error" else kind)
+    if kind == "decode_error":
+        assert base64.b64decode(result.file_data["content"]) == b"\x00\xffbinary"
     assert backend.status()["state"] == "ready"
     assert backend.read("/home/gem/ok.txt").file_data["content"] == "ok"
-    assert len(submitted) == (3 if method == "write" else 2) and not replies
+    assert len(submitted) == (3 if method == "write" or kind == "decode_error" else 2) and not replies
 
 
 @pytest.mark.parametrize("kind", ["invalid_target", "decode_error"])
@@ -624,6 +628,8 @@ async def test_graph_continues_after_expected_file_failure(sdk_backend, tmp_path
             httpx.Response(200, json={"success": True, "data": {"file": "/home/gem/ok.txt", "content": "ok"}}),
         ]
     )
+    if kind == "decode_error":
+        replies.insert(1, httpx.Response(200, content=b"\x00\xffbinary"))
     runtime, _ = setup(tmp_path)
     graph = make_agent(
         runtime,
@@ -639,9 +645,12 @@ async def test_graph_continues_after_expected_file_failure(sdk_backend, tmp_path
     try:
         result = await graph.ainvoke(inputs, config, context=context)
         statuses = {event["tool_call_id"]: event["status"] for event in result[KEY]["events"]}
-        assert statuses == {"invalid": "executed_error", "valid": "executed_success"}
+        assert statuses == {
+            "invalid": "executed_success" if kind == "decode_error" else "executed_error",
+            "valid": "executed_success",
+        }
         assert "traffic-secret" not in str(result["messages"])
-        assert backend.status()["state"] == "ready" and len(submitted) == 2
+        assert backend.status()["state"] == "ready" and len(submitted) == (3 if kind == "decode_error" else 2)
     finally:
         await runtime.aclose()
 
