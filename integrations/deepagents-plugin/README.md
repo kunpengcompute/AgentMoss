@@ -212,6 +212,8 @@ agent = create_deep_agent(
 
 模型调用 `add_numbers` 时，插件先把工具名和参数送给 Gate；Allow 后执行函数，Deny 时不执行。工具内部调用的其他函数不会被自动拆成独立的送检请求。
 
+自定义工具可以同步调用或 `await` 一个已绑定相同 backend 和中间件的子图，并传入 `context=runtime.context`。子图中的工具仍逐次送检，同层工具串行执行。工具返回前应等待子调用完成；继承了旧上下文、却在父工具结束后才开始的子调用会被拒绝。需要审批暂停与恢复的委派仍使用标准 `task` 工具。
+
 ### 传给 Moss 的参数
 
 普通自定义工具无需手填 `action_type` 和 `action_detail`。例如调用 `add_numbers(a=1, b=2)`，插件将工具名和参数发给 Gate，Gate 转换成 Moss 的输入：

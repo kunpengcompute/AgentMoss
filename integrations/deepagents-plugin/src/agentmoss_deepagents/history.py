@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import threading
 from collections.abc import AsyncGenerator, Callable, Generator
@@ -17,6 +16,7 @@ from .actions import Action
 from .config import GateConfig
 from .history_schema import DEFAULT_LIMITS, empty_history, migrate_history
 from .history_schema import make_event_id as make_event_id
+from .tool_lock import async_tool_lock, tool_lock
 
 if TYPE_CHECKING:
     from .context import RunContext
@@ -255,18 +255,10 @@ class RunHistory:
 
     @contextmanager
     def leaf_lock(self) -> Generator[None, None, None]:
-        with self.lock:
+        with tool_lock(self.lock):
             yield
 
     @asynccontextmanager
     async def async_leaf_lock(self) -> AsyncGenerator[None, None]:
-        acquired = False
-        try:
-            while not acquired:
-                acquired = self.lock.acquire(blocking=False)
-                if not acquired:
-                    await asyncio.sleep(0.005)
+        async with async_tool_lock(self.lock):
             yield
-        finally:
-            if acquired:
-                self.lock.release()
