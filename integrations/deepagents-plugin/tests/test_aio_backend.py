@@ -559,6 +559,122 @@ def test_sdk_file_rejection_is_recoverable(sdk_backend, method, kind, status, wa
     assert backend.status()["state"] == "ready" and len(submitted) == 1
 
 
+@pytest.mark.parametrize(
+    "method,kind,errno",
+    [
+        ("read", "invalid_target", "EISDIR"),
+        ("ls", "invalid_target", "ENOTDIR"),
+        ("read", "invalid_path", "EINVAL"),
+        ("write", "already_exists", "EEXIST"),
+        ("write", "read_only_filesystem", "EROFS"),
+        ("read", "decode_error", None),
+    ],
+)
+def test_sdk_expected_file_failure_allows_next_operation(sdk_backend, method, kind, errno):
+    backend, submitted, replies = sdk_backend
+    if method == "write":
+        replies.append(httpx.Response(200, json={"success": True, "data": {"path": "/home/gem", "files": []}}))
+    replies.extend(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "message": "traffic-secret",
+                    "data": {
+                        "path": "/home/gem/invalid",
+                        "operation": method,
+                        "message": "traffic-secret",
+                        "error_type": kind,
+                        "retryable": False,
+                        "errno_name": errno,
+                    },
+                },
+            ),
+            httpx.Response(200, json={"success": True, "data": {"file": "/home/gem/ok.txt", "content": "ok"}}),
+        ]
+    )
+
+    args = ("/home/gem/invalid", "content") if method == "write" else ("/home/gem/invalid",)
+    result = getattr(backend, method)(*args)
+    assert result.error == kind
+    assert backend.status()["state"] == "ready"
+    assert backend.read("/home/gem/ok.txt").file_data["content"] == "ok"
+    assert len(submitted) == (3 if method == "write" else 2) and not replies
+
+
+@pytest.mark.parametrize("kind", ["invalid_target", "decode_error"])
+async def test_graph_continues_after_expected_file_failure(sdk_backend, tmp_path, kind):
+    backend, submitted, replies = sdk_backend
+    replies.extend(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "data": {
+                        "path": "/home/gem/invalid",
+                        "operation": "read",
+                        "message": "traffic-secret",
+                        "error_type": kind,
+                        "retryable": False,
+                    },
+                },
+            ),
+            httpx.Response(200, json={"success": True, "data": {"file": "/home/gem/ok.txt", "content": "ok"}}),
+        ]
+    )
+    runtime, _ = setup(tmp_path)
+    graph = make_agent(
+        runtime,
+        tmp_path,
+        [
+            call("read_file", {"file_path": "/home/gem/invalid"}, "invalid"),
+            call("read_file", {"file_path": "/home/gem/ok.txt"}, "valid"),
+            AIMessage(content="done"),
+        ],
+        backend=backend,
+    )
+    inputs, config, context = run_args()
+    try:
+        result = await graph.ainvoke(inputs, config, context=context)
+        statuses = {event["tool_call_id"]: event["status"] for event in result[KEY]["events"]}
+        assert statuses == {"invalid": "executed_error", "valid": "executed_success"}
+        assert "traffic-secret" not in str(result["messages"])
+        assert backend.status()["state"] == "ready" and len(submitted) == 2
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize("kind", ["no_space_left", "io_error"])
+def test_sdk_write_failure_with_possible_partial_effects_stops_session(sdk_backend, kind):
+    backend, submitted, replies = sdk_backend
+    replies.extend(
+        [
+            httpx.Response(200, json={"success": True, "data": {"path": "/home/gem", "files": []}}),
+            httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "data": {
+                        "path": "/home/gem/new.txt",
+                        "operation": "write",
+                        "message": "traffic-secret",
+                        "error_type": kind,
+                        "retryable": False,
+                    },
+                },
+            ),
+        ]
+    )
+    with pytest.raises(AIOExecutionUncertain):
+        backend.write("/home/gem/new.txt", "content")
+    assert backend.status()["state"] == "uncertain"
+    with pytest.raises(AIOUnavailable):
+        backend.execute("must-not-submit")
+    assert len(submitted) == 2 and not replies
+
+
 @pytest.mark.parametrize("output,code,truncated", [("crashed", 1, False), ("not-json", 0, False), ("", 0, True)])
 def test_glob_does_not_hide_errors_or_truncation(backend, client, output, code, truncated):
     client.shell.answer = response(

@@ -50,6 +50,10 @@ def _file_error(data) -> str | None:
         return "file_not_found"
     if kind in ("permission_denied", "access_denied") or errno in ("EACCES", "EPERM"):
         return "permission_denied"
+    # These are confirmed rejections. Keep unknown errors and potentially
+    # partial writes (e.g. no_space_left/io_error) on the uncertain path.
+    if kind in ("invalid_target", "invalid_path", "already_exists", "read_only_filesystem", "decode_error"):
+        return kind
     return None
 
 
