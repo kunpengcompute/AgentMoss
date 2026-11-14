@@ -37,7 +37,7 @@ def test_delete_is_analysis_only(adapter, tmp_path):
     args = {"file_path": "/a b.txt"}
     action = adapter.adapt("delete", args)
     assert action.tool_name == "bash"
-    assert action.command == f"rm -- '{target}'"
+    assert action.command == f"rm -r -- '{target}'"
     assert action.metadata["synthetic_action"] is True
     assert args == {"file_path": "/a b.txt"}
     assert target.read_text() == "keep"

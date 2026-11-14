@@ -10,6 +10,11 @@ from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.backends.utils import validate_path
 
 
+def delete_command(path: str) -> str:
+    """Express the recursive delete contract for both Gate and AIO execution."""
+    return "rm -r -- " + shlex.quote(path)
+
+
 @dataclass(frozen=True)
 class Action:
     """An action expressed in the existing AgentGate policy vocabulary."""
@@ -84,7 +89,7 @@ class ActionAdapter:
                 real = str((Path(self.backend.cwd) / candidate).resolve())
             metadata.update(virtual_path=path, real_path=real)
             if name == "delete":
-                command = "rm -- " + shlex.quote(real)
+                command = delete_command(real)
                 metadata["synthetic_action"] = True
             else:
                 # Keep the real path visible to the existing Gate/Moss adapter,

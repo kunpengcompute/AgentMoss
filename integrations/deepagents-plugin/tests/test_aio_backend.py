@@ -341,6 +341,9 @@ def test_read_keeps_line_bounds(backend, client, offset, limit, expected):
 
     client.file.read_file = read_file
     result = backend.read("foo.txt", offset, limit)
+    if offset == 9:
+        assert result.error and "offset" in result.error
+        return
     assert result.error is None and result.file_data["content"] == expected
     assert bool(result.no_lines_requested) == (limit == 0)
 

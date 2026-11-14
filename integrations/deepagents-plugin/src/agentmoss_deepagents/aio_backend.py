@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import glob as globlib
 import posixpath
-import shlex
 import threading
 import uuid
 from contextlib import contextmanager
@@ -33,9 +32,11 @@ from deepagents.backends.protocol import (
 from deepagents.backends.sandbox import BaseSandbox
 from pydantic import ValidationError
 
+from .actions import delete_command
 from .aio_errors import AIOExecutionUncertain, AIOStartupError, AIOUnavailable
 from .aio_paths import normalize_aio_path
 from .backend_config import AIOBackendConfig, positive_timeout
+from .operation import mark_uncertain
 
 
 class _AIOFileFailure(AIOUnavailable):
@@ -143,6 +144,7 @@ class AIOSandboxBackend(SandboxBackendProtocol):
                     result.error = "AIO edit rejected: " + self._redact(error.body)
                 else:
                     self._state = "uncertain"
+                    mark_uncertain()
                     raise AIOExecutionUncertain(
                         "AIO operation result is unknown; inspect the old session before retrying"
                     ) from None
@@ -214,7 +216,15 @@ class AIOSandboxBackend(SandboxBackendProtocol):
             data = self._data(
                 self.client.file.read_file(file=path, start_line=max(0, offset), end_line=max(0, offset) + limit)
             )
+            if not data.content and offset > 0:
+                return ReadResult(error=f"Requested offset {offset} is beyond the end of the file")
             result.file_data = {"content": data.content, "encoding": "utf-8"}
+            if data.content:
+                lines = data.content.count("\n") + (not data.content.endswith("\n"))
+                result.start_line = max(0, offset) + 1
+                result.end_line = max(0, offset) + lines
+                if lines == limit:
+                    result.next_offset = result.end_line
         return result
 
     def write(self, file_path: str, content: str) -> WriteResult:
@@ -289,7 +299,7 @@ class AIOSandboxBackend(SandboxBackendProtocol):
 
     def delete(self, file_path: str) -> DeleteResult:
         path = self.normalize_path(file_path)
-        result = self.execute("rm -r -- " + shlex.quote(path))
+        result = self.execute(delete_command(path))
         return (
             DeleteResult(path=path)
             if result.exit_code == 0

@@ -21,6 +21,7 @@ from .actions import ActionAdapter
 from .client import GateUnavailable
 from .context import RunContext, begin_run, current_run
 from .history import KEY, AgentMossState, make_event_id
+from .operation import tool_operation
 from .runtime import GateRuntime, drain
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,9 @@ class AgentMossMiddleware(AgentMiddleware):
             return self._result(request, self._error(request, str(verdict.get("reason", "Rejected"))))
         return None
 
-    def _record(self, request: ToolCallRequest, event: dict, result: ToolResult, verdict: dict) -> Command:
+    def _record(
+        self, request: ToolCallRequest, event: dict, result: ToolResult, verdict: dict, *, uncertain: bool = False
+    ) -> Command:
         view = self._run(request).history
         if isinstance(result, Command):
             messages = []
@@ -197,7 +200,7 @@ class AgentMossMiddleware(AgentMiddleware):
             None,
         )
         status = "unknown"
-        if isinstance(message, ToolMessage):
+        if isinstance(message, ToolMessage) and not uncertain:
             if message.status == "error":
                 status = "executed_error"
             elif request.tool_call["name"] == "execute":
@@ -243,13 +246,14 @@ class AgentMossMiddleware(AgentMiddleware):
                 if (denial := self._check(request, event, verdict)) is not None:
                     return denial
                 try:
-                    result = handler(request)
+                    with tool_operation() as outcome:
+                        result = handler(request)
                 except BaseException:
                     view.finish(
                         event, "unknown", decision=verdict["decision"], source=verdict.get("source", "agent_moss")
                     )
                     raise
-                return self._record(request, event, result, verdict)
+                return self._record(request, event, result, verdict, uncertain=outcome.uncertain)
         except GraphBubbleUp:
             raise
         except Exception as error:
@@ -278,13 +282,14 @@ class AgentMossMiddleware(AgentMiddleware):
                 if (denial := self._check(request, event, verdict)) is not None:
                     return denial
                 try:
-                    result = await self._execute(request, handler)
+                    with tool_operation() as outcome:
+                        result = await self._execute(request, handler)
                 except BaseException:
                     view.finish(
                         event, "unknown", decision=verdict["decision"], source=verdict.get("source", "agent_moss")
                     )
                     raise
-                return self._record(request, event, result, verdict)
+                return self._record(request, event, result, verdict, uncertain=outcome.uncertain)
         except GraphBubbleUp:
             raise
         except Exception as error:
