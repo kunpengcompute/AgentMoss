@@ -1,6 +1,8 @@
 """Exercise native approvals with a fresh application context on every invocation."""
 
 import asyncio
+import threading
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -163,5 +165,76 @@ async def test_per_call_approval_before_gate_restores_and_checks_edited_argument
         )
         assert (tmp_path / "marker").read_text() == "edited"
         assert [payload["command"] for payload in seen] == ["printf edited >> marker"]
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize("history_actions", [1, 200])
+async def test_parallel_sync_resume_shares_initialization_and_leaf_serialization(
+    tmp_path, monkeypatch, history_actions
+):
+    import agentmoss_deepagents.context as context_module
+
+    gate_rendezvous = threading.Barrier(2, timeout=0.5)
+
+    def answer(request):
+        # Simulate a slow external check. Broken per-thread locks let both calls
+        # reach Gate before either effect; a shared lock keeps the second out.
+        try:
+            gate_rendezvous.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return httpx.Response(200, json={"decision": "Allow"})
+
+    runtime, seen = setup(tmp_path, answer)
+    runtime.config = replace(runtime.config, history_actions=history_actions)
+    message = call("execute", {"command": "printf A >> marker"}, "A")
+    message.tool_calls.append(
+        {
+            "name": "execute",
+            "args": {"command": "printf B >> marker"},
+            "id": "B",
+            "type": "tool_call",
+        }
+    )
+    graph = make_agent(
+        runtime,
+        tmp_path,
+        [message, AIMessage(content="done")],
+        checkpointer=InMemorySaver(),
+        interrupt_on={"execute": True},
+    )
+    inputs, config, context = run_args("parallel-resume", "create marker")
+    try:
+        first = await asyncio.to_thread(graph.invoke, inputs, config, context=context)
+        assert first["__interrupt__"] and seen == []
+        initialization_rendezvous = threading.Barrier(2, timeout=0.5)
+        original_history = context_module.RunHistory
+
+        class ConcurrentHistory(original_history):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                # Force the legal interleaving where both workers have checked
+                # an empty context before either publishes its new RunContext.
+                # An atomic initializer only admits one worker here.
+                try:
+                    initialization_rendezvous.wait()
+                except threading.BrokenBarrierError:
+                    pass
+
+        monkeypatch.setattr(context_module, "RunHistory", ConcurrentHistory)
+        result = await asyncio.to_thread(
+            graph.invoke,
+            Command(resume={"decisions": [{"type": "approve"}, {"type": "approve"}]}),
+            config,
+            context={"moss_info": {"session_id": "parallel-resume", "user_prompt": "create marker"}},
+        )
+        assert sorted((tmp_path / "marker").read_text()) == ["A", "B"]
+        assert len(seen) == 2
+        assert seen[1]["action_history"] == [{"action_type": "bash", "action_detail": seen[0]["command"]}]
+        events = result[KEY]["events"]
+        assert len(events) == min(history_actions, 2)
+        assert len({event["order"] for event in events}) == len(events)
+        assert events[-1]["tool_call_id"] == seen[-1]["metadata"]["tool_call_id"]
     finally:
         await runtime.aclose()

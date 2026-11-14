@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from threading import RLock
 from uuid import uuid4
 
 from langgraph.config import get_config
@@ -10,6 +11,7 @@ from .history import KEY, RunHistory
 from .runtime import GateRuntime
 
 _RUN_KEY = "_agentmoss_run"
+_INITIALIZATION_LOCK = RLock()
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,14 @@ def ensure_run(
     runtime_context: object, state: dict, gate_runtime: GateRuntime, *, new_turn: bool = False
 ) -> RunContext:
     """Restore native continuations without requiring before_agent to run again."""
+    # Synchronous ToolNode workers can restore the same fresh moss_info at once.
+    # Publish exactly one history/leaf lock before admitting either worker. This
+    # short critical section contains no Gate requests or backend operations.
+    with _INITIALIZATION_LOCK:
+        return _initialize_run(runtime_context, state, gate_runtime, new_turn=new_turn)
+
+
+def _initialize_run(runtime_context: object, state: dict, gate_runtime: GateRuntime, *, new_turn: bool) -> RunContext:
     thread_id = get_config().get("configurable", {}).get("thread_id")
     info = moss_info(runtime_context, thread_id)
     if _RUN_KEY in info:
