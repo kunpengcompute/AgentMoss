@@ -1,6 +1,6 @@
 # DeepAgents Review Fixes Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Repair and verify all five reproduced PR #8 findings.
 
@@ -36,14 +36,14 @@ history metadata and restore invocation context from trusted checkpoints.
 mutable per-call outcome with `uncertain: bool`; `mark_uncertain()` records only
 the current operation. Middleware reads this after the SDK handler returns.
 
-- [ ] Add graph regressions for recursive-delete Deny, blank read windows, and
+- [x] Add graph regressions for recursive-delete Deny, blank read windows, and
   glob running/transport loss (`unknown`, no further submission).
-- [ ] Run new tests on baseline; require the three relevant defects to fail.
-- [ ] Implement shared command builder, read window metadata, operation context,
+- [x] Run new tests on baseline; require the three relevant defects to fail.
+- [x] Implement shared command builder, read window metadata, operation context,
   and middleware classification; cover EOF/empty/zero and ordinary errors.
-- [ ] Run `python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q`.
+- [x] Run `python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q`.
   Expected: all offline tests pass; only unconfigured online/artifact cases skip.
-- [ ] Commit the tested task.
+- [x] Commit the tested task.
 
 ### Task 2: Bounded history and native approval recovery
 
@@ -54,17 +54,17 @@ new `tests/test_history_limits.py`, `tests/test_resume.py`, history/context/sess
 limits, a monotonic clock, prune cursors, and current turn identity. `ensure_run`
 creates the normal invocation or restores its existing turn from checkpoint state.
 
-- [ ] Add failing graph tests for a one-turn/one-action checkpoint across turns,
+- [x] Add failing graph tests for a one-turn/one-action checkpoint across turns,
   and native approve/resume with fresh context.
-- [ ] Add merge tests for stale snapshot reintroduction, byte eviction, policy
+- [x] Add merge tests for stale snapshot reintroduction, byte eviction, policy
   changes, and completed/unfinished v4 migration; verify failures.
-- [ ] Implement schema migration and one merge/prune policy, keeping execution-ID
+- [x] Implement schema migration and one merge/prune policy, keeping execution-ID
   replay protection independent of retained events.
-- [ ] Implement normal/resumed run context initialization. Test approve/edit/reject,
+- [x] Implement normal/resumed run context initialization. Test approve/edit/reject,
   repeated checkpoints, child interruption, and no duplicate completed effects.
-- [ ] Update compatibility documentation and run the complete plugin suite.
+- [x] Update compatibility documentation and run the complete plugin suite.
   Expected: all offline tests pass without dropping cancellation/replay coverage.
-- [ ] Commit the tested task.
+- [x] Commit the tested task.
 
 ### Task 3: Compatibility, packaging, and independent review
 
@@ -72,10 +72,49 @@ creates the normal invocation or restores its existing turn from checkpoint stat
 
 **Interfaces:** consume unchanged public integration APIs and new schema 5.
 
-- [ ] Run plugin suites in Python 3.11 minimum and Python 3.12 newer dependencies;
+- [x] Run plugin suites in Python 3.11 minimum and Python 3.12 newer dependencies;
   run root `AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 .venv/bin/python -m pytest -q`.
-- [ ] Run Ruff; build root/plugin wheel and sdist from the final tree; run artifact
+- [x] Run Ruff; build root/plugin wheel and sdist from the final tree; run artifact
   tests, installed plugin tests, and Python 3.10 base import checks.
-- [ ] Dispatch one clean-context independent reviewer over baseline..HEAD; verify
+- [x] Dispatch one clean-context independent reviewer over baseline..HEAD; verify
   any actionable finding with a failing test, fix it, and rerun affected suites.
-- [ ] Record final results and commit remaining tested corrections/documentation.
+- [x] Record final results and commit remaining tested corrections/documentation.
+
+
+## Verification result (2026-11-14)
+
+Implementation commits: `4e6be16`, `f562a21`, `3470172`.
+
+| Check | Result |
+| --- | --- |
+| Plugin, Python 3.12 / DeepAgents 0.7.32 | 311 passed, 11 skipped |
+| Plugin, Python 3.11 minimum dependencies | 311 passed, 11 skipped |
+| Plugin, Python 3.12 / DeepAgents 0.7.37 | 311 passed, 11 skipped |
+| Root project regression | 3164 passed, 140 skipped; 97 baseline deprecation warnings |
+| Installed unified wheel, outside source checkout | 313 passed, 9 skipped |
+| Wheel metadata, licensing, optional-SDK local mode | 4 passed |
+| Root/plugin wheel and sdist | All four built; plugin modules match source bytes |
+| Python 3.10 base Moss | Installed wheel engine import passed |
+| Ruff and git diff checks | Passed |
+
+The independent reviewer found a synchronous approval-resume initialization race.
+Two deterministic thread-interleaving regressions failed before atomic context
+initialization and passed afterward, together with the full plugin suite. No
+confirmed Critical or Minor findings remain deferred. Real Gate/Moss/AIO services
+were not configured; nine online plugin checks remain unexecuted.
+
+### Implementation decisions and retained contracts
+
+- Schema validation/migration is isolated in `history_schema.py`; public integration
+  APIs retain their signatures. The checkpoint format intentionally advances to 5.
+- Batched native HITL's persisted edited actions are checked before the SDK applies
+  them. This dependency contract is tested on minimum/newer versions; future SDK
+  upgrades must preserve it or update the adapter.
+- A byte budget too small for session/pruning metadata now fails before execution;
+  applications using such a budget must increase it.
+- Applications supply a new `moss_info` dictionary for each invocation/resume as
+  documented; reusing it can still fail after pruning.
+- Cross-process side effects whose execution IDs have left the retained history
+  still require application reconciliation; no exactly-once claim is added.
+- Repair/validation work is committed on the existing PR branch locally. This
+  task does not publish packages, merge the PR, or update the remote branch.
