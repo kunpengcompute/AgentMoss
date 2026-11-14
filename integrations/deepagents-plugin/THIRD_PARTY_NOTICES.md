@@ -8,8 +8,9 @@ The repository root has no NOTICE file at this fixed revision.
 
 Modifications: structured DeepAgents 0.7.32 file results, POSIX paths,
 CubeProxy configuration, response validation, explicit timeouts, no automatic
-retries, serialized shell lifecycle, credential redaction, cancellation handling,
-and unknown-execution-state errors. Glob delegates to the installed
-DeepAgents BaseSandbox; file transfers share error conversion, cancellation
-handling is shared, and startup cleanup reuses the session close path. This is a maintained adaptation, not an
-unmodified upstream example.
+retries, serialized shell lifecycle, credential redaction, and
+unknown-execution-state errors. File operations use the agent-sandbox SDK;
+glob reuses BaseSandbox.glob to match the tool schema's pattern semantics.
+Async forwarding is inherited from DeepAgents SandboxBackendProtocol.
+Gate action serialization and graph cancellation handling are shared with
+the local backend. This is a maintained adaptation, not an unmodified example.

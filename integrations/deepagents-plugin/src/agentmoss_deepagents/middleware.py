@@ -17,7 +17,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from . import __version__
-from .actions import create_action_adapter
+from .actions import ActionAdapter
 from .client import GateUnavailable
 from .context import RunContext, begin_run, current_run
 from .history import KEY, AgentMossState, make_event_id
@@ -34,7 +34,7 @@ class AgentMossMiddleware(AgentMiddleware):
     state_schema = AgentMossState
 
     def __init__(self, runtime: GateRuntime, backend) -> None:
-        self.runtime, self.adapter = runtime, create_action_adapter(backend)
+        self.runtime, self.adapter = runtime, ActionAdapter(backend)
 
     def before_agent(self, state: dict, runtime: Runtime) -> dict | None:
         if self.runtime.closing:

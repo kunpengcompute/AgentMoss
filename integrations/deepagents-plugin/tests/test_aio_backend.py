@@ -13,15 +13,16 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from agent_sandbox.core.api_error import ApiError
+from langchain_core.messages import AIMessage
+from models import call
+from test_native_sdk import make_agent, run_args, setup
+
 from agentmoss_deepagents import DeepAgentsIntegration
-from agentmoss_deepagents.actions import create_action_adapter
+from agentmoss_deepagents.actions import ActionAdapter
 from agentmoss_deepagents.aio_backend import AIOSandboxBackend
 from agentmoss_deepagents.aio_errors import AIOExecutionUncertain, AIOStartupError, AIOUnavailable
 from agentmoss_deepagents.backend_config import AIOBackendConfig, IntegrationConfig
 from agentmoss_deepagents.history import KEY
-from langchain_core.messages import AIMessage
-from models import call
-from test_native_sdk import make_agent, run_args, setup
 
 
 def response(**fields):
@@ -129,19 +130,19 @@ def test_adapter_matches_upstream_path_normalization(backend, tool, key, path):
 
     args = {key: path, "pattern": "*.txt"}
     original = deepcopy(args)
-    action = create_action_adapter(backend).adapt(tool, args)
+    action = ActionAdapter(backend).adapt(tool, args)
     assert action.metadata["real_path"] == backend.normalize_path(validate_path(path))
     assert action.metadata["os_type"] == "linux"
     assert args == original
 
 
 def test_missing_search_path_uses_working_dir(backend):
-    assert create_action_adapter(backend).adapt("glob", {"pattern": "*.txt"}).metadata["real_path"] == "/home/gem"
+    assert ActionAdapter(backend).adapt("glob", {"pattern": "*.txt"}).metadata["real_path"] == "/home/gem"
     assert backend.normalize_path("foo.txt") == "/home/gem/foo.txt"
 
 
 @pytest.mark.parametrize("code", [0, 7, 126])
-def test_execute_keeps_real_exit_and_disables_retry(backend, client, code):
+def test_execute_keeps_real_exit_and_timeout(backend, client, code):
     client.shell.answer = response(status="completed", exit_code=code, output="exact")
     result = backend.execute("printf exact", timeout=5)
     assert result.exit_code == code and result.output == "exact"
@@ -149,7 +150,6 @@ def test_execute_keeps_real_exit_and_disables_retry(backend, client, code):
     assert sent["command"] == "printf exact"
     assert sent["exec_dir"] == "/home/gem" and sent["strict"] is True
     assert sent["async_mode"] is False
-    assert sent["request_options"]["max_retries"] == 0
     assert sent["request_options"]["timeout_in_seconds"] > sent["hard_timeout"]
 
 
@@ -310,7 +310,7 @@ async def test_factory_routes_and_closes_owned_resources(monkeypatch, tmp_path, 
     assert integration.status()["closed"] is True
 
 
-def test_grep_uses_structured_api_not_pty_null_delimiters(backend, client):
+def test_grep_literal_pattern_with_filter_and_total_limit(backend, client):
     seen = []
 
     def grep_files(**kwargs):
@@ -324,15 +324,12 @@ def test_grep_uses_structured_api_not_pty_null_delimiters(backend, client):
         )
 
     client.file.grep_files = grep_files
-    # PTY strips the NUL filename separator required by BaseSandbox's shell parser.
-    client.shell.answer = response(status="completed", exit_code=0, output="/home/gem/file.txt2:literal.*")
     result = backend.grep("literal.*", "/home/gem", "*.txt", max_count=1)
     assert result.error is None
     assert result.matches == [{"path": "/home/gem/file.txt", "line": 2, "text": "literal.*"}]
     assert result.truncated is True
     assert seen[0]["fixed_strings"] is True
     assert seen[0]["include"] == ["*.txt"]
-    assert seen[0]["request_options"]["max_retries"] == 0
     assert client.shell.calls == []
 
 
@@ -365,7 +362,7 @@ def test_execute_preserves_transport_truncation(backend, client):
 
 @pytest.fixture
 def disk_backend(tmp_path, client):
-    """Run real BaseSandbox commands on temporary files; not a live AIO server."""
+    """Exercise file effects and shell deletion on disk; not a live AIO server."""
 
     def execute(**kwargs):
         client.shell.calls.append(kwargs)
@@ -435,13 +432,19 @@ def test_edit_preserves_unique_and_replace_all_contract(disk_backend, tmp_path, 
     assert disk_backend.edit(target.name, "absent", "new").error
 
 
-def test_glob_and_delete_operate_on_remote_working_directory(disk_backend, tmp_path):
+@pytest.mark.parametrize("pattern", ["*.txt", "*.{txt,md}"])
+def test_glob_and_delete_operate_on_remote_working_directory(disk_backend, tmp_path, pattern):
     directory = tmp_path / "目录 '"
     directory.mkdir()
     target = directory / "a b.txt"
     target.write_text("keep")
-    result = disk_backend.glob("*.txt", directory.name)
-    assert result.error is None and [m["path"] for m in result.matches] == [str(target)]
+    nested = directory / "child" / "nested.txt"
+    nested.parent.mkdir()
+    nested.write_text("nested")
+    result = disk_backend.glob(pattern, directory.name)
+    assert result.error is None and {m["path"] for m in result.matches} == {str(target), str(nested)}
+    assert disk_backend.glob("*.absent", directory.name).matches == []
+    assert disk_backend.status()["state"] == "ready"
     assert disk_backend.glob("*.txt").error is None
     assert disk_backend.delete(directory.name).error is None and not directory.exists()
     assert disk_backend.delete(directory.name).error
@@ -472,7 +475,8 @@ def test_lost_upload_response_blocks_remaining_submissions(disk_backend, tmp_pat
         disk_backend.execute("printf must-not-submit")
 
 
-async def test_cancelled_upload_drains_before_close(backend, client):
+@pytest.mark.parametrize("graph_call", [False, True])
+async def test_cancelled_write_worker_finishes_before_close(backend, client, tmp_path, graph_call):
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
 
     def write_file(**kwargs):
@@ -482,7 +486,18 @@ async def test_cancelled_upload_drains_before_close(backend, client):
         return response()
 
     client.file.write_file = write_file
-    operation = asyncio.create_task(backend.aupload_files([("a", b"x")]))
+    runtime, _ = setup(tmp_path)
+    client.file.find_files = lambda **kwargs: response(files=[])
+    agent = make_agent(
+        runtime,
+        tmp_path,
+        [call("write_file", {"file_path": "/a", "content": "x"}, "write"), AIMessage(content="done")],
+        backend=backend,
+    )
+    inputs, config, context = run_args()
+    operation = asyncio.create_task(
+        agent.ainvoke(inputs, config, context=context) if graph_call else backend.aupload_files([("a", b"x")])
+    )
     try:
         assert await asyncio.to_thread(started.wait, 5)
         operation.cancel()
@@ -490,12 +505,15 @@ async def test_cancelled_upload_drains_before_close(backend, client):
         operation.cancel()
         close = asyncio.create_task(asyncio.to_thread(backend.close))
         assert await asyncio.to_thread(backend._closing.wait, 5)
-        assert not operation.done() and not finished.is_set()
+        assert not close.done() and not finished.is_set()
+        if graph_call:
+            assert not operation.done()
     finally:
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await operation
     await close
+    await runtime.aclose()
     assert finished.is_set() and backend.status()["state"] == "closed"
 
 
@@ -508,24 +526,34 @@ def test_invalid_file_arguments_do_not_poison_session(backend, client, method, a
     assert backend.status()["state"] == "ready" and client.shell.calls == []
 
 
-@pytest.mark.parametrize("method", ["read", "ls", "write", "grep", "upload_files"])
-@pytest.mark.parametrize("kind", ["file_not_found", "permission_denied"])
-def test_structured_file_errors_never_report_success(backend, client, method, kind):
-    def rejected(**kwargs):
-        return response(error_type=kind)
-
-    client.file.read_file = client.file.list_path = client.file.find_files = rejected
-    client.file.grep_files = client.file.write_file = rejected
+@pytest.mark.parametrize("method", ["read", "ls", "write", "edit", "grep", "upload_files"])
+@pytest.mark.parametrize(
+    "kind,status,want", [("not_found", 404, "file_not_found"), ("permission_denied", 403, "permission_denied")]
+)
+@pytest.mark.parametrize("http_error", [False, True])
+def test_sdk_file_rejection_is_recoverable(sdk_backend, method, kind, status, want, http_error):
+    backend, submitted, replies = sdk_backend
+    replies.append(
+        httpx.Response(
+            status if http_error else 200,
+            json={
+                "success": False,
+                "message": "private-token",
+                "data": {"path": "/missing", "operation": method, "error_type": kind, "message": "private-token"},
+            },
+        )
+    )
     args = {
         "read": ("missing",),
         "ls": ("missing",),
         "write": ("missing", "x"),
+        "edit": ("missing", "old", "new"),
         "grep": ("text", "missing"),
         "upload_files": ([("missing", b"x")],),
     }
     result = getattr(backend, method)(*args[method])
-    assert (result[0] if isinstance(result, list) else result).error == kind
-    assert backend.status()["state"] == "ready"
+    assert (result[0] if isinstance(result, list) else result).error == want
+    assert backend.status()["state"] == "ready" and len(submitted) == 1
 
 
 @pytest.mark.parametrize("output,code,truncated", [("crashed", 1, False), ("not-json", 0, False), ("", 0, True)])
@@ -535,6 +563,36 @@ def test_glob_does_not_hide_errors_or_truncation(backend, client, output, code, 
     )
     result = backend.glob("*")
     assert result.truncated if truncated else result.error
+
+
+@pytest.mark.parametrize(
+    "method,fields",
+    [
+        ("ls", {"total_count": 1}),
+        ("ls", {"files": [{"error_type": "not_found"}]}),
+        ("read", {"error_type": ["not_found"]}),
+        ("read", {"error_type": "private-token"}),
+    ],
+)
+def test_sdk_malformed_file_result_is_not_a_confirmed_rejection(sdk_backend, method, fields):
+    backend, _, replies = sdk_backend
+    replies.append(
+        httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "path": "/home/gem",
+                    "pattern": "*.txt",
+                    **fields,
+                },
+            },
+        )
+    )
+    with pytest.raises(AIOExecutionUncertain) as caught:
+        getattr(backend, method)("/home/gem")
+    assert "private-token" not in str(caught.value)
+    assert backend.status()["state"] == "uncertain"
 
 
 @pytest.mark.parametrize("cleanup", [True, False, 404, 500])
@@ -556,11 +614,11 @@ def test_failed_startup_reports_cleanup_outcome_and_session(client, cleanup):
     assert "private-token" not in str(caught.value)
 
 
-@pytest.mark.parametrize("operation", ["execute", "upload_files"])
-def test_official_sdk_never_retries_uncertain_mutations(operation):
+@pytest.fixture
+def sdk_backend():
     from agent_sandbox import Sandbox
 
-    submitted = []
+    submitted, replies = [], []
 
     def transport(request):
         if request.url.path.endswith("/create"):
@@ -571,8 +629,7 @@ def test_official_sdk_never_retries_uncertain_mutations(operation):
         if request.method == "DELETE":
             return httpx.Response(200, json={"success": True})
         submitted.append(request)
-        # 500 is retryable by the SDK unless the adapter explicitly disables retries.
-        return httpx.Response(500, json={"error": "traffic-secret"})
+        return replies.pop(0)
 
     with httpx.Client(transport=httpx.MockTransport(transport)) as http:
         backend = AIOSandboxBackend(
@@ -580,19 +637,25 @@ def test_official_sdk_never_retries_uncertain_mutations(operation):
             config=AIOBackendConfig("http://proxy.test", "sandbox-1", traffic_token="traffic-secret"),
         )
         try:
-            if operation == "execute":
-                with pytest.raises(AIOExecutionUncertain):
-                    backend.execute("mutate-once")
-            else:
-                assert backend.upload_files([("a", b"x")])[0].error
-            assert len(submitted) == 1
-            assert backend.status()["state"] == "uncertain"
-            with pytest.raises(AIOUnavailable):
-                backend.execute("must-not-submit")
-            assert len(submitted) == 1
-            assert "traffic-secret" not in json.dumps(backend.status())
+            yield backend, submitted, replies
         finally:
             backend.close()
+
+
+@pytest.mark.parametrize("operation", ["execute", "upload_files", "glob"])
+def test_official_sdk_never_retries_uncertain_mutations(sdk_backend, operation):
+    backend, submitted, replies = sdk_backend
+    replies.append(httpx.Response(500, json={"error": "traffic-secret"}))
+    if operation != "upload_files":
+        with pytest.raises(AIOExecutionUncertain):
+            getattr(backend, operation)("mutate-once")
+    else:
+        assert backend.upload_files([("a", b"x")])[0].error
+    assert len(submitted) == 1 and backend.status()["state"] == "uncertain"
+    with pytest.raises(AIOUnavailable):
+        backend.execute("must-not-submit")
+    assert len(submitted) == 1
+    assert "traffic-secret" not in json.dumps(backend.status())
 
 
 @pytest.mark.parametrize("child", [False, True])
@@ -633,37 +696,15 @@ async def test_gate_deny_protects_aio_files_in_parent_and_child(tmp_path, disk_b
         await runtime.aclose()
 
 
-@pytest.mark.parametrize("code,truncated", [(7, False), (0, True)])
-def test_edit_never_trusts_partial_shell_success(disk_backend, tmp_path, code, truncated):
-    target = tmp_path / "edit.txt"
-    target.write_text("before")
-    disk_backend.client.shell.exec_command = lambda **kwargs: response(
-        status="completed",
-        exit_code=code,
-        output='{"count":1}',
-        full_output_file_path="/tmp/out" if truncated else None,
-    )
-    result = disk_backend.edit(target.name, "before", "after")
-    # A confirmed success must reflect the actual file, not a plausible shell payload.
-    assert result.error or target.read_text() == "after"
-
-
 def test_edit_lost_result_stops_future_submissions(disk_backend, tmp_path):
     target = tmp_path / "edit.txt"
     target.write_text("before")
-    shell = disk_backend.client.shell.exec_command
     editor = disk_backend.client.file.str_replace_editor
-
-    def lost_shell(**kwargs):
-        result = shell(**kwargs)
-        result.data.output = "invalid-result"
-        return result
 
     def lost_editor(**kwargs):
         editor(**kwargs)
         raise httpx.ReadTimeout("private-token")
 
-    disk_backend.client.shell.exec_command = lost_shell
     disk_backend.client.file.str_replace_editor = lost_editor
     with pytest.raises(AIOExecutionUncertain):
         disk_backend.edit(target.name, "before", "after")

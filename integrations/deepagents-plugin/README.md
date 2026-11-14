@@ -119,7 +119,9 @@ DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理�
 
 命令或文件操作响应丢失、网络超时、连接中断、running/未完成或硬超时不能当作成功：工具结果报告错误或 unknown，会话禁止继续提交操作，且插件不自动重试或切换到本地执行。应用先查询旧 shell 会话、确认旧命令状态并清理旧会话，再创建新实例；仅创建新会话并不意味着旧命令已经停止。关闭失败要保留沙箱和 shell_session_id 以便人工处理。若初始化失败，`AIOStartupError` 提供 `sandbox_id`、`session_id`、`cleanup_confirmed` 和脱敏的失败类型；清理未确认时必须先检查该会话，不能假定已关闭。
 
-通配搜索复用 DeepAgents `BaseSandbox`，通过 AIO shell 执行；读取、目录列表、替换、文本搜索及二进制传输使用官方 `agent-sandbox` 文件 API。删除保留单次 shell 调用，避免预检查吞掉服务拒绝原因。保留专用适配以支持远端路径、目录元数据和结构化搜索；写入仍拒绝覆盖已有文件。工具执行与关闭共用取消等待逻辑，取消调用方协程后仍等正在进行的操作结束。
+读取、写入、编辑、目录列表、grep 和二进制传输直接使用 `agent-sandbox` 文件 API；删除调用一次 AIO shell。glob 直接复用 DeepAgents `BaseSandbox.glob`，保持与模型收到的工具说明一致，包括递归文件名匹配和 `{a,b}` 模式。写入仍拒绝覆盖已有文件。
+
+异步方法复用 DeepAgents 的 `SandboxBackendProtocol`。通过图调用工具时，中间件会等待已取消的工具执行结束；直接调用 backend 异步方法遵循 DeepAgents 的默认取消行为，取消等待不会终止工作线程。`integration.aclose()` 仍会等待正在进行的 SDK 请求结束后再关闭 shell 和 HTTP 连接。
 
 文件 API 不经过沙箱内部 shell.py 的检查，但 DeepAgents 的文件工具调用仍先通过插件送 Gate。直接调用 backend.upload_files/download_files 等方法不经过工具中间件，不能据此认为已完成外部送检。
 
