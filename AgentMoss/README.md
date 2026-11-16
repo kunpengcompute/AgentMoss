@@ -3,12 +3,9 @@
 多层级 AI Agent 安全分析引擎。输入「下一步动作 + 上下文」，输出 `Allow` / `Deny`、
 风险级别与原因。可直接作为 Python 库嵌入，也可以启动 HTTP 服务由 AgentGate 调用。
 
-本仓库是 **Python** 裁剪版：
-
-- 只包含 Python 实现，不包含 TypeScript 版；
-- 不包含 Brain 自学习模块（规则 / Skill 自动提取、curator、`/api/v1/brain/*`
-  接口与 `agent-moss brain` 子命令均已移除）；
-- L1 / L2 / L3 检测、规则、Skill、场景与 agent 扩展均保留。
+AgentMoss 使用 Python 实现，支持规则检测、脚本分析、行为验证和可选的模型语义分析。
+可以按 Agent 类型和部署场景扩展规则，通过控制台查看和调整运行配置。
+项目整体架构和两个服务的快速部署见[项目说明](../README.md)。
 
 ## 三层防御
 
@@ -23,23 +20,19 @@
 
 ## 安装
 
-需要 Python 3.10 或更新版本。建议先创建虚拟环境：
+需要 Python 3.10 或更新版本，并安装 uv。下面使用 Python 3.12，从源码安装：
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-```
-
-商用裁剪版从本仓库源码安装。公共 PyPI 上的 `agent-moss` 是上游完整版，
-不能作为本仓库的安装来源：
-
-```bash
-git clone https://gitcode.com/kenhkl/AgentMoss-commercial.git AgentMoss
+git clone https://gitcode.com/boostkit/AgentMoss.git
 cd AgentMoss
-python -m pip install -e .
+uv venv --python 3.12 ./AgentMoss/.venv
+uv pip install --python ./AgentMoss/.venv/bin/python -e ./AgentMoss
+. ./AgentMoss/.venv/bin/activate
 ```
 
-`-e` 会直接使用当前目录的源码，修改代码后无需重新安装。安装完成后可使用 `agent-moss` 命令。
+如果已下载项目，从仓库根目录执行 `uv venv` 及后续命令即可。`-e` 直接使用本地源码，
+修改代码后无需重新安装。激活环境后可使用 `agent-moss` 命令。
+以上命令适用于 Linux/macOS；Windows 的虚拟环境入口位于 `Scripts/`。
 
 ### 在 DeepAgents 中启用安全检查
 
@@ -50,13 +43,14 @@ python -m pip install -e .
 接入分为三步：
 
 1. **启动 Gate 和 Moss 服务。** Gate 接收插件的检查请求，Moss 给出安全判定。部署方法见[部署说明](integrations/deepagents-plugin/docs/deployment.md)。
-2. **把插件装到运行 DeepAgents 的 Python 环境中。** 使用 Python 3.11 或更新版本，先激活该应用的虚拟环境，再执行：
+2. **把插件装到运行 DeepAgents 的独立 Python 环境中。** 需要 Python 3.11 或更新版本，下面在仓库根目录创建 Python 3.12 环境：
 
    ```bash
-   python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'
+   uv venv --python 3.12 .venv-deepagents
+   uv pip install --python .venv-deepagents/bin/python -e './AgentMoss[deepagents-aio]'
    ```
 
-   将路径替换为包含本插件的商用源码目录；公共 PyPI 的同名包不能替代该安装。
+   已有 DeepAgents 应用时，将 `--python` 指向该应用的虚拟环境，并使用 `AgentMoss/` 组件目录的实际路径。AgentGate 服务与 DeepAgents 应用使用独立环境，通过 HTTP 通信。
 
 3. **在 DeepAgents 应用代码中接入插件。** 配置 Gate 地址和访问令牌，并修改创建 Agent 的代码，为主代理和每个子代理添加插件的检查组件。完整代码见[插件接入说明](integrations/deepagents-plugin/README.md)。
 
@@ -74,8 +68,8 @@ agent-moss analyze input.json
 # 或直接分析一条命令
 agent-moss analyze "cat ~/.ssh/id_rsa" --json
 
-# 启动 HTTP 服务（默认 127.0.0.1:9090）
-agent-moss server --host 0.0.0.0 --port 9090
+# 启动 HTTP 服务（本机访问）
+AGENT_MOSS_DISABLE_LLM=1 agent-moss server --host 127.0.0.1 --port 9090
 
 # 服务状态
 agent-moss status
@@ -360,30 +354,32 @@ agent-moss rules status
 
 ## 开发与测试
 
-在仓库根目录执行。完整验证（含 DeepAgents 插件）需要 Python 3.11 或更新版本，
-先安装本地源码的可选依赖和测试工具：
+以下命令在仓库根目录执行。完整验证需要 Python 3.11 或更新版本；
+使用独立的测试环境，安装组件源码、DeepAgents 可选依赖和测试工具：
 
 ```bash
-python -m pip install -e '.[deepagents-aio]' pytest pytest-asyncio
+uv venv --python 3.12 .venv-moss-test
+uv pip install --python .venv-moss-test/bin/python -e './AgentMoss[deepagents-aio]' pytest pytest-asyncio
 ```
 
-主仓测试：
+引擎测试：
 
 ```bash
-AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
+cd AgentMoss
+AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 ../.venv-moss-test/bin/python -m pytest -q
 ```
 
-DeepAgents 插件测试必须单独运行：根目录 `pytest.ini` 的 `testpaths = tests`
-不会收集插件用例。显式加载插件配置，以启用异步测试并使用插件源码：
+继续在 `AgentMoss/` 组件目录单独运行 DeepAgents 插件测试。组件的 `pytest.ini`
+只收集 `tests/`，插件需要显式加载自身配置来启用异步测试：
 
 ```bash
-python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q
+../.venv-moss-test/bin/python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q
 ```
 
 真实 AIO 测试需要单独配置服务地址，未配置时跳过；配置方式见[插件测试说明](integrations/deepagents-plugin/README.md#测试)。
 
-测试语料位于 `tests/cases/`，双端一致性 golden 数据位于 `tests/parity/`
-（裁剪后只校验 Python 侧行为，不依赖 TypeScript 源码）。
+测试用例位于 `tests/cases/`，固定输入和预期结果位于 `tests/parity/`。
+测试会检查安全判定、风险等级和风险分类是否符合预期。
 
 ## 目录结构
 
@@ -407,7 +403,7 @@ agent_moss/
 └── console/            # 运行时控制台
 tests/                  # 回归测试与用例
 config/                 # 示例配置
-integrations/           # 集成示例（QwenPaw 插件）
+integrations/           # 集成示例（QwenPaw、DeepAgents 插件）
 ```
 
 ## License

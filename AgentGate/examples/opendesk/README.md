@@ -2,30 +2,33 @@
 
 ## 1. 先决条件
 
+先按[项目快速开始](../../../README.md#快速开始)安装两个组件。
+以下命令在 `AgentGate/` 组件目录执行，使用 `.venv/bin/agent-gate`，或先激活虚拟环境。
+
 - AgentMoss 服务已启动（默认 `http://127.0.0.1:9090`）；
 - AgentGate V1 服务已启动：
 
 ```bash
-agent-gate server --mode http --port 9100 \
+.venv/bin/agent-gate server --mode http --host 127.0.0.1 --port 9100 \
   --security-url http://127.0.0.1:9090 \
   --db-path /tmp/agent_gate_opendesk_test.db
 ```
 
 ## 2. 验证 AgentGate 接口
 
-另开终端：
+另开终端，读取 AgentGate 的访问令牌并提交一个只读命令。这里只分析命令，不会执行它：
 
 ```bash
-python3 examples/opendesk/test_integration.py
+GATE_TOKEN=$(cat ~/.config/agentgate/auth_token)
+curl -sS http://127.0.0.1:9100/api/v1/analyze \
+  -H "Authorization: Bearer $GATE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_type":"opendesk","session_id":"opendesk-check","tool_name":"executeBash","command":"ls -la","user_prompt":"查看项目文件"}'
 ```
 
-这个脚本模拟 Agent 调用 AgentGate 的 analyze API，验证：
-
-- 安全命令被 Allow；
-- 危险命令被 Deny（依赖 AgentMoss 运行）；
-- Session 内 `action_history` 自动累积；
-- 系统上下文被采集；
-- AgentMoss 不可达时的 Fail-Closed 行为。
+响应应为 `decision: Allow`。如果返回 `Deny` 且 `risk_type` 为
+`service_unavailable` 或 `analysis_timeout`，先检查 AgentMoss 服务地址、令牌与状态。
+更多检查方法见[测试指南](TESTING.md)。
 
 ## 3. 接入方式
 
@@ -99,15 +102,6 @@ Deny 时阻止执行；Allow 时正常执行。
 | `executePowerShell` | Windows PowerShell |
 | 其他工具名 | 按实际工具名传入 `tool_name` |
 
-## 5. Agent 侧包装器
-
-仓库自带一个通用 shell 包装器 `scripts/agent-gate-wrap.sh`：
-
-```bash
-export AGENT_GATE_URL=http://127.0.0.1:9100
-export AGENT_TYPE=claude-code
-
-agent-gate-wrap claude
-```
-
-它会先调用 `/api/v1/analyze`，Deny 时直接退出，Allow 时执行原命令。
+工具包装器应检查 HTTP 请求是否成功以及响应中的 `decision`，只有明确返回
+`Allow` 时才执行原工具。连接失败、超时、鉴权失败或返回 `Deny` 时停止执行，
+并把原因提供给调用方。

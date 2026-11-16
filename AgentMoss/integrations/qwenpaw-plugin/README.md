@@ -1,70 +1,59 @@
-# AgentMoss Security Gate 插件（零侵入方案原型）
+# AgentMoss QwenPaw 插件
 
-让 QwenPaw 的每一次工具调用，都先经过 AgentMoss（经 AgentGate）安全分析，再决定是否真的执行。
+本插件在 QwenPaw 的权限检查环节接入 AgentGate，将待执行的工具、参数、用户提示词和会话上下文交给 AgentMoss 分析。返回 `Allow` 时继续权限检查，返回 `Deny` 时阻止工具执行。
 
-## 零侵入说明
+## 工作方式
 
-- 不修改 QwenPaw 任何源码
-- 不修改 AgentGate / AgentMoss 任何源码（只调用其已有的 `/api/v1/analyze` 接口）
-- 安装 = 把这个插件目录放进 QwenPaw 的插件目录（`~/.qwenpaw/plugins/agentmoss-gate/`），启用插件即可
+插件通过 QwenPaw 的 `on_check_permission` 扩展点加载，无需修改 QwenPaw、AgentGate 或 AgentMoss 源码。QwenPaw 自身的权限判定仍然生效；插件会将其拒绝或待确认结果作为上下文上报。
 
-## 工作原理
-
-插件挂载在 QwenPaw 的**权限检查**环节（`on_check_permission`），在工具真正执行**之前**：
-
-1. 拿到本次工具调用（工具名 + 参数）
-2. 拿到本轮提示词（user prompt）与完整会话历史（`agent.state.context`，按「提示词 → 它触发的动作」分组）
-3. 打包上报 AgentGate `/api/v1/analyze`
-4. AgentMoss 判决 `Deny` → 直接阻止工具执行（工具不会真的跑）
-5. AgentMoss 判决 `Allow` → 放行，行为与不开插件完全一致
-
-与 QwenPaw 自带治理的关系：**双重把关**。QwenPaw 自己拦的，插件不会放行；QwenPaw 没拦的，AgentMoss 还能再拦一道。
+1. QwenPaw 准备执行工具，进入权限检查。
+2. 插件整理工具名、参数、用户提示词、会话历史及系统信息。
+3. 插件调用 AgentGate 的 `/api/v1/analyze`，由 AgentMoss 返回安全判定。
+4. 只有权限检查允许时，QwenPaw 才执行该工具。
 
 ## 安装
 
-```bash
-# 1. 把插件目录放到 QwenPaw 插件目录
-mkdir -p ~/.qwenpaw/plugins
-cp -r agentmoss-gate ~/.qwenpaw/plugins/
+先按[部署说明](../deepagents-plugin/docs/deployment.md)启动 AgentGate 和 AgentMoss。
+随后在仓库根目录执行：
 
-# 2. （可选）创建配置文件
-cp agentmoss-gate/config.example.json agentmoss-gate/config.json
-#    编辑 config.json 填 AgentGate 地址
+```bash
+mkdir -p ~/.qwenpaw/plugins/agentmoss-gate
+cp -R ./AgentMoss/integrations/qwenpaw-plugin/. ~/.qwenpaw/plugins/agentmoss-gate/
+cp ~/.qwenpaw/plugins/agentmoss-gate/config.example.json \
+   ~/.qwenpaw/plugins/agentmoss-gate/config.json
 ```
 
-启用插件后在 QwenPaw 界面里开启「AgentMoss Security Gate」。
+编辑安装目录中的 `config.json`，填写 AgentGate 地址和访问令牌。已有配置时保留原文件，按需要更新字段。
+启动 QwenPaw 后，在插件界面启用「AgentMoss Security Gate」。目录名 `agentmoss-gate` 与 `plugin.json` 中的 `id` 保持一致。
+Windows 插件目录为 `%USERPROFILE%\.qwenpaw\plugins\`。
 
-## 配置（config.json）
+## 配置
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `gate_url` | `http://127.0.0.1:9100` | AgentGate 服务地址（与其默认端口一致） |
-| `timeout` | `5.0` | 上报超时（秒）。超时按"网关不可用"处理 |
-| `fail_closed` | `false` | `false`=网关挂了放行（fail-open，agent 不中断）；`true`=网关挂了全拦（fail-closed，更安全但一断全断） |
-| `api_token` | `""` | 网关鉴权 token（AgentGate 若开启了鉴权） |
-| `agent_type` | `"qwenpaw"` | 上报的 agent 类型标识 |
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `gate_url` | `http://127.0.0.1:9100` | AgentGate 服务地址 |
+| `timeout` | `5.0` | 请求超时，单位秒 |
+| `fail_closed` | `false` | `true` 表示连接失败时拒绝执行；`false` 表示连接失败时继续执行 |
+| `api_token` | 空 | AgentGate 访问令牌；服务默认启用鉴权，需要填写 |
+| `agent_type` | `qwenpaw` | 请求中上报的 Agent 类型 |
+| `extra_metadata` | `{}` | 附加的上下文字段 |
 
-环境变量可覆盖：`AGENTMOSS_GATE_URL` / `AGENTMOSS_GATE_TIMEOUT` / `AGENTMOSS_FAIL_CLOSED` / `AGENTMOSS_DISABLE`。
+`AGENTMOSS_GATE_URL`、`AGENTMOSS_GATE_TIMEOUT` 和 `AGENTMOSS_FAIL_CLOSED` 提供相应字段的默认值；
+`config.json` 中的非空配置优先。`AGENTMOSS_DISABLE` 可禁用插件。
+无论连接故障策略如何设置，AgentMoss 明确返回的 `Deny` 都会拦截。
 
-## 已知边界（务必给客户讲清楚）
+## 覆盖范围
 
-1. **"一次做一串动作"（批量工具）的内层动作看不到**——唯一真盲区。该功能的内层
-   动作绕过了整条权限检查链路（QwenPaw 自身的治理漏洞，已提交上游 PR）。若客户
-   明确不用该功能，本插件覆盖主路径 100%。
-2. **工具不存在 / 参数解析失败**的调用看不到（未进入权限检查环节）。非安全场景：
-   这类调用本来就不会执行。
-
-> **被 QwenPaw 治理层拒绝的动作，本插件看得到**（含拒绝原因）。插件挂在"权限检查"
-> 的**外层**，QwenPaw 自己的判定发生在插件内部，因此放行/拒绝/待确认三种结果插件
-> 都能拿到并上报——早期文档说"看不到"是错的，已实测修正。
+- 通过权限检查环节的工具调用会被送检，包含 QwenPaw 自身拒绝或要求确认的动作。
+- `run_tool_batch` 的内层动作绕过该权限检查环节，无法由本插件逐项检查。
+- 工具不存在或参数解析失败时不会进入权限检查，因此没有相应的插件上报记录。
 
 ## 测试
 
+使用已安装 QwenPaw 和 AgentScope 的 Python 环境，在仓库根目录执行：
+
 ```bash
-# 依赖 AgentScope（由 QwenPaw 提供），用 QwenPaw 的 venv 跑
-/home/hkl/github/QwenPaw/venv/bin/python test_agentmoss_gate_plugin.py
+/path/to/qwenpaw-venv/bin/python AgentMoss/integrations/qwenpaw-plugin/test_agentmoss_gate_plugin.py
 ```
 
-20 个用例：Deny 阻断 / Allow 放行 / fail-open / fail-closed / 上下文提取
-（纯文本、真实工具调用、cwd、reason）/ 工具输入不被 JSON 转义 / os_type 与
-hostname 上报（hostname 供 AgentGate 区分同类型 agent）。
+将 Python 路径替换为 QwenPaw 实际使用的环境。测试使用模拟请求，覆盖 Allow 放行、Deny 拦截、连接故障处理、上下文提取以及平台和主机信息上报。

@@ -10,15 +10,6 @@ AgentMoss 面向 AI Agent 的工具调用安全场景，在命令执行、文件
 
 本项目包含 **AgentMoss** 和 **AgentGate** 两个组件：AgentMoss 提供多层安全分析能力，AgentGate 提供 Agent 接入、上下文采集与调用审计能力。两个组件通过 HTTP API 协同工作，接入方根据返回的判定决定是否执行原工具。
 
-当前代码同步自两个商业版仓库的 `main`（2026-11-11 核对）：
-
-| 目录 | 上游 | 提交 |
-| --- | --- | --- |
-| `AgentMoss/` | [AgentMoss-commercial](https://gitcode.com/kenhkl/AgentMoss-commercial) | `c01b6eb52b5b36178e2aca52f22449b54d2e7e9e` |
-| `AgentGate/` | [AgentGate-commercial](https://gitcode.com/kenhkl/AgentGate-commercial) | `16ff75ecfaa1516fa922d072d1382f3a456e3b42` |
-
-保留了本仓库的 DeepAgents 插件。当前同步版本不包含本地鲲鹏硬件加速扩展、Brain 自学习模块、TypeScript 实现和 AgentGate V3 代理能力。
-
 ### 架构
 
 ```mermaid
@@ -52,8 +43,10 @@ AgentMoss 也支持作为 Python 库直接使用；AgentGate 提供 Python SDK �
 | 安全分析 | L1 特征检测 | 识别危险命令、注入特征及敏感规则，支持脚本内容预扫描 |
 | 安全分析 | L2 逻辑与行为检测 | 结合动作历史检查读写关系、敏感路径、危险模式及用户意图，支持行为图形式化验证与跨会话组合链分析 |
 | 安全分析 | L3 语义检测 | 结合 LLM 与安全 Skill 进行深度语义分析，可通过配置按需启用 |
+| 安全分析 | 可选规则预筛 | 支持 Hyperscan / Ultrascan 命令规则预筛，默认关闭，启用后自动维护加速包 |
 | 规则扩展 | 多维规则配置 | 支持内置规则、用户扩展规则、Agent 专属规则及部署场景规则 |
 | 接入与采集 | 工具调用接入 | 支持通过插件、Python SDK 或 HTTP API，在工具执行前提交分析请求 |
+| 接入与采集 | DeepAgents 接入 | 主代理与子代理的工具调用先交给 AgentGate 检查，再在本地或 AIO 沙箱执行 |
 | 接入与采集 | 上下文整理 | 采集系统、进程、网络、用户与环境信息，整理会话调用历史 |
 | 审计与可视化 | 调用追踪 | 保存动作与判定记录，提供会话轨迹、调用查询、统计和时间线 |
 | 审计与可视化 | 管理界面 | AgentGate 提供 Dashboard，AgentMoss 提供规则与运行配置 Console |
@@ -80,29 +73,30 @@ AgentMoss/
 
 ### 环境准备
 
-两个组件均要求 Python 3.10 或更高版本，使用 uv 管理依赖和运行环境。请先安装 uv；以下示例使用 Python 3.12，在项目根目录执行：
+两个组件均支持 Python 3.10 或更高版本；DeepAgents 插件要求 Python 3.11 或更高版本。推荐统一使用 Python 3.12。安装好 Git 和 [uv](https://docs.astral.sh/uv/getting-started/installation/) 后，下载代码并安装两个组件；已有代码时直接进入仓库根目录，从 `uv venv` 开始执行：
 
 ```bash
-uv sync --project ./AgentMoss --python 3.12
-uv sync --project ./AgentGate --python 3.12
+git clone https://gitcode.com/boostkit/AgentMoss.git
+cd AgentMoss
+
+uv venv --python 3.12 ./AgentMoss/.venv
+uv pip install --python ./AgentMoss/.venv/bin/python -e ./AgentMoss
+
+uv venv --python 3.12 ./AgentGate/.venv
+uv pip install --python ./AgentGate/.venv/bin/python -e ./AgentGate
 ```
 
-两个组件分别使用各自目录下的 `.venv` 和 `uv.lock`，无需手动激活环境。上游未提供 uv 锁文件，首次同步会在本地生成；保留这些文件后，可按本机锁定版本再次安装依赖：
+以上命令适用于 Linux / macOS。Windows 下将 `.venv/bin/python` 改为 `.venv/Scripts/python.exe`，启动命令使用 `.venv/Scripts/` 中对应的可执行文件。
 
-```bash
-uv sync --project ./AgentMoss --locked
-uv sync --project ./AgentGate --locked
-```
-
-第三方 Agent 插件的 Python 版本与依赖要求见各自接入文档。
+两个服务使用各自的虚拟环境，通过 HTTP 通信。DeepAgents 应用也使用独立环境，避免与 AgentGate 的依赖版本冲突；安装步骤见 [DeepAgents 接入说明](./AgentMoss/integrations/deepagents-plugin/README.md)。
 
 ### 启动 AgentMoss
 
 在第一个终端中，从项目根目录启动 L1/L2 检测服务：
 
 ```bash
-AGENT_MOSS_DISABLE_LLM=1 uv run --project ./AgentMoss --locked \
-  agent-moss server --host 127.0.0.1 --port 9090
+AGENT_MOSS_DISABLE_LLM=1 ./AgentMoss/.venv/bin/agent-moss \
+  server --host 127.0.0.1 --port 9090
 ```
 
 L1/L2 不需要模型凭据。启用 L3 时，需要配置模型接口、模型名称及 API Key，具体见 [AgentMoss 配置说明](./AgentMoss/README.md#配置)。
@@ -112,8 +106,8 @@ L1/L2 不需要模型凭据。启用 L3 时，需要配置模型接口、模型�
 在第二个终端中，从项目根目录启动 AgentGate，并指定 AgentMoss 的服务地址：
 
 ```bash
-uv run --project ./AgentGate --locked \
-  agent-gate server --host 127.0.0.1 --port 9100 \
+./AgentGate/.venv/bin/agent-gate \
+  server --host 127.0.0.1 --port 9100 \
   --security-url http://127.0.0.1:9090
 ```
 
@@ -158,6 +152,9 @@ API 调用使用 `Authorization: Bearer <token>`。浏览器可通过 `http://12
 | [Python 独立客户端](./AgentGate/sdk/python/gate_client.py) | 通过 AgentGate 提交分析请求 |
 | [QwenPaw 插件](./AgentMoss/integrations/qwenpaw-plugin/README.md) | 在权限检查环节接入 Gate/Moss |
 | [DeepAgents 插件](./AgentMoss/integrations/deepagents-plugin/README.md) | 通过中间件接入主代理与子代理的工具调用 |
+| [规则预筛配置](./AgentMoss/docs/预筛加速使用说明.md) | 启用 Hyperscan / Ultrascan、配置原生库及管理加速包 |
+
+长期运行时，先按上述步骤验证两个服务和真实分析请求，再参考 [AgentGate 部署说明](./AgentGate/README.md#部署) 配置服务托管、访问令牌和日志。跨机器部署时，需要让 AgentGate 能访问 AgentMoss 的监听地址，并显式配置 AgentMoss 令牌。
 
 ## 贡献、建议与交流
 

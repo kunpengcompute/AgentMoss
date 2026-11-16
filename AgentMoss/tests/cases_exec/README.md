@@ -2,7 +2,7 @@
 
 本目录将 `tests/cases/` 的 JSON 用例转为 Shell 命令集（`allow.sh` / `deny.sh`），用于检查 AgentMoss 和沙箱的行为。仅在隔离测试沙箱中运行，详见「安全提示与使用边界」。
 
-测试脚本和用例位于源码仓库的 `tests/` 目录，运行前先获取源码。Moss 引擎可通过 pip 或源码安装，见[安装说明](../../README.md#安装)。
+测试脚本和用例位于 `AgentMoss/` 组件的 `tests/` 目录，运行前按[安装说明](../../README.md#安装)安装本项目源码。本文相对路径以 `AgentMoss/` 组件目录为起点。
 
 ## 一、为什么需要
 
@@ -65,7 +65,7 @@ python3 generate_bash_exc.py --json-dir ../cases --output-dir ./xiaoo --agent xi
 | `--verify-static` | 关 | 生成后用 AgentMoss 静态判定（禁 L3）逐条校验 deny 命令，拦不住的整体移入 deny-needs-context.sh，保证主 deny.sh 每条静态必拦（需可 import agent_moss） |
 | `-v` / `--verbose` | 关 | 打印跳过明细（tool-type / agent-specific / needs-l3 等） |
 
-> 注：生成器唯一来源是 `tests/cases_exec/generate_bash_exc.py`（随 tests 分发，用户只拿 tests 目录也能完整运行）。仓库 `scripts/` 下的冗余副本已删除。
+> 注：生成器唯一来源是 `tests/cases_exec/generate_bash_exc.py`（随 tests 分发，用户只拿 tests 目录也能完整运行）。
 
 ### 子目录过滤（--scenario / --agent，追加语义）
 
@@ -206,8 +206,7 @@ bank 场景按目录白名单和禁 SSH 规则过滤命令。访问白名单外�
    `cases_exec/.env`（供 logic-10 的 os.listdir 写凭据判定）。
    **这些文件由 prep 创建、clean 删除，不入 git**；判定模式（§九）也从同一份 `assets/premise/`
    素材自动补齐，所以判定不依赖 prep。**改这些脚本内容只改 `assets/premise/`**（单一事实源）。
-   **读建、写不建原则**：命令里是**读目标**的文件（`grep/cat/ssh -i/crontab 读入/rsync 源/chown 源`）→ 建；是**写目标、新建语义**的文件（`wget -O / curl -o / echo> / touch`）→ **绝不建**。理由：read_before_write 判定依赖磁盘——写目标若已存在会判「写已有未读」Deny，污染 allow 的「新建下载」用例（见 allow-65/66/78、llm-06）。测试执行前由双端 `prepFileState`（Python `conftest._prep_file_state` / TS `json-cases.test.ts`）负责删/建对齐。
-   **读建、写不建原则**：命令里是**读目标**的文件（`grep/cat/ssh -i/crontab 读入/rsync 源/chown 源`）→ 建；是**写目标、新建语义**的文件（`wget -O / curl -o / echo> / touch`）→ **绝不建**。理由：read_before_write 判定依赖磁盘——写目标若已存在会判「写已有未读」Deny，污染 allow 的「新建下载」用例（见 allow-65/66/78、llm-06）。测试执行前由双端 `prepFileState`（Python `conftest._prep_file_state` / TS `json-cases.test.ts`）负责删/建对齐。
+   **读建、写不建原则**：命令里是**读目标**的文件（`grep/cat/ssh -i/crontab 读入/rsync 源/chown 源`）→ 建；是**写目标、新建语义**的文件（`wget -O / curl -o / echo> / touch`）→ **绝不建**。理由：read_before_write 判定依赖磁盘——写目标若已存在会判「写已有未读」Deny，污染 allow 的「新建下载」用例（见 allow-65/66/78、llm-06）。测试执行前由 `conftest._prep_file_state` 负责删除或创建相应文件。
 5. **系统级只读占位**：创建 `/var/log/app.log`、`/var/log/agent_moss/`、`/etc/ssh/*`（仅在可写时）、`/workspace/{src,data,docs,.env}`（不存在才建）——这些被 allow 命令 grep/cat 引用，只为避免"文件不存在"失败。**若 `/var/log` 当前不可写（如非 root）**，prep 会打印黄色警告说明 allow-04/09 的 `grep /var/log/app.log` 会报 No such file，并建议以 root 或可写用户重跑；若当前机器 `/etc` 不可写，`/etc/ssh/*`、`/workspace` 同样跳过并提示
 6. **生成 allow.sh/deny.sh**：调生成器 `--expand-user-home -u <URL_BASE>`，`AM_YOUR_HOME` → 当前用户家目录、所有非 127 外部域名 → `www.example.com`（丢弃子路径落根）。**不再二次 sed `AM_YOUR_HOME`**（避免把 `/home/` 误展开成 `/hoe/` 的 bug）
 7. **本地 HTTP 服务**：起 `assets/server.py`（127.0.0.1:9090），为命令里字面量 127 路径提供真实目标
@@ -403,7 +402,7 @@ sudo 用 `sudo` 提权 / 否则普通用户直写可写路径）：
 bash run_all.sh --scenario bank --layer l1 --use-agentmoss
 ```
 
-- 在当前 Python 环境中安装 Moss，可选择 pip 或源码安装，见[安装说明](../../README.md#安装)。
+- 在当前 Python 环境中安装本项目的 AgentMoss 源码，见[安装说明](../../README.md#安装)。
 - **不需要 `prep.sh`**：判定只读命令文本 + 少量 cwd 文件，不跑 shell；判某几条 deny 命令要用的
   前提文件（`deploy.sh` / `deploy.py` / `deploy_shift.sh` / `.env`）脚本会从
   `assets/premise/` **自己补齐**（只补缺的、不覆盖已有）。加 `--no-premise` 可完全不写盘。
@@ -461,7 +460,7 @@ bash run_all.sh --scenario bank --layer l1 --use-agentmoss # ③ 判定 →「�
    `[reset] …`）。加 `--no-reset-write-targets` 可关闭。
 
    写目标覆盖三类：`>`/`>>` 重定向、`wget -O`/`curl -o` 下载落盘、**`cp`/`mv`/`install` 的目标参数**
-   （**只删目标不删源**：`cp A B` 只删 B，A 是命令要读的）。前两类语义与双端测试基建
+   （**只删目标不删源**：`cp A B` 只删 B，A 是命令要读的）。前两类语义与测试中的文件准备逻辑
    `tests/conftest.py::_prep_file_state` 一致；`cp`、`mv` 和 `install` 的目标参数由判定脚本另外处理。
 
    （只对 allow 命令做：deny 命令的写目标常是 `~/.bashrc` 等用户持久化文件，删了会破坏沙箱环境；

@@ -6,17 +6,21 @@ Moss 负责安全检测并返回判定，Gate 负责接收 Agent 请求、调用
 
 ## 安装
 
-需要 Python 3.11 或更新版本。在运行 DeepAgents 的 Python 环境中，从
-[AgentMoss 商用仓库](https://gitcode.com/kenhkl/AgentMoss-commercial)源码安装，
-将路径替换为包含本插件的源码目录：
+需要 Python 3.11 或更新版本，并安装 uv。先获取[项目源码](../../../README.md#快速开始)，
+在仓库根目录为 DeepAgents 应用创建独立环境：
 
 ```bash
-python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'
+uv venv --python 3.12 .venv-deepagents
+uv pip install --python .venv-deepagents/bin/python -e './AgentMoss[deepagents-aio]'
+. .venv-deepagents/bin/activate
 ```
 
-该命令会安装插件及 `deepagents-aio` 可选依赖，具体约束见[主仓 pyproject.toml](../../pyproject.toml)。
-公共 PyPI 的 `agent-moss` 是包含 Brain 的上游完整版，不能替代商用源码；
-也不能据公共包名假定已包含本插件和 `deepagents-aio` extra。
+该命令会安装插件及 `deepagents-aio` 可选依赖，具体约束见[组件 pyproject.toml](../../pyproject.toml)。
+已有 DeepAgents 应用时，将 `--python` 指向该应用的虚拟环境，并使用 `AgentMoss/` 组件目录的实际路径。
+以上命令适用于 Linux/macOS；Windows 的虚拟环境入口位于 `Scripts/`。
+
+AgentGate 服务与 DeepAgents 应用应使用独立虚拟环境。两者的 `typing-extensions`
+版本要求不同，通过 HTTP 通信无需安装到同一环境。
 
 如果环境中单独安装过 `agentmoss-deepagents`，先卸载该包，再按上面的方式安装，避免同名模块相互覆盖。
 
@@ -262,7 +266,7 @@ result = await agent.ainvoke(
 
 ## 会话历史与升级
 
-同一会话的主agent 和 subagent 共用调用历史，由应用已有的 checkpointer 保存。插件不再记录主agent/subagent 的身份关系。
+同一会话的主代理和子代理共用调用历史，由应用已有的 checkpointer 保存。历史按会话组织，不记录主代理与子代理的身份关系。
 
 持久化历史最多保留 200 条动作、20 次用户输入和 32 KiB；应用可配置更小的窗口。运行时和 checkpoint 使用相同的窗口规则，稳定轮次顺序和裁剪边界防止旧快照恢复已淘汰的记录。超限时整条移除历史记录并标记 `truncated`，当前送检参数不会因此截短。`history_bytes` 必须容纳会话标识和裁剪元数据；过小会在请求开始时明确报错。同一次根调用另行保存已开始的执行 ID，历史被移除后，SDK 节点重试也不会再次执行相同工具调用。这份去重集合只在本次调用内有效，不写入 checkpoint；跨进程恢复仍需应用核对已发生的副作用。
 
@@ -278,14 +282,16 @@ result = await agent.ainvoke(
 
 ## 测试
 
-在主仓根目录、安装了本地 `deepagents-aio` 可选依赖的 Python 3.11+ 环境中执行：
+完成上述安装后，在仓库根目录使用 DeepAgents 应用环境执行：
 
 ```bash
-python -m pip install pytest pytest-asyncio
-python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q
+uv pip install --python .venv-deepagents/bin/python pytest pytest-asyncio
+.venv-deepagents/bin/python -m pytest \
+  -c AgentMoss/integrations/deepagents-plugin/pyproject.toml \
+  AgentMoss/integrations/deepagents-plugin/tests -q
 ```
 
-主仓的 `python -m pytest -q` 不会收集这里的用例。离线测试使用模拟 HTTP 服务和真实工具调用；
+`AgentMoss/` 组件的默认测试命令不会收集这里的用例。离线测试使用模拟 HTTP 服务和真实工具调用；
 真实 AIO 用例默认跳过，环境变量和服务要求见 [test_aio_live.py](tests/test_aio_live.py)。
 
 [官方 Middleware 文档](https://docs.langchain.com/oss/python/langchain/middleware/custom)

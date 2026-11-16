@@ -2,7 +2,7 @@
 
 本目录提供 Agent 接入插件，将工具调用发送给 Gate，由 Moss 检查并返回安全判定。
 
-Moss 支持通过 pip 或源码安装，见[安装说明](../README.md#安装)。Gate 和 Moss 的启动方法见[服务部署说明](deepagents-plugin/docs/deployment.md)。
+AgentMoss 从本项目源码安装，见[安装说明](../README.md#安装)。Gate 和 Moss 的启动方法见[服务部署说明](deepagents-plugin/docs/deployment.md)。
 
 ## deepagents-plugin/
 
@@ -39,9 +39,9 @@ Moss 支持通过 pip 或源码安装，见[安装说明](../README.md#安装)�
 ### 安装
 
 ```bash
-# 将源码路径换成实际位置
+# 在仓库根目录执行
 mkdir -p ~/.qwenpaw/plugins/agentmoss-gate
-cp -R /path/to/AgentMoss/integrations/qwenpaw-plugin/. ~/.qwenpaw/plugins/agentmoss-gate/
+cp -R ./AgentMoss/integrations/qwenpaw-plugin/. ~/.qwenpaw/plugins/agentmoss-gate/
 # 创建配置文件，填写 Gate 地址和令牌
 cp ~/.qwenpaw/plugins/agentmoss-gate/config.example.json \
    ~/.qwenpaw/plugins/agentmoss-gate/config.json
@@ -51,10 +51,10 @@ cp ~/.qwenpaw/plugins/agentmoss-gate/config.example.json \
 
 ### 测试
 
-先激活 QwenPaw 的 Python 环境，再运行：
+先激活 QwenPaw 的 Python 环境，再从仓库根目录运行：
 
 ```bash
-python /path/to/AgentMoss/integrations/qwenpaw-plugin/test_agentmoss_gate_plugin.py
+python ./AgentMoss/integrations/qwenpaw-plugin/test_agentmoss_gate_plugin.py
 ```
 
 测试覆盖允许、拒绝、连接故障处理和调用上下文提取。

@@ -3,11 +3,8 @@
 AgentGate 是 AI Agent 数据采集与安全分析中间层。Agent 在每次工具调用前把动作发给
 AgentGate，AgentGate 采集系统上下文并转发给 AgentMoss 判定，返回 `Allow` / `Deny`。
 
-本仓库是 **Python + V1** 裁剪版：
-
-- 只保留 SDK / 主动上报模式（`agent-gate server`）；
-- 不包含 TypeScript 实现；
-- 不包含 V3 的 API 代理、PTY、eBPF、MCP、trigger、sessionlog、dashboard 代理等模块。
+本组件使用 Python 实现，提供 V1 HTTP API、Python SDK 和可视化看板。
+接入方在执行工具前主动提交动作，并根据返回的判定执行或拒绝该动作。
 
 ## 架构
 
@@ -27,17 +24,23 @@ AgentGate 负责：
 
 ## 安装
 
-要求 Python >= 3.10。
+要求 Python >= 3.10，推荐 Python 3.12。完整双服务安装流程见[项目快速开始](../README.md#快速开始)。以下命令在仓库根目录执行，先准备 AgentGate 的独立环境：
+
+```bash
+uv venv --python 3.12 ./AgentGate/.venv
+uv pip install --python ./AgentGate/.venv/bin/python -e ./AgentGate
+```
+
+安装后使用 `./AgentGate/.venv/bin/agent-gate` 启动网关。也可以只拷贝
+`sdk/python/gate_client.py` 作为独立客户端使用，不依赖本包；默认鉴权开启时
+需传 `api_token=` 或设置 `AGENT_GATE_AUTH_TOKEN`。
 
 **前置依赖：AgentMoss 必须单独安装并启动。** AgentGate 只负责采集上下文和转发，
 真实的 Allow/Deny 判定由 AgentMoss 完成：
 
 ```bash
-pip install agent-moss
-agent-moss --version
-
-# 启动 AgentMoss 后，默认在 127.0.0.1:9090 提供 /api/v1/analyze
-agent-moss server --host 127.0.0.1 --port 9090
+uv venv --python 3.12 ./AgentMoss/.venv
+uv pip install --python ./AgentMoss/.venv/bin/python -e ./AgentMoss
 ```
 
 AgentMoss 默认开启鉴权（`AGENT_MOSS_AUTH_MODE=auto`），首次启动会在
@@ -51,25 +54,15 @@ AgentMoss 默认开启鉴权（`AGENT_MOSS_AUTH_MODE=auto`），首次启动会�
 > `AgentMoss security service unavailable: ...`），这不是正常的安全判定结果，
 > 不能用于验收。
 
-安装 AgentGate：
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .
-```
-
-安装后会得到 `agent-gate` 命令行。
-
-也可以只拷贝 `sdk/python/gate_client.py` 作为独立客户端使用，不依赖本包。
-默认鉴权开启时需传 `api_token=` 或设置 `AGENT_GATE_AUTH_TOKEN`。
-
 ## 快速开始
 
-1. 先安装并启动 AgentMoss（见「安装」），等待就绪：
+以下步骤均从仓库根目录执行。
+
+1. 启动 AgentMoss，使用不需要模型凭据的 L1/L2 检测：
 
 ```bash
-agent-moss server --host 127.0.0.1 --port 9090
+AGENT_MOSS_DISABLE_LLM=1 ./AgentMoss/.venv/bin/agent-moss \
+  server --host 127.0.0.1 --port 9090
 ```
 
 另开终端：
@@ -87,7 +80,7 @@ export MOSS_TOKEN=$(cat ~/.config/agentmoss/auth_token)
 ```bash
 MOSS_URL=http://127.0.0.1:9090 \
 AGENT_GATE_MOSS_TOKEN="$MOSS_TOKEN" \
-agent-gate server --host 0.0.0.0 --port 9100
+./AgentGate/.venv/bin/agent-gate server --host 127.0.0.1 --port 9100
 ```
 
 3. 等待并检查 AgentGate 健康：
@@ -123,7 +116,10 @@ curl -X POST http://127.0.0.1:9100/api/v1/analyze \
 
 ## CLI
 
+以下命令在 `AgentGate/` 组件目录执行，并先激活其虚拟环境：
+
 ```bash
+. .venv/bin/activate
 agent-gate --version
 agent-gate server --host 0.0.0.0 --port 9100 [--config config/agent_gate.yaml] [--db-path /path/to.db]
 agent-gate clean --retention-days 30 [--config config/agent_gate.yaml]
@@ -224,7 +220,7 @@ app = create_app()
 | `collected_context` | object/null | AgentGate 采集的系统上下文 |
 | `source` | string | 结果来源：`agent_moss` / `cache`。AgentMoss 不可用时的 fail-closed Deny 也标为 `agent_moss`，用 `risk_type=service_unavailable` / `analysis_timeout` 区分 |
 
-`GET /api/v1/sessions/{session_id}/traces` 的轨迹字段名为 `tool_calls`（与 TS 版一致，旧字段 `traces` 已移除）。
+`GET /api/v1/sessions/{session_id}/traces` 使用 `tool_calls` 字段返回调用轨迹。
 
 #### GET /api/v1/health
 
@@ -261,7 +257,7 @@ app = create_app()
 | `AGENT_GATE_AUTH_TOKEN_FD` | 从文件描述符读取 token |
 | `AGENT_GATE_AGENT_TOKENS` | 逐 agent token，如 `opendesk=tok-a,qwenpaw=tok-b` |
 
-看板和 Console 的浏览器导航无法带 Bearer 头，因此支持 `?token=<token>`
+看板的浏览器导航无法带 Bearer 头，因此支持 `?token=<token>`
 （服务端换取 Cookie）。跨源访问通过 `AGENT_GATE_CORS_ORIGINS` 控制。
 
 #### AgentGate 调 AgentMoss 的鉴权（AgentMoss 401）
@@ -282,8 +278,7 @@ AGENT_GATE_MOSS_TOKEN
 ```
 
 > **root/systemd 注意**：AgentMoss（sudo/systemd/直接运行）和 AgentGate 在 root
-> 下都把数据目录固定为 `/root/.config/agentmoss`，两边默认查找路径一致，不再按
-> `SUDO_USER` 猜测。若 AgentGate 以**非 root** 用户运行，则读不到 root 家目录
+> 下默认使用 `/root/.config/agentmoss`，两边默认查找路径一致。若 AgentGate 以**非 root** 用户运行，则读不到 root 家目录
 > 下 0600 的 token，必须显式配置 `AGENT_GATE_MOSS_TOKEN` /
 > `AGENT_MOSS_AUTH_TOKEN_FILE`，或给两边设置同一个可读的 `AGENT_MOSS_DATA_DIR`。
 
@@ -367,9 +362,26 @@ $XDG_DATA_HOME/agent_gate/agent_gate.db
 
 ## 部署
 
+Linux 环境可使用 systemd 托管网关。在 `AgentGate/` 组件目录执行安装脚本：
+
 ```bash
 bash scripts/install-systemd-py.sh
+```
+
+脚本会检查并按需创建 `AgentGate/venv/`，使用这个环境中的 `agent-gate`，
+然后询问是否安装、启动 `agentgate.service`。该环境与快速开始中的 `.venv/`
+路径不同。安装前应先完成双服务健康检查与真实分析验证，并按上面的鉴权说明
+配置网关访问 AgentMoss 的地址和令牌。
+
+查看状态：
+
+```bash
 bash scripts/status-agentgate-py.sh
+```
+
+需要卸载服务时执行：
+
+```bash
 bash scripts/uninstall-systemd-py.sh
 ```
 
@@ -381,8 +393,11 @@ agent-gate server --host 0.0.0.0 --port 9100
 
 ## 开发与测试
 
+在 `AgentGate/` 组件目录执行：
+
 ```bash
-PYTHONPATH=. python3 -m pytest agent_gate/tests/v1 -q
+uv pip install --python .venv/bin/python -e '.[dev]'
+.venv/bin/python -m pytest agent_gate/tests -q
 ```
 
 ## 目录结构

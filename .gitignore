@@ -1,2 +1,6 @@
 # Local Git worktrees are separate checkouts, not component source.
 .worktrees/
+
+# Local Python environments.
+.venv-deepagents/
+.venv-moss-test/

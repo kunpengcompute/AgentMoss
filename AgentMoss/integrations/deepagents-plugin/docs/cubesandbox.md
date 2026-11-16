@@ -22,24 +22,23 @@ DeepAgents 主代理 / 子代理
 
 ## 安装与连接前提
 
-在 DeepAgents 应用环境中，从 AgentMoss 商用仓库源码安装插件及可选依赖，命令见[插件安装说明](../README.md#安装)。
+在 DeepAgents 应用环境中，从本项目的 `AgentMoss/` 组件目录安装插件及可选依赖，命令见[插件安装说明](../README.md#安装)。
 
 应用提前准备已启动的外部 Gate/Moss、已创建的 CubeSandbox 沙箱及可访问的 CubeProxy 地址。Gate token 与 CubeSandbox 流量 token 不同；AIO 端口/路由域名使用默认值时，插件发送 Host: 8080-<sandbox_id>.cube.app。
 
 ## 沙箱中的脚本检查
 
-在构建 AIO 镜像时，将商用 Moss 源码复制到镜像中，再安装到运行 `shell.py` 的 Python 环境：
+在构建 AIO 镜像时，将 `AgentMoss/` 组件源码复制到镜像中，安装到运行 `shell.py` 的 Python 环境。下面的 `/opt/aio-venv/bin/python` 和源码目录需替换为镜像内的实际路径，构建环境需提供 uv：
 
 ```bash
-python -m pip install -e /path/to/AgentMoss
+uv pip install --python /opt/aio-venv/bin/python /opt/agentmoss-source/AgentMoss
 ```
 
-路径指镜像内的商用源码目录，使用 `-e` 后需保留该目录。不要安装公共 PyPI 的同名上游完整版；
-源码来源见[主项目安装说明](../../../README.md#安装)。
+上例将组件安装到镜像环境中。源码获取方法见[AgentMoss 安装说明](../../../README.md#安装)。
 
 安装后，在 `/v1/shell/exec` 的执行入口调用 `judge_security()`：允许后执行 Bash，拒绝时返回 HTTP 403，检查故障时返回 503。
 
-[执行入口适配示例](https://gitcode.com/wade_wolzzi/AgentMoss/tree/f1049f1c31ebf38facfe16bee37acb018ee9706c/delivery/aio-sdk-20261111/image)面向 AIO 1.11.0 ARM64 / Python 3.12。使用其他 AIO 版本或架构时，需要调整适配代码。用接入 Moss 的镜像创建沙箱；实例的创建和销毁由应用的控制面负责。
+沙箱内部的入口适配需要由镜像维护者按实际 AIO 版本实现，并独立验证拒绝、故障处理和脚本读取行为。安装 AgentMoss Python 包不会自动改写 AIO 的执行入口。用已完成接入的镜像创建沙箱；实例的创建和销毁由应用负责。
 
 文件 API、用于独占创建文件的 `/v1/code/execute` 和 CubeSandbox `commands.run()` 不经过这个 shell 入口。DeepAgents 的文件工具调用仍由客户端插件发送到 Gate 检查。`write_file` 要求 AIO 的 Python 代码执行接口可用，并显式使用 `stateful=false`；不创建持久 Python 会话。
 
@@ -97,7 +96,7 @@ async def run_once(model, existing_checkpointer, session_id, user_text):
 
 服务应用应在启动时创建并复用集成实例和 agent；上面的单次函数用于展示完整的创建、送检和关闭关系。每个隔离子代理都要添加本插件中间件；DeepAgents 给声明式子代理配置同一 backend，自定义编译图则由应用负责。
 
-不再额外下载官方 sandbox_backend.py，也不把独立 CubeSandbox SDK 的 commands.run() 混入这条路径；后者走 envd，不经过 AIO shell.py。
+本插件通过 `agent-sandbox` SDK 调用 AIO。CubeSandbox SDK 的 `commands.run()` 走 envd，不经过 AIO 的 `shell.py`，不能替代这里的执行路径。
 
 ## 配置和路径
 

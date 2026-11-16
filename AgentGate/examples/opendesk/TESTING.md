@@ -1,148 +1,70 @@
-# AgentGate V1 × OpenDesk 效果测试指南
+# OpenDesk 接入测试
 
-## 测试分 3 层
+先按[项目快速开始](../../../README.md#快速开始)安装并启动 AgentMoss 和 AgentGate。
+本指南检查网关接口与判定链路；实际工具是否被阻止，还需要在 Agent 侧验证。
 
-```
-Layer 1: 单元/回归测试   → 不需要外部服务
-Layer 2: 接口测试        → 启动 AgentGate，curl 模拟 OpenDesk 调用
-Layer 3: 全链路测试      → Agent 侧接入 HTTP API，验证 Allow / Deny
-```
+## 单元测试
 
-以下命令都在 AgentGate 仓库根目录执行。
-
----
-
-## Layer 1: 单元/回归测试
+在 `AgentGate/` 组件目录执行，测试不需要另外启动服务：
 
 ```bash
-PYTHONPATH=. python3 -m pytest agent_gate/tests/v1 -q
-# 223 passed
+uv pip install --python .venv/bin/python -e '.[dev]'
+.venv/bin/python -m pytest agent_gate/tests -q
 ```
 
----
+## 接口与判定
 
-## Layer 2: 接口测试（不需要改 Agent）
-
-### 2.1 启动服务
+先查看健康状态：
 
 ```bash
-# 终端 1：AgentMoss（默认 9090）
-agent-moss server --host 127.0.0.1 --port 9090
-
-# 终端 2：AgentGate V1
-agent-gate server --mode http --host 127.0.0.1 --port 9100 \
-  --security-url http://127.0.0.1:9090 \
-  --db-path /tmp/agent_gate_opendesk_test.db
+curl -sS http://127.0.0.1:9100/api/v1/health
 ```
 
-### 2.2 用 curl 模拟 OpenDesk 调用
+应有 `moss_status: "healthy"` 和 AgentMoss 的实际版本号。
+随后读取 AgentGate 令牌并提交只读命令：
 
 ```bash
-curl -s -X POST http://127.0.0.1:9100/api/v1/analyze \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "agent_type": "opendesk",
-    "session_id": "opendesk-session-001",
-    "tool_name": "executeBash",
-    "command": "ls -la",
-    "cwd": "/home/user/project",
-    "user_prompt": "查看项目文件"
-  }' | python3 -m json.tool
+GATE_TOKEN=$(cat ~/.config/agentgate/auth_token)
+curl -sS http://127.0.0.1:9100/api/v1/analyze \
+  -H "Authorization: Bearer $GATE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_type":"opendesk","session_id":"opendesk-readonly","tool_name":"executeBash","command":"ls -la","user_prompt":"查看项目文件","action_history":[]}'
 ```
 
-默认鉴权模式下需要 Bearer token；本地联调可先设置
-`AGENT_GATE_AUTH_MODE=off` 启动服务，或从 `<data_root>/auth_token` 读取 token。
-
-预期看到：
-
-```json
-{
-  "decision": "Allow",
-  "reason": "...",
-  "risk_level": "low",
-  "collected_context": { "...": "..." }
-}
-```
-
-### 2.3 验证 session 历史自动累积
+预期 `decision` 为 `Allow`。再提交访问 SSH 私钥的命令文本，验证拦截：
 
 ```bash
-for cmd in "ls -la" "cat README.md" "whoami"; do
-  curl -s -X POST http://127.0.0.1:9100/api/v1/analyze \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer <token>" \
-    -d "{
-      \"agent_type\": \"opendesk\",
-      \"session_id\": \"opendesk-session-001\",
-      \"tool_name\": \"executeBash\",
-      \"command\": \"$cmd\",
-      \"cwd\": \"/home/user/project\"
-    }" > /dev/null
-done
-
-curl -s -H "Authorization: Bearer <token>" \
-  http://127.0.0.1:9100/api/v1/sessions/opendesk-session-001/traces \
-  | python3 -m json.tool
+curl -sS http://127.0.0.1:9100/api/v1/analyze \
+  -H "Authorization: Bearer $GATE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_type":"opendesk","session_id":"opendesk-sensitive","tool_name":"executeBash","command":"cat ~/.ssh/id_rsa","user_prompt":"查看项目文件","action_history":[]}'
 ```
 
-预期 `tool_call_count: 3`，`tool_calls` 数组有 3 条记录。
+预期 `decision: "Deny"`、`risk_type: "file_access"`。上述请求只做分析，
+不会执行命令或读取私钥。`service_unavailable` / `analysis_timeout` 表示服务链路异常，
+不能作为规则拦截通过的证据。
 
-### 2.4 自动化脚本
+令牌使用自定义路径时，请按实际配置读取，见 [AgentGate 鉴权说明](../../README.md#鉴权)。
+
+## 会话历史
+
+使用一个新的 `session_id` 连续提交三次只读命令，省略 `action_history`，
+让 AgentGate 从数据库补齐上下文。然后查询：
 
 ```bash
-python3 examples/opendesk/test_integration.py
-# 自动启动两个服务并跑完整链路的版本：
-python3 examples/opendesk/test_e2e.py
+curl -sS \
+  -H "Authorization: Bearer $GATE_TOKEN" \
+  http://127.0.0.1:9100/api/v1/sessions/你的会话ID/traces
 ```
 
----
+新会话应有三条 `tool_calls`。显式传入 `action_history: []` 会让本次分析使用空历史，
+与省略该字段的行为不同。
 
-## Layer 3: Agent 侧全链路接入
+## Agent 侧验证
 
-本裁剪版只提供 Python 服务端与 HTTP 契约，不包含 TypeScript 插件。
-Agent 侧（任何语言）在工具调用前调用 `POST /api/v1/analyze` 即可：
+参照[接入示例](README.md#python-接入)，在真实工具入口调用网关。
+检查只读命令是否执行、被拒绝的命令是否没有执行，并确认主代理和子代理都经过检查。
 
-```python
-from agent_gate.v1.sdk import GateClient
-
-client = GateClient(base_url="http://127.0.0.1:9100", api_token="<token>")
-
-result = client.analyze(
-    agent_type="opendesk",
-    session_id="opendesk-session-001",
-    tool_name="executeBash",
-    command="ls -la",
-    cwd="/home/user/project",
-    user_prompt="查看项目文件",
-)
-
-if result["decision"] == "Deny":
-    raise RuntimeError(result["reason"])
-```
-
-### 预期效果
-
-| 验证项 | 预期结果 | 如何验证 |
-|--------|----------|----------|
-| 安全命令放行 | `ls`、`cat`、`echo` 等正常执行 | 返回 `decision: Allow` |
-| 危险命令拦截 | `rm -rf /`、`curl \| bash` 等 | 返回 `decision: Deny` |
-| Session 历史累积 | 同一会话后续命令包含前面历史 | `GET /api/v1/sessions/{id}/traces` |
-| AgentMoss 不可用 | Fail-Closed，返回 Deny | 停掉 AgentMoss 后重试 |
-| 系统上下文采集 | 响应带 OS / 用户 / 进程信息 | 查看 `collected_context` |
-
----
-
-## 快速验证（最简路径）
-
-```bash
-# 1. 启动 AgentGate（联调可先关鉴权）
-AGENT_GATE_AUTH_MODE=off agent-gate server --mode http --port 9100
-
-# 2. 发一条危险命令
-curl -s -X POST http://127.0.0.1:9100/api/v1/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"agent_type":"opendesk","session_id":"test-001","tool_name":"executeBash","command":"rm -rf /","cwd":"/home/user"}'
-
-# 3. 预期 decision=Deny, risk_level=critical
-```
+在独立测试环境中暂时停止 AgentMoss，再调用网关，应得到 `Deny`，且风险类型为
+`service_unavailable`。恢复 AgentMoss 后重新检查健康状态和只读请求。
+该检查用于验证服务故障时停止执行的行为，不要在共享服务上直接操作。

@@ -1,6 +1,6 @@
 # script_match —— 脚本内容扫描匹配基准（供 CPU 级匹配提速验证）
 
-本目录提供给做正则匹配加速的同事：**`scripts/` 下每个脚本文件，都用 `rules.txt` 里的全部正则做匹配**。
+本目录用于验证正则匹配加速：**`scripts/` 下每个脚本文件，都用 `rules.txt` 里的全部正则做匹配**。
 规则集与脚本都无第三方依赖，读取方式见下。
 
 ## 目录结构
@@ -107,8 +107,10 @@ base64\s+(-d|--decode)\s*\|
 
 ```bash
 # 从引擎重新提取规则（引擎规则改动后重跑，本脚本从引擎动态读取，不再手写规则）
-cd /path/to/AgentMoss/tests/cases_exec/script_match
-AGENT_MOSS_ROOT=/path/to/AgentMoss python3 extract_rules.py
+# 在仓库根目录设置组件路径，再进入测试目录
+export AGENT_MOSS_ROOT="$PWD/AgentMoss"
+cd AgentMoss/tests/cases_exec/script_match
+python3 extract_rules.py
 
 # 匹配基准：对 scripts/ 每个文件 × rules.txt 所有正则
 # （同事在此实现加速版本后替换）
