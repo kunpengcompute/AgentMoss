@@ -17,7 +17,7 @@ class GateConfig:
     enabled: bool = True
     gate_url: str = "http://127.0.0.1:9100"
     timeout_seconds: float = 5.0
-    fail_closed: bool = False
+    fail_closed: bool = True
     request_bytes: int = 256 * 1024
     history_actions: int = 200
     history_turns: int = 20

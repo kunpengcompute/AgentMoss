@@ -37,7 +37,7 @@ def test_delete_is_analysis_only(adapter, tmp_path):
     args = {"file_path": "/a b.txt"}
     action = adapter.adapt("delete", args)
     assert action.tool_name == "bash"
-    assert action.command == f"rm -- '{target}'"
+    assert action.command == f"rm -r -- '{target}'"
     assert action.metadata["synthetic_action"] is True
     assert args == {"file_path": "/a b.txt"}
     assert target.read_text() == "keep"
@@ -78,7 +78,7 @@ def test_configuration_rejects_missing_credentials_and_bad_values(tmp_path):
             GateConfig.load(path)
     path.write_text(json.dumps({"api_token_file": str(token)}))
     config = GateConfig.load(path)
-    assert config.fail_closed is False
+    assert config.fail_closed is True
     assert config.timeout_seconds == 5
     assert "secret-test-value" not in repr(config)
     assert GateConfig.load(path).gate_url == "http://127.0.0.1:9100"

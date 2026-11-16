@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from threading import RLock
 from uuid import uuid4
 
 from langgraph.config import get_config
@@ -10,6 +11,7 @@ from .history import KEY, RunHistory
 from .runtime import GateRuntime
 
 _RUN_KEY = "_agentmoss_run"
+_INITIALIZATION_LOCK = RLock()
 
 
 @dataclass(frozen=True)
@@ -48,19 +50,43 @@ def current_run(context: object, thread_id: str | None = None) -> RunContext:
 
 
 def begin_run(runtime_context: object, state: dict, gate_runtime: GateRuntime) -> RunContext:
+    return ensure_run(runtime_context, state, gate_runtime, new_turn=True)
+
+
+def ensure_run(
+    runtime_context: object, state: dict, gate_runtime: GateRuntime, *, new_turn: bool = False
+) -> RunContext:
+    """Restore native continuations without requiring before_agent to run again."""
+    # Synchronous ToolNode workers can restore the same fresh moss_info at once.
+    # Publish exactly one history/leaf lock before admitting either worker. This
+    # short critical section contains no Gate requests or backend operations.
+    with _INITIALIZATION_LOCK:
+        return _initialize_run(runtime_context, state, gate_runtime, new_turn=new_turn)
+
+
+def _initialize_run(runtime_context: object, state: dict, gate_runtime: GateRuntime, *, new_turn: bool) -> RunContext:
     thread_id = get_config().get("configurable", {}).get("thread_id")
     info = moss_info(runtime_context, thread_id)
     if _RUN_KEY in info:
         run = current_run(runtime_context, thread_id)
         run.history.merge(state.get(KEY, {}))
         return run
+    history = RunHistory(info["session_id"], state.get(KEY, {}), gate_runtime.config)
+    current = history.value["current_turn"]
+    if not new_turn and current is None:
+        raise ValueError("Cannot restore an AgentMoss run without a checkpoint turn")
+    if not new_turn:
+        prompt = next((turn for turn in history.value["turns"] if turn["id"] == current["id"]), None)
+        if prompt is not None and prompt["text"] != gate_runtime.redact(info["user_prompt"]):
+            raise ValueError("Resumed moss_info.user_prompt must match the original turn")
     run = RunContext(
         owner=info,
         session_id=info["session_id"],
         user_prompt=info["user_prompt"],
-        turn_id=str(uuid4()),
-        history=RunHistory(info["session_id"], state.get(KEY, {}), gate_runtime.config),
+        turn_id=str(uuid4()) if new_turn else current["id"],
+        history=history,
     )
-    run.history.record_prompt(run.turn_id, gate_runtime.redact(run.user_prompt))
+    if new_turn:
+        run.history.record_prompt(run.turn_id, gate_runtime.redact(run.user_prompt))
     info[_RUN_KEY] = run
     return run

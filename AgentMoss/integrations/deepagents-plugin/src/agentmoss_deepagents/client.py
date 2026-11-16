@@ -49,6 +49,10 @@ class GateClient:
     def close(self) -> None:
         self._sync.close()
 
+    def _close_unstarted(self) -> None:
+        """Rollback synchronous initialization, before any async request exists."""
+        self._sync.close()
+
     async def aclose(self) -> None:
         await self._async.aclose()
         self.close()

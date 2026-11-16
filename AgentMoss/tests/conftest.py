@@ -394,6 +394,30 @@ _DL_WRITE_RE = re.compile(
 )
 
 
+#: 允许 `_prep_file_state` 增删文件的根目录。**必须是测试沙箱**。
+#:
+#: 2026-11 事故：用例 `echo agentmoss-probe > AM_YOUR_HOME/.profile` 里的
+#: AM_YOUR_HOME 展开成真实 `/home/hkl`，本函数为了让「写新建」判定可复现，
+#: 对目标执行了 `os.remove()` —— **每跑一次 tests/test_all_cases.py 就删一次
+#: 用户的真实 ~/.profile**（原仓已修，此仓同步）。
+_PREP_SAFE_ROOTS = ("/tmp/", "/var/tmp/", "/dev/shm/", tempfile.gettempdir() + "/")
+
+
+def _is_safe_prep_target(target: str) -> bool:
+    """目标是否位于测试沙箱内（真实家目录 / 系统目录一律拒绝）。"""
+    try:
+        real = os.path.realpath(target)
+        home = os.path.realpath(os.path.expanduser("~"))
+        if real == home or real.startswith(home + os.sep):
+            return False
+        for root in _PREP_SAFE_ROOTS:
+            if real.startswith(os.path.realpath(root)):
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
 def _prep_file_state(case: dict, profile) -> None:
     """执行 analyze 前对齐 write 目标文件的可复现状态（删新建 / 建已有）。
 
@@ -431,6 +455,9 @@ def _prep_file_state(case: dict, profile) -> None:
     write_targets = list(dict.fromkeys(p for p in write_targets if p and p.startswith("/")))
 
     for target in write_targets:
+        # 安全闸门：绝不在真实家目录 / 系统目录里增删文件（2026-11 事故）
+        if not _is_safe_prep_target(target):
+            continue
         is_read_before = any(
             target == rp or target.startswith(rp) or rp.startswith(target)
             for rp in history_read

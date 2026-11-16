@@ -48,12 +48,12 @@ async def test_environment_runtime_sends_token_and_applies_policy(monkeypatch):
 async def test_application_config_is_explicit_and_not_mixed_with_environment(monkeypatch):
     monkeypatch.setenv("DEEPAGENTS_GATE_API_TOKEN", "environment-secret")
     monkeypatch.setenv("DEEPAGENTS_GATE_FAIL_CLOSED", "true")
-    source = {"api_token": "application-secret", "timeout_seconds": 3}
+    source = {"api_token": "application-secret", "timeout_seconds": 3, "fail_closed": False}
     runtime = GateRuntime.load(source)
     try:
         assert runtime.client.token == "application-secret"
         assert runtime.config.fail_closed is False
-        assert source == {"api_token": "application-secret", "timeout_seconds": 3}
+        assert source == {"api_token": "application-secret", "timeout_seconds": 3, "fail_closed": False}
         assert runtime.redact("application-secret") == "[redacted]"
     finally:
         await runtime.aclose()

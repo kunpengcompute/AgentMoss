@@ -23,15 +23,42 @@
 
 ## 安装
 
-要求 Python >= 3.10。
+需要 Python 3.10 或更新版本。建议先创建虚拟环境：
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e .
 ```
 
-安装后会得到 `agent-moss` 命令行。
+商用裁剪版从本仓库源码安装。公共 PyPI 上的 `agent-moss` 是上游完整版，
+不能作为本仓库的安装来源：
+
+```bash
+git clone https://gitcode.com/kenhkl/AgentMoss-commercial.git AgentMoss
+cd AgentMoss
+python -m pip install -e .
+```
+
+`-e` 会直接使用当前目录的源码，修改代码后无需重新安装。安装完成后可使用 `agent-moss` 命令。
+
+### 在 DeepAgents 中启用安全检查
+
+如果你的 Agent 使用 DeepAgents 开发，可以接入本插件，在执行工具前检查操作是否安全。
+插件把工具名称和参数发给 AgentGate，由 AgentGate 调用 Moss 分析。
+返回 `Allow` 时继续执行，返回 `Deny` 时拒绝这次工具调用。
+
+接入分为三步：
+
+1. **启动 Gate 和 Moss 服务。** Gate 接收插件的检查请求，Moss 给出安全判定。部署方法见[部署说明](integrations/deepagents-plugin/docs/deployment.md)。
+2. **把插件装到运行 DeepAgents 的 Python 环境中。** 使用 Python 3.11 或更新版本，先激活该应用的虚拟环境，再执行：
+
+   ```bash
+   python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'
+   ```
+
+   将路径替换为包含本插件的商用源码目录；公共 PyPI 的同名包不能替代该安装。
+
+3. **在 DeepAgents 应用代码中接入插件。** 配置 Gate 地址和访问令牌，并修改创建 Agent 的代码，为主代理和每个子代理添加插件的检查组件。完整代码见[插件接入说明](integrations/deepagents-plugin/README.md)。
 
 ## 快速开始
 
@@ -323,15 +350,37 @@ agent-moss rules status
 | `AGENT_MOSS_SCENARIO` | 部署级默认场景 ID |
 | `AGENT_MOSS_DATA_DIR` | 数据目录 |
 | `AGENT_MOSS_LOG_PATH` | LLM prompt 日志路径 |
+| `AGENT_MOSS_ACCEL` | 命令规则预筛加速开关，默认 `0`（关闭），设置为 `1` 后启用 |
+| `AGENT_MOSS_ACCEL_DB` | 加速包专用目录；自动生成需要可写的真实目录 |
+| `AGENT_MOSS_ACCEL_AUTO_BUILD` | 自动生成与更新加速包，默认 `1`；设为 `0` 时只加载手动生成的包 |
+| `AGENT_MOSS_ACCEL_LIB` | Hyperscan / Ultrascan 原生库路径；关闭加速时不需要安装 |
+| `AGENT_MOSS_ACCEL_BACKEND` | 原生库类型：`hyperscan` 或 `ultrascan` |
+
+开启加速后，后台自动生成加速包并跟随生效规则更新，也支持手动生成。参见 [使用说明](docs/预筛加速使用说明.md)、[设计说明](docs/预筛加速设计.md) 和 [测试说明](docs/预筛加速测试说明.md)。
 
 ## 开发与测试
 
+在仓库根目录执行。完整验证（含 DeepAgents 插件）需要 Python 3.11 或更新版本，
+先安装本地源码的可选依赖和测试工具：
+
 ```bash
-python3 -m pip install pytest pytest-asyncio
+python -m pip install -e '.[deepagents-aio]' pytest pytest-asyncio
+```
+
+主仓测试：
+
+```bash
 AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
 ```
 
-上游记录的裁剪版全量回归：**3128 passed, 136 skipped**。
+DeepAgents 插件测试必须单独运行：根目录 `pytest.ini` 的 `testpaths = tests`
+不会收集插件用例。显式加载插件配置，以启用异步测试并使用插件源码：
+
+```bash
+python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q
+```
+
+真实 AIO 测试需要单独配置服务地址，未配置时跳过；配置方式见[插件测试说明](integrations/deepagents-plugin/README.md#测试)。
 
 测试语料位于 `tests/cases/`，双端一致性 golden 数据位于 `tests/parity/`
 （裁剪后只校验 Python 侧行为，不依赖 TypeScript 源码）。
@@ -358,7 +407,7 @@ agent_moss/
 └── console/            # 运行时控制台
 tests/                  # 回归测试与用例
 config/                 # 示例配置
-integrations/           # 集成示例（QwenPaw、DeepAgents 插件）
+integrations/           # 集成示例（QwenPaw 插件）
 ```
 
 ## License

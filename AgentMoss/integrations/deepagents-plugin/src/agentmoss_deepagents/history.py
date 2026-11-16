@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import threading
 from collections.abc import AsyncGenerator, Callable, Generator
@@ -10,129 +9,66 @@ from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from functools import wraps
 from typing import TYPE_CHECKING, Annotated, Any
-from uuid import UUID, uuid5
 
 from langchain.agents.middleware import AgentState
 
 from .actions import Action
 from .config import GateConfig
+from .history_schema import DEFAULT_LIMITS, empty_history, migrate_history
+from .history_schema import make_event_id as make_event_id
+from .tool_lock import async_tool_lock, tool_lock
 
 if TYPE_CHECKING:
     from .context import RunContext
 
 KEY = "agentgate_history"
-_CALL_FIELDS = {
-    "tool_call_id",
-    "turn_id",
-    "original_name",
-    "action_type",
-    "arguments",
-    "action_detail",
-    "cwd",
-    "status",
-    "source",
-    "decision",
-    "seq",
-    "order",
-}
-_LEGACY_FIELDS = _CALL_FIELDS | {"root_session_id", "scope", "parent_call_id"}
-EVENT_FIELDS = _CALL_FIELDS | {"event_id"}
-STATUSES = {"attempted", "denied", "executed_success", "executed_error", "unknown"}
-_EVENT_NAMESPACE = UUID("b4ae6ea9-52c4-5b0d-84e8-9ad8a250a8bd")
-
-
-def _event_id(parts: list[str]) -> str:
-    return str(uuid5(_EVENT_NAMESPACE, json.dumps(parts, ensure_ascii=False, separators=(",", ":"))))
-
-
-def make_event_id(session_id: str, checkpoint_ns: str, tool_call_id: str) -> str:
-    """Identify SDK execution without assuming model call IDs are globally unique."""
-    parts = [session_id, checkpoint_ns, tool_call_id]
-    if any(not isinstance(part, str) or not part.strip() for part in parts):
-        raise ValueError("Session, SDK execution namespace and tool call ID are required")
-    return _event_id(["sdk-v4", *parts])
 
 
 def event_key(event: dict) -> str:
     return event["event_id"]
 
 
-def empty_history(root: str = "") -> dict:
-    return {"schema": 4, "root": root, "events": [], "turns": [], "truncated": False}
-
-
-def _validate_structure(value: dict, root: str) -> None:
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"schema", "root", "events", "turns", "truncated"}
-        or type(value["schema"]) is not int
-        or value["schema"] not in {3, 4}
-        or value["root"] != root
-        or not isinstance(value["truncated"], bool)
-        or not isinstance(value["events"], list)
-        or not isinstance(value["turns"], list)
-    ):
-        raise ValueError("Incompatible or cross-root plugin context")
-    fields = _LEGACY_FIELDS if value["schema"] == 3 else EVENT_FIELDS
-    for event in value["events"]:
-        if not isinstance(event, dict) or set(event) != fields:
-            raise ValueError("Invalid tool-call event")
-        if not isinstance(event["arguments"], dict):
-            raise ValueError("Invalid structured arguments")
-        if any(not isinstance(event[name], str) for name in fields - {"seq", "order", "arguments"}):
-            raise ValueError("Invalid event text")
-        if event["status"] not in STATUSES or any(type(event[name]) is not int for name in ("seq", "order")):
-            raise ValueError("Invalid event status or sequence")
-        if value["schema"] == 3 and event["root_session_id"] != root:
-            raise ValueError("Cross-root legacy event")
-        if value["schema"] == 4:
-            try:
-                UUID(event["event_id"])
-            except ValueError as error:
-                raise ValueError("Invalid event ID") from error
-    for turn in value["turns"]:
-        if (
-            not isinstance(turn, dict)
-            or set(turn) != {"id", "text"}
-            or not all(isinstance(item, str) for item in turn.values())
-        ):
-            raise ValueError("Invalid user turn")
-
-
-def migrate_history(value: dict, root: str) -> dict:
-    """Validate before converting; never change the supplied checkpoint in place."""
-    if isinstance(value, dict) and not value:
-        return empty_history(root)
-    _validate_structure(value, root)
-    result = deepcopy(value)
-    if result["schema"] == 3:
-        for event in result["events"]:
-            if event["status"] in {"attempted", "unknown"}:
-                raise ValueError("Cannot upgrade unfinished legacy calls; inspect the old checkpoint first")
-            event["event_id"] = _event_id(["legacy-v3", root, event.pop("scope"), event["tool_call_id"]])
-            del event["parent_call_id"], event["root_session_id"]
-        result["schema"] = 4
-    return result
-
-
 def validate_history(value: dict, root: str) -> dict:
     return migrate_history(value, root)
 
 
-def prune(value: dict, actions: int = 200, turns: int = 20, budget: int = 32768) -> dict:
-    result = {**value, "events": list(value["events"]), "turns": list(value["turns"])}
-    if len(result["events"]) > actions or len(result["turns"]) > turns:
-        result["truncated"] = True
-    result["events"] = result["events"][-actions:]
-    result["turns"] = result["turns"][-turns:]
-    valid = {turn["id"] for turn in result["turns"]}
-    retained = [event for event in result["events"] if event["turn_id"] in valid]
-    if len(retained) != len(result["events"]):
-        result["truncated"] = True
-    result["events"] = retained
-    while len(json.dumps(result, ensure_ascii=False).encode()) > budget and (result["events"] or result["turns"]):
-        result["truncated"] = True
-        (result["events"] if result["events"] else result["turns"]).pop(0)
+def _turn_rank(value: dict) -> tuple[int, str]:
+    turn = value["current_turn"]
+    return (turn["order"], turn["id"]) if turn else (-1, "")
+
+
+def prune(value: dict, actions: int | None = None, turns: int | None = None, budget: int | None = None) -> dict:
+    result = deepcopy(value)
+    for name, configured in (("actions", actions), ("turns", turns), ("bytes", budget)):
+        if configured is not None:
+            result["limits"][name] = min(DEFAULT_LIMITS[name], configured)
+    limits, floor = result["limits"], result["pruned"]
+    result["events"] = sorted(result["events"], key=lambda event: (event["order"], event["event_id"]))
+    result["turns"] = sorted(result["turns"], key=lambda turn: (turn["order"], turn["id"]))
+
+    def discard(kind, rows):
+        if rows:
+            floor[kind] = max(floor[kind], max(row["order"] for row in rows))
+            result["truncated"] = True
+
+    def enforce_cursors():
+        result["turns"] = [turn for turn in result["turns"] if turn["order"] > floor["turns"]]
+        valid = {turn["id"] for turn in result["turns"]}
+        discard("events", [event for event in result["events"] if event["turn_id"] not in valid])
+        result["events"] = [event for event in result["events"] if event["order"] > floor["events"]]
+
+    enforce_cursors()
+    for kind, maximum in (("events", limits["actions"]), ("turns", limits["turns"])):
+        discard(kind, result[kind][:-maximum])
+    enforce_cursors()
+    while len(json.dumps(result, ensure_ascii=False).encode()) > limits["bytes"] and (
+        result["events"] or result["turns"]
+    ):
+        kind = "events" if result["events"] else "turns"
+        discard(kind, result[kind][:1])
+        enforce_cursors()
+    if len(json.dumps(result, ensure_ascii=False).encode()) > limits["bytes"]:
+        raise ValueError("history_bytes is too small to retain session and pruning metadata")
     return result
 
 
@@ -147,13 +83,27 @@ def merge_history(old: dict, delta: dict) -> dict:
         if key not in events or event["seq"] >= events[key]["seq"]:
             events[key] = event
     turns = {turn["id"]: turn for turn in old["turns"] + delta["turns"]}
+    latest = max((old, delta), key=_turn_rank)
+    # The latest root invocation supplies policy. At the same turn, apply the
+    # stricter bounds so a stale graph snapshot cannot loosen an active policy.
+    limits = dict(latest["limits"])
+    if _turn_rank(old) == _turn_rank(delta):
+        limits = {name: min(old["limits"][name], delta["limits"][name]) for name in DEFAULT_LIMITS}
     return prune(
         {
-            "schema": 4,
+            "schema": 5,
             "root": root,
-            "events": sorted(events.values(), key=lambda event: (event["order"], event["event_id"])),
+            "events": list(events.values()),
             "turns": list(turns.values()),
             "truncated": old["truncated"] or delta["truncated"],
+            "limits": limits,
+            "current_turn": latest["current_turn"],
+            "clock": max(
+                [old["clock"], delta["clock"]]
+                + [turn["order"] for turn in turns.values()]
+                + [event[name] for event in events.values() for name in ("seq", "order")]
+            ),
+            "pruned": {name: max(old["pruned"][name], delta["pruned"][name]) for name in ("events", "turns")},
         }
     )
 
@@ -177,7 +127,9 @@ class RunHistory:
     def __init__(self, root: str, value: dict, config: GateConfig) -> None:
         self.value = validate_history(value, root)
         self.config = config
-        self.seq = max((event["seq"] for event in self.value["events"]), default=0)
+        self.seq = max(self.value["clock"], max((event["seq"] for event in self.value["events"]), default=0))
+        # Replay protection lasts for this invocation even when its audit window is pruned.
+        self._seen_event_ids = {event_key(event) for event in self.value["events"]}
         self._state_guard = threading.RLock()
         self.lock = threading.Lock()
 
@@ -191,19 +143,45 @@ class RunHistory:
 
     @synchronized
     def merge(self, value: dict) -> None:
-        self.value = self.trim(merge_history(self.value, value))
-        self.seq = max(self.seq, max((event["seq"] for event in self.value["events"]), default=0))
+        merged = merge_history(self.value, value)
+        self._seen_event_ids.update(event_key(event) for event in merged["events"])
+        self.value = self.trim(merged)
+        self.seq = max(self.seq, self.value["clock"])
 
     @synchronized
     def record_prompt(self, turn_id: str, user_prompt: str) -> None:
-        self.merge(empty_history(self.value["root"]) | {"turns": [{"id": turn_id, "text": user_prompt}]})
+        self.seq += 1
+        self.merge(
+            empty_history(self.value["root"])
+            | {
+                "turns": [{"id": turn_id, "text": user_prompt, "order": self.seq}],
+                "current_turn": {"id": turn_id, "order": self.seq},
+                "clock": self.seq,
+                "limits": {
+                    "actions": min(200, self.config.history_actions),
+                    "turns": min(20, self.config.history_turns),
+                    "bytes": min(32768, self.config.history_bytes),
+                },
+            }
+        )
 
     @synchronized
     def begin(self, run: RunContext, call_id: str, action: Action, original_name: str, *, event_id: str) -> dict:
         if run.session_id != self.value["root"]:
             raise ValueError("Cross-root tool call")
-        if not call_id or any(event_key(event) == event_id for event in self.value["events"]):
+        if not call_id:
             raise ValueError("Recorded tool call cannot be replayed")
+        if event_id in self._seen_event_ids:
+            previous = next((row for row in self.value["events"] if event_key(row) == event_id), None)
+            if original_name != "task" or previous is None or previous["status"] != "interrupted":
+                raise ValueError("Recorded tool call cannot be replayed")
+            # Only orchestration suspended by a native interrupt can re-enter.
+            # The SDK resumes its child checkpoint; physical tools remain protected.
+            self.seq += 1
+            event = {**previous, "seq": self.seq, "status": "attempted", "decision": "", "source": ""}
+            self.merge(empty_history(run.session_id) | {"events": [event], "clock": self.seq})
+            return event
+        self._seen_event_ids.add(event_id)
         self.seq += 1
         event = {
             "event_id": event_id,
@@ -220,14 +198,14 @@ class RunHistory:
             "seq": self.seq,
             "order": self.seq,
         }
-        self.merge(empty_history(run.session_id) | {"events": [event]})
+        self.merge(empty_history(run.session_id) | {"events": [event], "clock": self.seq})
         return event
 
     @synchronized
     def finish(self, event: dict, status: str, *, decision: str = "", source: str = "") -> None:
         self.seq += 1
         updated = {**event, "status": status, "decision": decision, "source": str(source), "seq": self.seq}
-        self.merge(empty_history(self.value["root"]) | {"events": [updated]})
+        self.merge(empty_history(self.value["root"]) | {"events": [updated], "clock": self.seq})
 
     @synchronized
     def snapshot(self) -> dict:
@@ -277,18 +255,10 @@ class RunHistory:
 
     @contextmanager
     def leaf_lock(self) -> Generator[None, None, None]:
-        with self.lock:
+        with tool_lock(self.lock):
             yield
 
     @asynccontextmanager
     async def async_leaf_lock(self) -> AsyncGenerator[None, None]:
-        acquired = False
-        try:
-            while not acquired:
-                acquired = self.lock.acquire(blocking=False)
-                if not acquired:
-                    await asyncio.sleep(0.005)
+        async with async_tool_lock(self.lock):
             yield
-        finally:
-            if acquired:
-                self.lock.release()

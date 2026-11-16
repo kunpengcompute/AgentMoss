@@ -4,10 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentmoss-deepagents"
-version = "0.5.1"
+version = "0.6.0"
 description = "AgentGate integration middleware for DeepAgents"
-requires-python = ">=3.12"
-dependencies = ["deepagents==0.7.32", "langchain==1.4.7", "langchain-core==1.7.1", "langgraph==1.2.18", "langgraph-prebuilt==1.1.1", "httpx==0.28.1"]
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents>=0.7.32,<0.8",
+    "langchain>=1.4.7,<2",
+    "langchain-core>=1.7.1,<2",
+    "langgraph>=1.2.18,<2",
+    "httpx>=0.28.1,<1",
+]
+
+[project.optional-dependencies]
+aio = ["agent-sandbox>=0.0.30,<0.1"]
+
+[tool.setuptools]
+license-files = ["LICENSES/*.txt", "THIRD_PARTY_NOTICES.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

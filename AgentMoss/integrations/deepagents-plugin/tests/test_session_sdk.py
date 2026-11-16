@@ -94,7 +94,7 @@ async def test_async_sdk_distinguishes_same_ids_in_parallel_graphs(tmp_path, che
     inputs, config, context = run_args()
     try:
         result = await graph.ainvoke(inputs, config, context=context)
-        assert result[KEY]["schema"] == 4
+        assert result[KEY]["schema"] == 5
         entries = [e for e in result[KEY]["events"] if e["tool_call_id"] == "same"]
         assert len(entries) == (1 if mode == "main" else 2)
         assert len({e["event_id"] for e in entries}) == len(entries)
@@ -143,7 +143,8 @@ async def test_actual_sdk_node_retry_keeps_execution_identity():
 
 
 @pytest.mark.parametrize("outcome", ["success", "unknown"])
-async def test_plugin_does_not_repeat_a_physical_tool_when_the_sdk_node_retries(tmp_path, outcome):
+@pytest.mark.parametrize("padding_bytes", [0, 20_000])
+async def test_plugin_does_not_repeat_a_physical_tool_when_the_sdk_node_retries(tmp_path, outcome, padding_bytes):
     from deepagents.backends.local_shell import LocalShellBackend
     from langgraph.runtime import Runtime
 
@@ -153,7 +154,7 @@ async def test_plugin_does_not_repeat_a_physical_tool_when_the_sdk_node_retries(
     counter_file = tmp_path / "count"
 
     @tool
-    def physical_counter() -> str:
+    def physical_counter(padding: str) -> str:
         """Increment a disposable file."""
         count = int(counter_file.read_text()) if counter_file.exists() else 0
         counter_file.write_text(str(count + 1))
@@ -190,12 +191,16 @@ async def test_plugin_does_not_repeat_a_physical_tool_when_the_sdk_node_retries(
     _, config, context = run_args()
     try:
         result = await builder.compile().ainvoke(
-            {"messages": [call("physical_counter", {}, "same")]}, config, context=context
+            {"messages": [call("physical_counter", {"padding": "x" * padding_bytes}, "same")]}, config, context=context
         )
         assert attempts == 2 and counter_file.read_text() == "1" and len(seen) == 1
-        assert len(result[KEY]["events"]) == 1
-        assert result[KEY]["events"][0]["status"] == ("executed_success" if outcome == "success" else "unknown")
-        assert result[KEY]["events"][0]["event_id"]
+        if padding_bytes:
+            # The bounded checkpoint may drop a whole event; retries still must not replay it.
+            assert result[KEY]["events"] == [] and result[KEY]["truncated"] is True
+        else:
+            assert len(result[KEY]["events"]) == 1
+            assert result[KEY]["events"][0]["status"] == ("executed_success" if outcome == "success" else "unknown")
+            assert result[KEY]["events"][0]["event_id"]
         assert result["messages"][-1].status == "error"
     finally:
         await runtime.aclose()
@@ -333,7 +338,7 @@ async def test_real_checkpoint_upgrade_preserves_finished_calls_and_rejects_unfi
         else:
             result = await graph.ainvoke({"messages": [("user", "next input")]}, config, context=context)
             assert (tmp_path / "upgraded").read_text() == "upgraded"
-            assert result[KEY]["schema"] == 4 and len(result[KEY]["events"]) == 2
+            assert result[KEY]["schema"] == 5 and len(result[KEY]["events"]) == 2
             assert len({event["event_id"] for event in result[KEY]["events"]}) == 2
             assert [turn["text"] for turn in result[KEY]["turns"]] == ["original user", "next input"]
             assert seen[0]["action_history"] == [{"action_type": "bash", "action_detail": "printf test"}]

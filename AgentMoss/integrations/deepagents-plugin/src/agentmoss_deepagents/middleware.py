@@ -9,19 +9,19 @@ from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any
 
-from deepagents.backends.local_shell import LocalShellBackend
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
-from langgraph.errors import GraphBubbleUp
+from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from . import __version__
 from .actions import ActionAdapter
 from .client import GateUnavailable
-from .context import RunContext, begin_run, current_run
+from .context import RunContext, begin_run, current_run, ensure_run, moss_info
 from .history import KEY, AgentMossState, make_event_id
+from .operation import async_tool_operation, tool_operation
 from .runtime import GateRuntime, drain
 
 logger = logging.getLogger(__name__)
@@ -34,14 +34,14 @@ AsyncToolHandler = Callable[[ToolCallRequest], Awaitable[ToolResult]]
 class AgentMossMiddleware(AgentMiddleware):
     state_schema = AgentMossState
 
-    def __init__(self, runtime: GateRuntime, backend: LocalShellBackend) -> None:
+    def __init__(self, runtime: GateRuntime, backend) -> None:
         self.runtime, self.adapter = runtime, ActionAdapter(backend)
 
     def before_agent(self, state: dict, runtime: Runtime) -> dict | None:
-        if not self.runtime.config.enabled:
-            return None
         if self.runtime.closing:
             raise RuntimeError("GateRuntime is closed")
+        if not self.runtime.config.enabled:
+            return None
         run = begin_run(runtime.context, state, self.runtime)
         return {KEY: run.history.value}
 
@@ -51,15 +51,19 @@ class AgentMossMiddleware(AgentMiddleware):
     def after_agent(self, state: dict, runtime: Runtime) -> dict | None:
         if not self.runtime.config.enabled:
             return None
-        run = current_run(runtime.context)
+        run = ensure_run(runtime.context, state, self.runtime)
         run.history.merge(state.get(KEY, {}))
         return {KEY: run.history.value}
 
     async def aafter_agent(self, state: dict, runtime: Runtime) -> dict | None:
         return self.after_agent(state, runtime)
 
-    @staticmethod
-    def _run(request: ToolCallRequest) -> RunContext:
+    def _run(self, request: ToolCallRequest) -> RunContext:
+        # Validate the explicit tool runtime thread before restoring from its
+        # state. An existing context still undergoes the ownership checks below.
+        info = moss_info(request.runtime.context, request.runtime.config.get("configurable", {}).get("thread_id"))
+        if "_agentmoss_run" not in info:
+            ensure_run(request.runtime.context, request.state, self.runtime)
         return current_run(request.runtime.context, request.runtime.config.get("configurable", {}).get("thread_id"))
 
     def _error(self, request: ToolCallRequest, reason: str) -> ToolMessage:
@@ -118,12 +122,23 @@ class AgentMossMiddleware(AgentMiddleware):
             event_id=event_id,
         )
         try:
+            # Gate prefers explicit action_history and cannot reconstruct the
+            # missing prefix. A usable verdict requires complete context too.
+            if snapshot["history_truncated"] and self.runtime.config.fail_closed:
+                view.finish(event, "denied", decision="Deny", source="history_truncated")
+                return self._result(
+                    request,
+                    self._error(request, "Session history was truncated; refusing tool execution (fail_closed=true)"),
+                )
             messages = request.state.get("messages", [])
+            # Empty or block-based content belongs to this call too; never
+            # substitute a previous action's explanation for the current one.
             reason = next(
                 (
-                    m.content
+                    m.text
                     for m in reversed(messages)
-                    if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content
+                    if isinstance(m, AIMessage)
+                    and any(call.get("id") == request.tool_call["id"] for call in m.tool_calls)
                 ),
                 "",
             )
@@ -141,7 +156,10 @@ class AgentMossMiddleware(AgentMiddleware):
                 "metadata": {
                     **action.metadata,
                     "hostname": platform.node(),
-                    "os_type": platform.system().lower(),
+                    "os_type": action.metadata.get("os_type", platform.system().lower()),
+                    **(
+                        {"client_os_type": platform.system().lower()} if action.metadata.get("backend") == "aio" else {}
+                    ),
                     "source": "deepagents-plugin",
                     "original_tool_name": name,
                     "tool_call_id": request.tool_call["id"],
@@ -175,7 +193,9 @@ class AgentMossMiddleware(AgentMiddleware):
             return self._result(request, self._error(request, str(verdict.get("reason", "Rejected"))))
         return None
 
-    def _record(self, request: ToolCallRequest, event: dict, result: ToolResult, verdict: dict) -> Command:
+    def _record(
+        self, request: ToolCallRequest, event: dict, result: ToolResult, verdict: dict, *, uncertain: bool = False
+    ) -> Command:
         view = self._run(request).history
         if isinstance(result, Command):
             messages = []
@@ -195,7 +215,7 @@ class AgentMossMiddleware(AgentMiddleware):
             None,
         )
         status = "unknown"
-        if isinstance(message, ToolMessage):
+        if isinstance(message, ToolMessage) and not uncertain:
             if message.status == "error":
                 status = "executed_error"
             elif request.tool_call["name"] == "execute":
@@ -216,23 +236,31 @@ class AgentMossMiddleware(AgentMiddleware):
             return list(result.update)
         raise ValueError("Unsupported tool Command update")
 
-    async def _execute(self, request: ToolCallRequest, handler: AsyncToolHandler) -> ToolResult:
-        if request.tool_call["name"] == "task":
-            return await handler(request)
-        execution = asyncio.ensure_future(handler(request))
-        try:
-            return await asyncio.shield(execution)
-        except asyncio.CancelledError:
-            try:
-                await drain(execution)
-            except BaseException:
-                pass
-            raise
+    @staticmethod
+    def _policy_request(request: ToolCallRequest) -> ToolCallRequest:
+        # Native batched HITL keeps the original AIMessage and stores edits in
+        # graph state. Its inner tool wrapper substitutes them only at execution.
+        # Inspect that same final action, leaving SDK execution/annotation intact.
+        edited = request.state.get("hitl_edited_tool_calls") or {}
+        action = edited.get(request.tool_call["id"])
+        if action is None:
+            return request
+        if (
+            not isinstance(action, dict)
+            or not isinstance(action.get("name"), str)
+            or not isinstance(action.get("args"), dict)
+        ):
+            raise ValueError("Invalid approved tool action")
+        return request.override(tool_call={**request.tool_call, "name": action["name"], "args": action["args"]})
 
     def wrap_tool_call(self, request: ToolCallRequest, handler: ToolHandler) -> ToolResult:
+        if self.runtime.closing:
+            return self._error(request, "GateRuntime is closed")
         if not self.runtime.config.enabled:
             return handler(request)
         try:
+            execution_request = request
+            request = self._policy_request(request)
             view = self._run(request).history
             lock = nullcontext() if request.tool_call["name"] == "task" else view.leaf_lock()
             with lock:
@@ -247,20 +275,30 @@ class AgentMossMiddleware(AgentMiddleware):
                 if (denial := self._check(request, event, verdict)) is not None:
                     return denial
                 try:
-                    result = handler(request)
-                except BaseException:
-                    view.finish(event, "unknown", source="exception")
+                    with tool_operation() as outcome:
+                        result = handler(execution_request)
+                except BaseException as error:
+                    view.finish(
+                        event,
+                        "interrupted" if isinstance(error, GraphInterrupt) else "unknown",
+                        decision=verdict["decision"],
+                        source=verdict.get("source", "agent_moss"),
+                    )
                     raise
-                return self._record(request, event, result, verdict)
+                return self._record(request, event, result, verdict, uncertain=outcome.uncertain)
         except GraphBubbleUp:
             raise
         except Exception as error:
             return self._integration_error(request, error)
 
     async def awrap_tool_call(self, request: ToolCallRequest, handler: AsyncToolHandler) -> ToolResult:
+        if self.runtime.closing:
+            return self._error(request, "GateRuntime is closed")
         if not self.runtime.config.enabled:
             return await handler(request)
         try:
+            execution_request = request
+            request = self._policy_request(request)
             view = self._run(request).history
             lock = nullcontext() if request.tool_call["name"] == "task" else view.async_leaf_lock()
             async with lock:
@@ -278,11 +316,20 @@ class AgentMossMiddleware(AgentMiddleware):
                 if (denial := self._check(request, event, verdict)) is not None:
                     return denial
                 try:
-                    result = await self._execute(request, handler)
-                except BaseException:
-                    view.finish(event, "unknown", source="cancelled_or_exception")
+                    async with async_tool_operation() as outcome:
+                        if request.tool_call["name"] == "task":
+                            result = await handler(execution_request)
+                        else:
+                            result = await drain(handler(execution_request), propagate_cancel=True)
+                except BaseException as error:
+                    view.finish(
+                        event,
+                        "interrupted" if isinstance(error, GraphInterrupt) else "unknown",
+                        decision=verdict["decision"],
+                        source=verdict.get("source", "agent_moss"),
+                    )
                     raise
-                return self._record(request, event, result, verdict)
+                return self._record(request, event, result, verdict, uncertain=outcome.uncertain)
         except GraphBubbleUp:
             raise
         except Exception as error:
