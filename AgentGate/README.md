@@ -33,7 +33,7 @@ AgentGate 负责：
 真实的 Allow/Deny 判定由 AgentMoss 完成：
 
 ```bash
-pip install -e ../AgentMoss  # 从本仓库的 AgentGate/ 目录执行
+pip install agent-moss
 agent-moss --version
 
 # 启动 AgentMoss 后，默认在 127.0.0.1:9090 提供 /api/v1/analyze
@@ -183,7 +183,7 @@ app = create_app()
 | POST | `/api/v1/analyze` | 分析一次工具调用 |
 | GET | `/api/v1/sessions/{session_id}/traces` | 某会话的完整调用轨迹 |
 | GET | `/api/v1/tool_calls` | 查询调用记录（`limit` 上限 500，超出静默截断） |
-| DELETE | `/api/v1/tool_calls` | 清空调用记录 |
+| DELETE | `/api/v1/tool_calls` | 清空调用记录；传 `{"ids": [...]}` 可只删指定记录 |
 | GET | `/api/v1/agents` | agent 列表与调用统计 |
 | GET | `/api/v1/timeline` | 最近 N 分钟的 Allow / Deny 时间线 |
 | GET | `/api/v1/storage_stats` | 存储用量与条数 |
@@ -229,6 +229,20 @@ app = create_app()
 #### GET /api/v1/health
 
 公开端点，无需鉴权。响应字段：`status`（`healthy`）、`version`、`timestamp`、`instance`、`moss_version`、`moss_status`。
+
+#### DELETE /api/v1/tool_calls
+
+破坏性操作，只接受**全局 token**（逐 agent token 返回 403）。请求体可省略：
+
+| 请求体 | 行为 |
+|---|---|
+| 不传 body | 清空全部调用记录（`tool_calls` + `system_snapshots`，session 计数归零） |
+| `{"ids": [1, 2]}` | 只删除指定记录 |
+| `{"ids": []}` | 不删除任何记录 |
+
+响应：`{"deleted": N}`。
+
+看板上的 **Delete Records** 多选模式调用同一接口：可删除所选或全部，删除前弹确认框；浏览器通过 `?token=` 换过 Cookie 后，同源 `fetch` 无需再带 Bearer 头。
 
 ## 鉴权与安全加固
 
@@ -368,7 +382,6 @@ agent-gate server --host 0.0.0.0 --port 9100
 ## 开发与测试
 
 ```bash
-python3 -m pip install -e ".[dev]"
 PYTHONPATH=. python3 -m pytest agent_gate/tests/v1 -q
 ```
 

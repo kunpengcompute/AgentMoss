@@ -421,6 +421,50 @@ class Repository:
         self._db.execute_write("UPDATE sessions SET tool_call_count = 0")
         return deleted
 
+    def delete_tool_calls(self, ids: list[int]) -> int:
+        """删除指定 tool_call 记录及其快照，返回实际删除的记录数。
+
+        看板多选删除使用。与 ``clear_tool_calls`` 一样要先删
+        ``system_snapshots``（外键指向 ``tool_calls``）；删除后重算受影响
+        session 的 ``tool_call_count``，避免看板统计残留。
+        """
+        clean = sorted({int(i) for i in ids})
+        if not clean:
+            return 0
+
+        deleted = 0
+        affected_sessions: set[str] = set()
+        # SQLite 对 IN (...) 的参数个数有上限，分批删除。
+        chunk_size = 500
+        for start in range(0, len(clean), chunk_size):
+            chunk = clean[start:start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            params = tuple(chunk)
+            rows = self._db.execute(
+                f"SELECT DISTINCT session_id FROM tool_calls WHERE id IN ({placeholders})",
+                params,
+            ).fetchall()
+            affected_sessions.update(row["session_id"] for row in rows)
+
+            self._db.execute_write(
+                f"DELETE FROM system_snapshots WHERE tool_call_id IN ({placeholders})",
+                params,
+            )
+            cursor = self._db.execute_write(
+                f"DELETE FROM tool_calls WHERE id IN ({placeholders})",
+                params,
+            )
+            deleted += cursor.rowcount or 0
+
+        for session_id in affected_sessions:
+            self._db.execute_write(
+                """UPDATE sessions SET tool_call_count = (
+                       SELECT COUNT(*) FROM tool_calls WHERE session_id = ?
+                   ) WHERE id = ?""",
+                (session_id, session_id),
+            )
+        return deleted
+
     # ---- System Snapshots ----
 
     def insert_system_snapshot(

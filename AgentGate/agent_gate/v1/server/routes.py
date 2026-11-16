@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from loguru import logger
 
 from . import security as sp
@@ -15,6 +15,7 @@ from .dashboard import broadcast_event
 from .models import (
     AgentGateInput,
     AgentGateResponse,
+    DeleteToolCallsRequest,
     HealthResponse,
     ErrorResponse,
     SessionTraceResponse,
@@ -420,11 +421,22 @@ async def get_storage_stats_api(request: Request, repo=Depends(get_repo)):
 
 
 @router.delete("/tool_calls")
-async def delete_tool_calls_api(request: Request, repo=Depends(get_repo)):
-    """清空 tool_call 记录（排查用）。破坏性操作：只允许全局 token。"""
+async def delete_tool_calls_api(
+    request: Request,
+    body: Optional[DeleteToolCallsRequest] = Body(default=None),
+    repo=Depends(get_repo),
+):
+    """删除 tool_call 记录。破坏性操作：只允许全局 token。
+
+    - 不传 body：清空全部（兼容原有行为）；
+    - ``{"ids": [1, 2]}``：只删除指定记录；
+    - ``{"ids": []}``：不删除任何记录。
+    """
     if sp.bound_agent_of(getattr(request.state, "principal", "") or ""):
         raise HTTPException(
             status_code=403,
             detail="该凭证绑定到 agent，无权清理记录",
         )
+    if body is not None and body.ids is not None:
+        return {"deleted": repo.delete_tool_calls(body.ids)}
     return {"deleted": repo.clear_tool_calls()}

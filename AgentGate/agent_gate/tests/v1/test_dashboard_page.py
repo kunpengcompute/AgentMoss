@@ -119,3 +119,19 @@ def test_recent_table_shows_reason_column():
     assert "<th>Reason</th>" in header
     assert "reason-cell" in DASHBOARD_HTML
     assert "escapeHtml(r.reason" in DASHBOARD_HTML
+
+
+def test_delete_records_is_wired_up():
+    """删除记录：入口、多选工具栏、确认框和按 ids 删除的请求体都要存在。"""
+    for element_id in (
+        "enter-delete", "delete-selected", "delete-all", "select-all",
+    ):
+        assert f'id="{element_id}"' in DASHBOARD_HTML, element_id
+
+    assert "function setSelectMode(" in DASHBOARD_HTML
+    assert "mode-delete" in DASHBOARD_HTML
+    assert "确定删除所选" in DASHBOARD_HTML
+    assert "确定删除全部" in DASHBOARD_HTML
+    assert "JSON.stringify({ ids: ids })" in DASHBOARD_HTML
+    # 删除全部沿用无 body 的 DELETE，保持后端兼容语义
+    assert "await doDelete(null)" in DASHBOARD_HTML

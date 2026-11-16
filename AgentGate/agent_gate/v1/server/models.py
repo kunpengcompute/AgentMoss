@@ -220,6 +220,19 @@ class HealthResponse(BaseModel):
     moss_status: str = ""
 
 
+class DeleteToolCallsRequest(BaseModel):
+    """DELETE /api/v1/tool_calls 的可选请求体。
+
+    - 不传 body → 清空全部（保持原行为）；
+    - `{"ids": [...]}` → 只删除指定记录；
+    - `{"ids": []}` → 不删除任何记录（避免空选择误清空）。
+    """
+    ids: Optional[list[int]] = Field(
+        default=None,
+        description="要删除的 tool_call id 列表；None 表示清空全部",
+    )
+
+
 class ErrorResponse(BaseModel):
     error: str
     detail: str = ""
