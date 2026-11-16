@@ -1,0 +1,37 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Microsoft YaHei, sans-serif", "fontSize": "17px", "primaryColor": "#eff6ff", "primaryBorderColor": "#2563eb", "primaryTextColor": "#172554", "lineColor": "#64748b", "clusterBkg": "#f8fafc", "clusterBorder": "#cbd5e1"}, "flowchart": {"curve": "linear", "htmlLabels": true, "nodeSpacing": 30, "rankSpacing": 40}}}%%
+flowchart TB
+    agent["DeepAgents 准备执行命令"]
+    plugin["客户端插件送检<br/>命令、用户任务和会话上下文"]
+    gate["AgentGate 调用外部 AgentMoss"]
+    outer{"外部检查结果"}
+    outerStop["停止本次命令<br/>不向沙箱提交"]
+    proxy["允许后，客户端提交命令<br/>CubeProxy 转发到指定沙箱"]
+
+    agent --> plugin --> gate --> outer
+    outer -- "拒绝，或检查服务故障" --> outerStop
+    outer -- "允许" --> proxy
+
+    subgraph sandbox[" "]
+        shell["进入 CubeSandbox 的 AIO 服务<br/>shell.py 调用 moss_guard.py"]
+        busy{"同一个 shell 会话<br/>已有命令在运行？"}
+        busyStop["停止本次提交<br/>先处理正在运行的命令"]
+        moss["沙箱内 AgentMoss 检查命令<br/>并按需读取相关脚本内容"]
+        inner{"内部检查结果"}
+        innerStop["停止本次命令<br/>不调用命令执行器"]
+        execute["允许后调用命令执行器"]
+        bash["Bash 实际执行命令"]
+
+        shell --> busy
+        busy -- "是" --> busyStop
+        busy -- "否" --> moss --> inner
+        inner -- "拒绝，或检查异常" --> innerStop
+        inner -- "允许" --> execute --> bash
+    end
+
+    proxy --> shell
+    bash --> result["输出和退出码返回 DeepAgents"]
+
+    classDef stop fill:#fff1f2,stroke:#e11d48,color:#881337;
+    classDef allow fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    class outerStop,busyStop,innerStop stop;
+    class execute,bash,result allow;

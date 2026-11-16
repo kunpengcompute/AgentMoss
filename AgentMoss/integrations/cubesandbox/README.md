@@ -6,20 +6,21 @@
 
 ## 各个组件做什么
 
-一次命令执行经过以下步骤：
-
-```text
-DeepAgents 主代理或子代理
-  → AgentGate 接收工具调用和上下文
-  → 外部 AgentMoss 检查，拒绝则停止
-  → CubeProxy 将请求转发到指定沙箱的 AIO 服务
-  → 沙箱内的 AgentMoss 检查命令，并读取相关脚本内容
-  → 允许后交给 Bash 执行，返回输出和退出码
-```
-
 AIO 是沙箱里提供命令执行、文件读写等接口的服务。CubeProxy 负责把请求送到正确的沙箱。
 
 外部 AgentMoss 能看到工具调用和会话上下文，但不能直接读取另一台机器上沙箱里的脚本。因此，外部检查和沙箱内部检查需要分别部署。沙箱内部直接调用 AgentMoss 的 Python 接口，不需要再启动一套 AgentGate 服务。
+
+### Moss 拦截如何生效
+
+要让下面两处检查都生效，DeepAgents 主代理和子代理需要注册安全检查插件，外部 Gate/Moss 服务需要可用，沙箱也需要从本目录构建的新镜像创建。构建镜像时，脚本会修改 AIO 的 `shell.py`，使它在执行命令前调用 `moss_guard.py`。
+
+![AgentMoss 在 CubeSandbox 中检查和拦截命令的流程](docs/moss-interception.png)
+
+[查看流程图源文件](docs/moss-interception.mmd)
+
+**只有外部检查和沙箱内部检查都允许，本次命令才会交给 Bash 执行。** 图中沿用示例的 `fail_closed: true` 配置：外部检查服务故障时也停止提交。内部检查拒绝或出错时，`moss_guard.py` 不会调用命令执行器。
+
+图中展示的是本接入方案的命令执行流程；文件、代码执行及其他入口的覆盖范围见下方“使用时需要注意什么”。
 
 | 文件 | 用途 |
 | --- | --- |
