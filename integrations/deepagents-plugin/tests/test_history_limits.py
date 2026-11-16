@@ -20,7 +20,8 @@ from agentmoss_deepagents.history import KEY, RunHistory, make_event_id, merge_h
 @pytest.mark.parametrize("sync", [False, True])
 async def test_small_window_keeps_current_actions_in_gate_and_checkpoint(tmp_path, sync):
     runtime, seen = setup(tmp_path)
-    runtime.config = replace(runtime.config, history_actions=1, history_turns=1)
+    # Explicit compatibility mode exercises forwarding after the window is full.
+    runtime.config = replace(runtime.config, history_actions=1, history_turns=1, fail_closed=False)
     responses = []
     for turn in range(3):
         responses.extend(
@@ -85,7 +86,7 @@ async def test_new_invocation_can_change_limits_without_restoring_evicted_record
     saver = InMemorySaver()
     try:
         for turn, limit in enumerate([1, 3, 1]):
-            runtime.config = replace(runtime.config, history_actions=limit, history_turns=limit)
+            runtime.config = replace(runtime.config, history_actions=limit, history_turns=limit, fail_closed=False)
             graph = make_agent(
                 runtime,
                 tmp_path,

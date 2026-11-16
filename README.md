@@ -30,13 +30,8 @@ python3 -m venv .venv
 . .venv/bin/activate
 ```
 
-通过 pip 安装：
-
-```bash
-python -m pip install agent-moss
-```
-
-也可以从源码安装：
+商用裁剪版从本仓库源码安装。公共 PyPI 上的 `agent-moss` 是上游完整版，
+不能作为本仓库的安装来源：
 
 ```bash
 git clone https://gitcode.com/kenhkl/AgentMoss-commercial.git AgentMoss
@@ -58,10 +53,10 @@ python -m pip install -e .
 2. **把插件装到运行 DeepAgents 的 Python 环境中。** 使用 Python 3.11 或更新版本，先激活该应用的虚拟环境，再执行：
 
    ```bash
-   python -m pip install 'agent-moss[deepagents-aio]'
+   python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'
    ```
 
-   从源码安装时，改用 `python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'`，并替换为实际源码路径。
+   将路径替换为包含本插件的商用源码目录；公共 PyPI 的同名包不能替代该安装。
 
 3. **在 DeepAgents 应用代码中接入插件。** 配置 Gate 地址和访问令牌，并修改创建 Agent 的代码，为主代理和每个子代理添加插件的检查组件。完整代码见[插件接入说明](integrations/deepagents-plugin/README.md)。
 
@@ -358,11 +353,27 @@ agent-moss rules status
 
 ## 开发与测试
 
+在仓库根目录执行。完整验证（含 DeepAgents 插件）需要 Python 3.11 或更新版本，
+先安装本地源码的可选依赖和测试工具：
+
+```bash
+python -m pip install -e '.[deepagents-aio]' pytest pytest-asyncio
+```
+
+主仓测试：
+
 ```bash
 AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 python3 -m pytest -q
 ```
 
-请在仓库根目录运行上述命令。
+DeepAgents 插件测试必须单独运行：根目录 `pytest.ini` 的 `testpaths = tests`
+不会收集插件用例。显式加载插件配置，以启用异步测试并使用插件源码：
+
+```bash
+python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q
+```
+
+真实 AIO 测试需要单独配置服务地址，未配置时跳过；配置方式见[插件测试说明](integrations/deepagents-plugin/README.md#测试)。
 
 测试语料位于 `tests/cases/`，双端一致性 golden 数据位于 `tests/parity/`
 （裁剪后只校验 Python 侧行为，不依赖 TypeScript 源码）。

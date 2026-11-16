@@ -63,7 +63,7 @@ def test_installed_wheel_local_mode_without_optional_aio_sdk(tmp_path):
         try:
             from agentmoss_deepagents import AIOSandboxBackend
         except ImportError as error:
-            assert 'agent-moss[deepagents-aio]' in str(error)
+            assert "pip install -e '/path/to/AgentMoss[deepagents-aio]'" in str(error)
         else:
             raise AssertionError('AIO import unexpectedly succeeded')
         print('wheel local mode works without optional AIO SDK')

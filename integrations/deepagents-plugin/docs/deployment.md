@@ -11,20 +11,17 @@ python3 -m venv .venv-services
 . .venv-services/bin/activate
 ```
 
-通过 pip 安装：
-
-```bash
-python -m pip install agent-moss agent-gate-sec
-```
-
-也可以从源码安装，将路径换成实际的源码目录：
+商用版本从源码安装，将路径换成实际的商用仓库目录：
 
 ```bash
 python -m pip install -e /path/to/AgentMoss
 python -m pip install -e /path/to/AgentGate
 ```
 
-Gate 源码见 [AgentGate 仓库](https://gitcode.com/kenhkl/AgentGate-commercial)。
+源码分别来自 [AgentMoss 商用仓库](https://gitcode.com/kenhkl/AgentMoss-commercial)
+和 [AgentGate 商用仓库](https://gitcode.com/kenhkl/AgentGate-commercial)。
+公共 PyPI 上同名的 `agent-moss` / `agent-gate-sec` 是上游完整版，包含商用裁剪范围外的 Brain / V3，
+不能用来替代上述源码安装。这里的 Moss 不包含 Brain，Gate 仅包含 V1。
 
 ## 配置访问令牌
 

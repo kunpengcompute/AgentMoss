@@ -122,6 +122,14 @@ class AgentMossMiddleware(AgentMiddleware):
             event_id=event_id,
         )
         try:
+            # Gate prefers explicit action_history and cannot reconstruct the
+            # missing prefix. A usable verdict requires complete context too.
+            if snapshot["history_truncated"] and self.runtime.config.fail_closed:
+                view.finish(event, "denied", decision="Deny", source="history_truncated")
+                return self._result(
+                    request,
+                    self._error(request, "Session history was truncated; refusing tool execution (fail_closed=true)"),
+                )
             messages = request.state.get("messages", [])
             # Empty or block-based content belongs to this call too; never
             # substitute a previous action's explanation for the current one.

@@ -35,7 +35,10 @@ class DeepAgentsIntegration:
                 except ModuleNotFoundError as error:
                     if error.name != "agent_sandbox":
                         raise
-                    raise ImportError("Install agent-moss[deepagents-aio] to use the AIO backend") from None
+                    raise ImportError(
+                        "Install the AIO dependencies from the AgentMoss commercial source checkout: "
+                        "python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'"
+                    ) from None
                 from .aio_backend import AIOSandboxBackend
 
                 aio = config.aio

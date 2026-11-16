@@ -6,19 +6,17 @@ Moss 负责安全检测并返回判定，Gate 负责接收 Agent 请求、调用
 
 ## 安装
 
-需要 Python 3.11 或更新版本。在运行 DeepAgents 的 Python 环境中安装：
-
-```bash
-python -m pip install 'agent-moss[deepagents-aio]'
-```
-
-也可以直接使用源码，将路径替换为实际的仓库目录：
+需要 Python 3.11 或更新版本。在运行 DeepAgents 的 Python 环境中，从
+[AgentMoss 商用仓库](https://gitcode.com/kenhkl/AgentMoss-commercial)源码安装，
+将路径替换为包含本插件的源码目录：
 
 ```bash
 python -m pip install -e '/path/to/AgentMoss[deepagents-aio]'
 ```
 
-这两种方式都会安装插件所需的依赖，具体约束见 [pyproject.toml](pyproject.toml)。
+该命令会安装插件及 `deepagents-aio` 可选依赖，具体约束见[主仓 pyproject.toml](../../pyproject.toml)。
+公共 PyPI 的 `agent-moss` 是包含 Brain 的上游完整版，不能替代商用源码；
+也不能据公共包名假定已包含本插件和 `deepagents-aio` extra。
 
 如果环境中单独安装过 `agentmoss-deepagents`，先卸载该包，再按上面的方式安装，避免同名模块相互覆盖。
 
@@ -41,9 +39,11 @@ export DEEPAGENTS_GATE_FAIL_CLOSED=true
 | `DEEPAGENTS_GATE_API_TOKEN` | 无 | Gate 令牌内容，与令牌文件二选一 |
 | `DEEPAGENTS_GATE_API_TOKEN_FILE` | 无 | Gate 令牌文件路径，与令牌内容二选一 |
 | `DEEPAGENTS_GATE_TIMEOUT_SECONDS` | 5 | 请求超时，单位秒 |
-| `DEEPAGENTS_GATE_FAIL_CLOSED` | false | Gate 故障时拒绝执行；上例设为 true |
+| `DEEPAGENTS_GATE_FAIL_CLOSED` | true | Gate 故障或会话历史不完整时拒绝执行 |
 
-`DEEPAGENTS_GATE_FAIL_CLOSED=false` 时，Gate 故障会记录 Bypass 并继续执行；明确返回的 Deny 始终拦截。
+默认 `fail_closed=true`：Gate 超时、连接失败、鉴权失败或响应无有效判定时拒绝执行。
+显式设置 `DEEPAGENTS_GATE_FAIL_CLOSED=false` 才启用兼容模式：Gate 故障会记录 Bypass 并继续执行，
+历史截断后也允许使用剩余上下文送检。这会降低保护范围；明确返回的 Deny 始终拦截。
 
 也可复用应用配置：`GateRuntime.load(settings["agentgate"])`。字段使用 `gate_url`、`api_token`、`fail_closed` 等名称，见 [config.py](src/agentmoss_deepagents/config.py)。显式配置不与环境变量合并。
 
@@ -266,6 +266,26 @@ result = await agent.ainvoke(
 
 持久化历史最多保留 200 条动作、20 次用户输入和 32 KiB；应用可配置更小的窗口。运行时和 checkpoint 使用相同的窗口规则，稳定轮次顺序和裁剪边界防止旧快照恢复已淘汰的记录。超限时整条移除历史记录并标记 `truncated`，当前送检参数不会因此截短。`history_bytes` 必须容纳会话标识和裁剪元数据；过小会在请求开始时明确报错。同一次根调用另行保存已开始的执行 ID，历史被移除后，SDK 节点重试也不会再次执行相同工具调用。这份去重集合只在本次调用内有效，不写入 checkpoint；跨进程恢复仍需应用核对已发生的副作用。
 
+插件显式提供 `action_history` 后，Gate 会使用该列表，不会用 SQLite 历史补全。
+当前 Gate/Moss 不会因 `metadata.history_truncated` 自动恢复早期上下文，不能保证识别已被裁掉的攻击链。
+因此默认 `fail_closed=true` 时，插件在送检前拒绝历史已截断的后续工具调用，记录
+`Deny` / `source=history_truncated`，不调用 Gate 或执行后端；从 checkpoint 恢复时同样生效。
+长会话达到上述任一上限后可能停止工具执行。应用应先核对完整审计记录和已发生的副作用，
+不要自动清空历史、切换会话编号或关闭 `fail_closed` 来绕过拒绝。
+显式设为 `false` 时，插件继续发送剩余历史及 `history_truncated=true`，判定仅覆盖可见上下文。
+
 会话历史使用 schema=5。已结束的 v3/v4 历史会自动转换，保留动作内容和执行 ID；升级前先结束请求，确认 checkpoint 没有待执行任务并备份。含 `attempted`、`unknown` 或 `interrupted` 的旧历史需要先人工核对，插件会拒绝自动转换。旧插件不能读取新格式，回退时使用升级前备份或新会话。
+
+## 测试
+
+在主仓根目录、安装了本地 `deepagents-aio` 可选依赖的 Python 3.11+ 环境中执行：
+
+```bash
+python -m pip install pytest pytest-asyncio
+python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q
+```
+
+主仓的 `python -m pytest -q` 不会收集这里的用例。离线测试使用模拟 HTTP 服务和真实工具调用；
+真实 AIO 用例默认跳过，环境变量和服务要求见 [test_aio_live.py](tests/test_aio_live.py)。
 
 [官方 Middleware 文档](https://docs.langchain.com/oss/python/langchain/middleware/custom)

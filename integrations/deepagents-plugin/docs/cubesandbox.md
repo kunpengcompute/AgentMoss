@@ -22,13 +22,20 @@ DeepAgents 主代理 / 子代理
 
 ## 安装与连接前提
 
-在 DeepAgents 应用环境中安装插件，可通过 pip 安装发布包，也可使用源码，命令见[插件安装说明](../README.md#安装)。
+在 DeepAgents 应用环境中，从 AgentMoss 商用仓库源码安装插件及可选依赖，命令见[插件安装说明](../README.md#安装)。
 
 应用提前准备已启动的外部 Gate/Moss、已创建的 CubeSandbox 沙箱及可访问的 CubeProxy 地址。Gate token 与 CubeSandbox 流量 token 不同；AIO 端口/路由域名使用默认值时，插件发送 Host: 8080-<sandbox_id>.cube.app。
 
 ## 沙箱中的脚本检查
 
-在构建 AIO 镜像时，将 Moss 安装到运行 `shell.py` 的 Python 环境中。可用 `python -m pip install agent-moss`，也可从源码安装，见[主项目安装说明](../../../README.md#安装)。
+在构建 AIO 镜像时，将商用 Moss 源码复制到镜像中，再安装到运行 `shell.py` 的 Python 环境：
+
+```bash
+python -m pip install -e /path/to/AgentMoss
+```
+
+路径指镜像内的商用源码目录，使用 `-e` 后需保留该目录。不要安装公共 PyPI 的同名上游完整版；
+源码来源见[主项目安装说明](../../../README.md#安装)。
 
 安装后，在 `/v1/shell/exec` 的执行入口调用 `judge_security()`：允许后执行 Bash，拒绝时返回 HTTP 403，检查故障时返回 503。
 
@@ -94,7 +101,7 @@ async def run_once(model, existing_checkpointer, session_id, user_text):
 
 ## 配置和路径
 
-- gate 块复用现有 GateConfig。显式 mapping 不合并环境变量；省略整个 gate 块才读取 DEEPAGENTS_GATE_*。默认故障策略未改变，部署示例显式设 fail_closed=True。
+- gate 块复用 GateConfig。显式 mapping 不合并环境变量；省略整个 gate 块才读取 DEEPAGENTS_GATE_*。fail_closed 默认 True，Gate 故障或历史截断时拒绝执行；示例保留显式设置。
 - aio.proxy_url 是 CubeProxy 基础地址，不含内嵌凭据、查询参数或片段。其他域名/端口路由通过 aio.route_host 指定。
 - aio.traffic_token 与 aio.traffic_token_file 二选一；不需要流量鉴权时都省略。文件令牌在初始化时读取，不自动热更新。
 - 每条 shell 命令显式在 working_dir 执行。单独 cd 不改变下一条命令的起始目录，cd subdir && ... 在同一条命令内有效。
