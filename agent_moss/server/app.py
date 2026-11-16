@@ -242,10 +242,19 @@ def create_app() -> FastAPI:
         sp.fail_fast_on_auth_error()
         # 部署自检：明确告知场景规则是否启用（未启用 = 银行沙箱目录白名单不生效）
         _log_deployment_selfcheck()
+        # 每个 worker 显式启动后台预筛包监控；首包未加载时请求继续走 Python。
+        from ..engine.prefilter_reload import start_configured_manager
+        start_configured_manager()
         # 在默认线程池里预热：真实请求也是经 run_in_executor 跑的（routes.py:350），
         # 这样线程池本身、以及 worker 线程里才会触发的惰性导入也一并热掉。
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _warm_up_engine)
+
+    async def close_prefilter_manager():
+        from ..engine.prefilter_reload import stop_managers
+        stop_managers()
+
+    app.router.add_event_handler("shutdown", close_prefilter_manager)
 
     # CORS：**不再默认全放行**（2026-10 安全加固）。
     # 为什么收紧是安全的：Console 前端用的是相对路径 fetch（同源），iframe 嵌入时

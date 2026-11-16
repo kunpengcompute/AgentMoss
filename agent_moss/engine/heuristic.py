@@ -1224,8 +1224,47 @@ class CommandPatternScanner:
             pass
         return self._compiled + self._agent_extra_compiled
 
+    def export_accel_rules(self) -> dict:
+        """Read-only snapshot of this scanner's current ordered command rules."""
+        from .prefilter_contract import flag_names
+        from .prefilter_manifest import encode_rule_pattern
+
+        return {
+            "schema_version": 1,
+            "rules": [{
+                "pattern": encode_rule_pattern(rule["pattern"]),
+                "flags": flag_names(rule["regex"].flags),
+            } for rule in self._get_active_rules()],
+        }
+
+    @staticmethod
+    def _accel_candidates(active: tuple[dict, ...], scan_texts: list[str]) -> set[int] | None:
+        """None means the entire scan takes the original Python path."""
+        try:
+            from .prefilter_contract import guard_text
+            from .prefilter_reload import get_manager
+
+            manager = get_manager()
+            if manager is None:
+                return None
+            manager.start()
+            if any(guard_text(text) for text in scan_texts):
+                return None
+            identities = tuple((rule["pattern"], rule["regex"].flags) for rule in active)
+            binding = manager.bind_patterns(identities)
+            if binding is None or not binding.covered:
+                return None
+            candidates = set(range(len(active))) - binding.covered
+            for text in scan_texts:
+                # Each rule has one expression; union complete variant hits.
+                candidates.update(binding.candidates(text))
+            return candidates
+        except Exception:
+            # A partial native result must never restrict Python matching.
+            return None
+
     def scan(self, action_detail: str) -> HeuristicResult:
-        active = self._get_active_rules()
+        active = tuple(self._get_active_rules())
         # NEW-FP-I: echo/printf 是文本输出命令，其引号内参数是字面量非真实命令。
         # 旧实现对整个 action_detail 做正则搜索，echo "rm -rf /tmp" 的输出文本里
         # rm -rf 被当真实命令匹配 → 误报。修复：对首词 echo/printf 的命令段剥掉
@@ -1246,6 +1285,7 @@ class CommandPatternScanner:
             scan_texts.append(_deob)
         if getattr(self._profile, "os_type", "") == "windows":
             scan_texts.append(scan_text.replace("/", "\\"))
+        candidates = self._accel_candidates(active, scan_texts)
         # ssh-keygen 生成模式豁免：生成新私钥时 -f 后的私钥路径是写目标，不应命中
         # 「访问私钥」命令正则（如 .ssh/id_rsa）。读模式（-y/-l/-p）不受豁免。
         exempt_keygen = _is_ssh_keygen_generate(action_detail)
@@ -1254,8 +1294,9 @@ class CommandPatternScanner:
         _pw_guard_off = has_exec_bypass_chain(action_detail)
         _no_quotes = None if _pw_guard_off else ALL_QUOTES_RE.sub(" ", action_detail)
         hits = [
-            p for p in active
-            if any(p["regex"].search(t) for t in scan_texts)
+            p for index, p in enumerate(active)
+            if (candidates is None or index in candidates)
+            and any(p["regex"].search(t) for t in scan_texts)
             and not (exempt_keygen and p["risk_type"] == "file_access")
             and (
                 p["pattern"] not in QUOTED_SAFE_PASSWORD_PATTERNS

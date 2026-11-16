@@ -108,8 +108,11 @@ class AgentExtensions:
         Raises:
             ValueError: JSON 结构不合法
         """
-        with open(rules_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(rules_file, 'rb') as f:
+            raw = f.read()
+        from ..engine.prefilter_rule_source import record_startup_read
+        record_startup_read(rules_file, raw)
+        data = json.loads(raw.decode('utf-8'))
 
         agent_id = data.get(id_key, "")
         if not agent_id:

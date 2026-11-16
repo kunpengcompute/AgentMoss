@@ -616,6 +616,36 @@ def save_runtime_config(config: dict) -> None:
 _RUNTIME_CONFIG_CACHE: dict[tuple[str, int, int], dict] = {}
 
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_READONLY_RUNTIME = ContextVar('prefilter_readonly_runtime', default=None)
+
+
+def load_runtime_config_readonly() -> dict:
+    """Use normal merge semantics without creating or rewriting configuration."""
+    if is_runtime_config_disabled():
+        return {'version': 1, 'layers': dict(DEFAULT_LAYERS)}
+    path = get_runtime_config_path()
+    try:
+        user = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return generate_source_defaults()
+    if type(user) is not dict:
+        raise ValueError('runtime configuration must be an object')
+    return merge_config(user, generate_source_defaults())
+
+
+@contextmanager
+def readonly_runtime_snapshot():
+    value = load_runtime_config_readonly()
+    token = _READONLY_RUNTIME.set(value)
+    try:
+        yield value
+    finally:
+        _READONLY_RUNTIME.reset(token)
+
+
 def load_runtime_config() -> dict:
     """加载运行时配置：缺失则从种子生成并写入，已有则合并新出厂规则。
 
@@ -625,6 +655,9 @@ def load_runtime_config() -> dict:
     直接返回只含默认层级开关的空配置；各 `*_or_default` 取数函数因此自动回退到
     包内 profile / 模块常量（cold 模式再叠加规则目录）。
     """
+    readonly = _READONLY_RUNTIME.get()
+    if readonly is not None:
+        return readonly
     if is_runtime_config_disabled():
         return {"version": 1, "layers": dict(DEFAULT_LAYERS)}
     config_path = get_runtime_config_path()

@@ -440,8 +440,22 @@ def main():
     rules_init.add_argument("--with-builtin", action="store_true",
                             help="override.json 写成内置 L1 规则全量拷贝（就地把内置某条删/改时用）")
 
+    accel_parser = subparsers.add_parser("accel", help="预筛包手动构建与磁盘检查")
+    accel_sub = accel_parser.add_subparsers(dest="accel_command")
+    accel_build = accel_sub.add_parser("build-db", help="在固定目录生成或更新预筛包")
+    accel_build.add_argument("--profile", choices=["linux", "windows", "macos", "harmony"], default="linux")
+    accel_build.add_argument("--rules-file", help="完整规则快照；提供后不追加默认规则")
+    accel_build.add_argument("--out", required=True, help="加速包专用目录（不能是软链接）")
+    accel_build.add_argument("--disable-rule", action="append", default=[], metavar="RULE_KEY",
+                             help="离线选择不对某条规则启用预筛（规则 SHA256 身份）")
+    accel_status = accel_sub.add_parser("status", help="只读检查磁盘包")
+    accel_status.add_argument("--db", help="包目录；默认 AGENT_MOSS_ACCEL_DB")
+
     args = parser.parse_args()
 
+    if args.command == "accel":
+        from .accel_cli import cmd_accel
+        sys.exit(cmd_accel(args))
     if args.command == "init":
         cmd_init(args)
     elif args.command == "analyze":
