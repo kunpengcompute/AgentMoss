@@ -8,9 +8,11 @@
 三者由 HeuristicDetector 统一协调，按优先级依次执行，支持短路返回。
 """
 
+import ast
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1317,6 +1319,63 @@ class CommandPatternScanner:
         )
 
 
+def _only_python_walk_onerror_keywords(command: str) -> bool:
+    """证明命中的 onerror= 全是 Python os.walk 的命名回调参数。
+
+    仅供注入关键词匹配使用，不修改执行命令或其他规则的输入。
+    无法确认 shell/Python 结构时保留原检查；字符串和注释中的同名文本不豁免。
+    """
+    occurrences = command.lower().count("onerror=")
+    if not occurrences or len(command) > 128 * 1024 or "$" in command or "`" in command:
+        return False
+    try:
+        parts = shlex.split(command)
+        if len(parts) not in (3, 4) or (len(parts) == 4 and parts[3] != "2>&1"):
+            return False
+        if not re.fullmatch(r"python(?:3(?:\.\d+)?)?", parts[0]) or parts[1] != "-c":
+            return False
+        code = parts[2]
+        # Both spellings must agree: shell quote concatenation must not let a
+        # reconstructed keyword cancel a different literal occurrence.
+        if code.lower().count("onerror=") != occurrences:
+            return False
+        tree = ast.parse(code)  # Preserve case: OS.walk and OnError are not os.walk/onerror.
+        # Python 3.14 template strings retain expression source for later use.
+        # Older interpreters already reject this syntax during ast.parse.
+        if any(type(node).__name__ == "TemplateStr" for node in ast.walk(tree)):
+            return False
+        # Debug f-strings also turn expression source into a string constant.
+        # A keyword used there is output payload as well as Python syntax.
+        if any(
+            isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and "onerror=" in node.value.lower()
+            for node in ast.walk(tree)
+        ):
+            return False
+        lines = code.encode("utf-8").splitlines()
+        confirmed = 0
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "os"
+                and node.func.attr == "walk"
+            ):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "onerror" or not isinstance(keyword.value, ast.Name):
+                    continue
+                # AST columns are UTF-8 byte offsets. Count the exact rule text,
+                # so `onerror = callback` cannot cancel `onerror=` inside a string.
+                start = keyword.col_offset
+                if lines[keyword.lineno - 1][start:start + 8] == b"onerror=":
+                    confirmed += 1
+        return confirmed == occurrences
+    except (ValueError, SyntaxError, RecursionError, UnicodeError):
+        return False
+
+
 class InjectionKeywordChecker:
     """子检测器：Prompt 注入关键词检测（从 OSProfile 获取关键词）
 
@@ -1363,9 +1422,13 @@ class InjectionKeywordChecker:
             pass
         return self._keywords + self._agent_extra_keywords
 
-    def check(self, text: str) -> HeuristicResult:
+    def check(self, text: str, *, python_walk_onerror_only: bool = False) -> HeuristicResult:
         keywords = self._get_active_keywords()
-        hits = [p for p in keywords if p["keyword"].lower() in text]
+        hits = [
+            p for p in keywords
+            if p["keyword"].lower() in text
+            and not (python_walk_onerror_only and p["keyword"].lower() == "onerror=")
+        ]
         if not hits:
             return HeuristicResult(hit=False)
 
@@ -1715,9 +1778,17 @@ class HeuristicDetector:
         # 不是指令。注入检测只针对指令性文本（用户 prompt / reason / 命令），
         # 排除搜索工具的 action_detail，避免 "搜索 jailbreak" 等被误判为注入攻击。
         injection_text = combined_text
+        python_walk_onerror_only = False
         if _is_search_action_type(action_type):
             injection_text = f"{action_type} {reason} {prompt_session}".lower()
-        result = self._injection_checker.check(injection_text)
+        elif (
+            action_type in ("bash", "executebash", "terminal-executebash")
+            and "onerror=" not in f"{reason} {prompt_session}".lower()
+        ):
+            python_walk_onerror_only = _only_python_walk_onerror_keywords(a_next.get("action_detail", ""))
+        result = self._injection_checker.check(
+            injection_text, python_walk_onerror_only=python_walk_onerror_only,
+        )
         if result.hit:
             best = _merge_heuristic_hit(best, result)
 

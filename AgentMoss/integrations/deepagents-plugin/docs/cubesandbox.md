@@ -2,6 +2,8 @@
 
 本插件通过 `agent-sandbox` SDK 连接 CubeSandbox AIO。Gate 和 Moss 服务的启动方法见[部署说明](deployment.md)。
 
+首次部署请从 [CubeSandbox 接入目录](../../cubesandbox/README.md)开始，其中提供镜像构建配置、应用示例和可直接运行的检查脚本。本文补充客户端接口与行为说明。
+
 ## 两层检查分别部署
 
 外部 Agent 侧始终先通过插件调用 Gate → Moss Server。选择 aio 只改变执行后端，不取消这一层。
@@ -38,7 +40,7 @@ uv pip install --python /opt/aio-venv/bin/python /opt/agentmoss-source/AgentMoss
 
 安装后，在 `/v1/shell/exec` 的执行入口调用 `judge_security()`：允许后执行 Bash，拒绝时返回 HTTP 403，检查故障时返回 503。
 
-沙箱内部的入口适配需要由镜像维护者按实际 AIO 版本实现，并独立验证拒绝、故障处理和脚本读取行为。安装 AgentMoss Python 包不会自动改写 AIO 的执行入口。用已完成接入的镜像创建沙箱；实例的创建和销毁由应用负责。
+本项目提供了 [AIO 1.11.0 ARM64 镜像接入配置](../../cubesandbox/image/Dockerfile)，可从当前源码构建并接入上述入口。其他 AIO 版本需要镜像维护者核对入口后适配，并验证拒绝、故障处理和脚本读取行为。单独安装 AgentMoss 不会自动改写执行入口。用已完成接入的镜像创建沙箱；实例的创建和销毁由应用负责。
 
 文件 API、用于独占创建文件的 `/v1/code/execute` 和 CubeSandbox `commands.run()` 不经过这个 shell 入口。DeepAgents 的文件工具调用仍由客户端插件发送到 Gate 检查。`write_file` 要求 AIO 的 Python 代码执行接口可用，并显式使用 `stateful=false`；不创建持久 Python 会话。
 

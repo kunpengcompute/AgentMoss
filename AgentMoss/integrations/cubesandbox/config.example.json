@@ -1,0 +1,16 @@
+{
+  "backend": "aio",
+  "gate": {
+    "gate_url": "http://127.0.0.1:9100",
+    "api_token_file": "/run/secrets/gate-token",
+    "fail_closed": true,
+    "timeout_seconds": 30
+  },
+  "aio": {
+    "proxy_url": "http://cubeproxy.example:8080",
+    "sandbox_id": "your-sandbox-id",
+    "working_dir": "/home/gem",
+    "default_timeout": 30,
+    "hard_timeout": 30
+  }
+}

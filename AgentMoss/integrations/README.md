@@ -8,6 +8,10 @@ AgentMoss 从本项目源码安装，见[安装说明](../README.md#安装)。Ga
 
 在 DeepAgents 应用中注册插件，执行工具前获取 Gate/Moss 的安全判定。安装与接入方法见 [DeepAgents 插件说明](deepagents-plugin/README.md)。
 
+## cubesandbox/
+
+让 DeepAgents 在 CubeSandbox 中执行任务，并在沙箱内部检查命令和脚本。镜像构建、配置示例和接入检查见 [CubeSandbox 接入说明](cubesandbox/README.md)。
+
 ## qwenpaw-plugin/
 
 通过 QwenPaw 的权限检查接口接入。安装与配置方法见 [QwenPaw 插件说明](qwenpaw-plugin/README.md)。

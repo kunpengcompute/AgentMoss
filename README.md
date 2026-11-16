@@ -152,6 +152,7 @@ API 调用使用 `Authorization: Bearer <token>`。浏览器可通过 `http://12
 | [Python 独立客户端](./AgentGate/sdk/python/gate_client.py) | 通过 AgentGate 提交分析请求 |
 | [QwenPaw 插件](./AgentMoss/integrations/qwenpaw-plugin/README.md) | 在权限检查环节接入 Gate/Moss |
 | [DeepAgents 插件](./AgentMoss/integrations/deepagents-plugin/README.md) | 通过中间件接入主代理与子代理的工具调用 |
+| [CubeSandbox 接入](./AgentMoss/integrations/cubesandbox/README.md) | 构建带安全检查的沙箱镜像、连接应用并验证接入 |
 | [规则预筛配置](./AgentMoss/docs/预筛加速使用说明.md) | 启用 Hyperscan / Ultrascan、配置原生库及管理加速包 |
 
 长期运行时，先按上述步骤验证两个服务和真实分析请求，再参考 [AgentGate 部署说明](./AgentGate/README.md#部署) 配置服务托管、访问令牌和日志。跨机器部署时，需要让 AgentGate 能访问 AgentMoss 的监听地址，并显式配置 AgentMoss 令牌。
