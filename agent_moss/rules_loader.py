@@ -220,6 +220,8 @@ def _load_json(name: str) -> dict[str, Any]:
     ``extra.json``（整类追加）由 ``load_override_rules()`` / ``load_extra_rules()``
     解析，并在 ``infra/runtime_config.py`` 的合并层生效（判定时读的正是那一层）。
     """
+    from .engine.prefilter_rule_source import capture_startup_sources, record_startup_read
+    capture_startup_sources()
     path = _rules_dir() / name
     cache_key = str(path)
     cached = _JSON_CACHE.get(cache_key)
@@ -231,13 +233,17 @@ def _load_json(name: str) -> dict[str, Any]:
     try:
         st = path.stat()
     except OSError:
+        record_startup_read(path, None)
         return {}
     if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
         return cached[2]
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
+        with open(path, 'rb') as f:
+            raw = f.read()
+        record_startup_read(path, raw)
+        data = json.loads(raw.decode('utf-8')) or {}
     except (json.JSONDecodeError, OSError):
+        record_startup_read(path, None)
         return {}
     _JSON_CACHE[cache_key] = (st.st_mtime_ns, st.st_size, data)
     return data
@@ -600,11 +606,15 @@ def _scan_rules_file(path: Path, kind: str) -> dict[str, list[dict]]:
     （``{"dangerous_commands": {"category_enabled": true, "rules": [...]}}``）是
     高频误用，这里显式识破并给出可操作的提示。
     """
+    from .engine.prefilter_rule_source import record_startup_read
     out: dict[str, list[dict]] = {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, 'rb') as f:
+            raw = f.read()
+        record_startup_read(path, raw)
+        data = json.loads(raw.decode('utf-8'))
     except (json.JSONDecodeError, OSError) as e:
+        record_startup_read(path, None)
         logger.error("规则文件 %s 损坏/不可读，已跳过（%s 规则不生效）: %s", path, kind, e)
         return out
     except UnicodeDecodeError as e:
@@ -738,10 +748,11 @@ def _scan_rule_dirs() -> tuple[dict[str, list[dict]], dict[str, list[dict]], dic
     override: dict[str, list[dict]] = {}
     extra: dict[str, list[dict]] = {}
     loaded: dict[str, list[Path]] = {"override": [], "extra": [], "ignored": []}
+    from .engine.prefilter_rule_source import record_startup_directory
     for d in rules_dirs():
-        if not d.is_dir():
-            continue
-        for f in sorted(d.glob("*.json")):
+        files = sorted(d.glob('*.json')) if d.is_dir() else []
+        record_startup_directory(d, files)
+        for f in files:
             if f.name == OVERRIDE_FILENAME:
                 got = _scan_rules_file(f, "override")
                 # override 只要**声明了类别**就算生效（空数组 = 显式清空该类，是有效指令）；
@@ -832,6 +843,8 @@ def _rules_cached() -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
     cold / builtin 模式：首次扫描后**冻结**，运行中改规则目录不重扫（重启才生效）。
     """
     global _RULES_CACHE
+    from .engine.prefilter_rule_source import capture_startup_sources
+    capture_startup_sources()
     if not is_hot_reload_enabled() and _RULES_CACHE is not None:
         return _RULES_CACHE[2], _RULES_CACHE[3]
     dirs = rules_dirs()

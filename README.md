@@ -323,6 +323,13 @@ agent-moss rules status
 | `AGENT_MOSS_SCENARIO` | 部署级默认场景 ID |
 | `AGENT_MOSS_DATA_DIR` | 数据目录 |
 | `AGENT_MOSS_LOG_PATH` | LLM prompt 日志路径 |
+| `AGENT_MOSS_ACCEL` | 命令规则预筛加速开关，默认 `0`（关闭），设置为 `1` 后启用 |
+| `AGENT_MOSS_ACCEL_DB` | 加速包专用目录；自动生成需要可写的真实目录 |
+| `AGENT_MOSS_ACCEL_AUTO_BUILD` | 自动生成与更新加速包，默认 `1`；设为 `0` 时只加载手动生成的包 |
+| `AGENT_MOSS_ACCEL_LIB` | Hyperscan / Ultrascan 原生库路径；关闭加速时不需要安装 |
+| `AGENT_MOSS_ACCEL_BACKEND` | 原生库类型：`hyperscan` 或 `ultrascan` |
+
+开启加速后，后台自动生成加速包并跟随生效规则更新，也支持手动生成。参见 [使用说明](docs/预筛加速使用说明.md)、[设计说明](docs/预筛加速设计.md) 和 [测试说明](docs/预筛加速测试说明.md)。
 
 ## 开发与测试
 
