@@ -19,11 +19,30 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+deepagents-aio = [
+    "deepagents>=0.7.32,<0.8",
+    "langchain>=1.4.7,<2",
+    "langchain-core>=1.7.1,<2",
+    "langgraph>=1.2.18,<2",
+    "httpx>=0.28.1,<1",
+    "agent-sandbox>=0.0.30,<0.1",
+]
+
 [project.scripts]
 agent-moss = "agent_moss.cli:main"
 
 [tool.setuptools]
 include-package-data = true
+license-files = [
+    "LICENSE",
+    "integrations/deepagents-plugin/LICENSES/*.txt",
+    "integrations/deepagents-plugin/THIRD_PARTY_NOTICES.md",
+]
+
+[tool.setuptools.package-dir]
+agentmoss_deepagents = "integrations/deepagents-plugin/src/agentmoss_deepagents"
 
 [tool.setuptools.packages.find]
-include = ["agent_moss*"]
+where = [".", "integrations/deepagents-plugin/src"]
+include = ["agent_moss*", "agentmoss_deepagents*"]
