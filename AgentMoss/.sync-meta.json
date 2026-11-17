@@ -1,7 +1,7 @@
 {
   "scenario": "boostkit",
   "baseline_repo": "AgentMoss",
-  "baseline_commit": "d059587",
+  "baseline_commit": "b7a14e0",
   "baseline_version": "0.17.32",
-  "synced_at": "2026-11-17T13:35:35.369463+00:00"
+  "synced_at": "2026-11-17T13:39:04.664018+00:00"
 }
