@@ -1,10 +1,10 @@
 [Unit]
-Description=AgentGate V1 AI Agent Security Analysis Service
+Description=AgentGate AI Agent Security Gateway
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/agent-gate server --host 0.0.0.0 --port 9100
+ExecStart=%h/.local/bin/agent-gate gateway --port 9110 --upstream https://api.openai.com
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

@@ -56,6 +56,11 @@ class AgentExtensions:
     # agent 专属"完全安全操作"白名单（精确名或前缀，前缀以 '-' 结尾）→ 跳过 L2+L3。
     # 对齐 TS ts/src/agents/types.ts。前缀匹配（如 "memory-"）走 startswith，精确名走 ==。
     builtin_safe_action_types: list[str] = field(default_factory=list)
+    # agent 专属「单文件写工具」名（小写，精确匹配 action_type）。这些工具的语义是
+    # 「把声明的内容写到声明的一个路径」，read_before_write 只取声明路径、不扫 content。
+    # 通用名单在 rules/logic_rules.json 的 single_file_write_tools；这里只放宿主独占的工具名
+    # （如 OpenDesk 的 filemgr-writeFile），避免把宿主专属命名写进通用规则。
+    extra_single_file_write_tools: list[str] = field(default_factory=list)
     extra_skills: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -87,6 +92,9 @@ class AgentExtensions:
             builtin_safe_action_types=[
                 t for e in non_null for t in e.builtin_safe_action_types
             ],
+            extra_single_file_write_tools=[
+                t for e in non_null for t in e.extra_single_file_write_tools
+            ],
             extra_skills=[
                 sk for e in non_null for sk in e.extra_skills
             ],
@@ -108,11 +116,8 @@ class AgentExtensions:
         Raises:
             ValueError: JSON 结构不合法
         """
-        with open(rules_file, 'rb') as f:
-            raw = f.read()
-        from ..engine.prefilter_rule_source import record_startup_read
-        record_startup_read(rules_file, raw)
-        data = json.loads(raw.decode('utf-8'))
+        with open(rules_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
         agent_id = data.get(id_key, "")
         if not agent_id:
@@ -157,5 +162,8 @@ class AgentExtensions:
             extra_sensitive_paths=extra_sensitive_paths,
             builtin_safe_skills=data.get("builtin_safe_skills", []),
             builtin_safe_action_types=data.get("builtin_safe_action_types", []),
+            extra_single_file_write_tools=[
+                str(t).lower() for t in data.get("extra_single_file_write_tools", [])
+            ],
             extra_skills=data.get("extra_skills", []),
         )

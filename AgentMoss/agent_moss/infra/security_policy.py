@@ -99,7 +99,13 @@ def origin_allowed(origin: str, host_header: str, extra: list[str] | None = None
 
 # ==================== 鉴权 ====================
 
-HEALTH_PATHS = ("/api/v1/health",)
+#: 免鉴权的运维端点：探活 + Prometheus 抓取。
+#:
+#: `/metrics` 放行的理由（2026-11）：Prometheus 的抓取配置里配 bearer token
+#: 需要额外步骤，而指标内容只是**聚合数字**（请求数、耗时分布、池占用），
+#: 不含命令原文/路径/token。内网部署下泄露风险远低于「客户接不上监控」的
+#: 运维代价。需要收紧时可在网关层对这个路径做 IP 白名单。
+HEALTH_PATHS = ("/api/v1/health", "/metrics")
 
 #: 鉴权模式：
 #: - ``auto``（默认）：首次启动自动生成 token 写到 ``<data_root>/auth_token``（0600），
@@ -479,13 +485,13 @@ def open_private_append(path: Path):
     return io.TextIOWrapper(io.FileIO(fd, "a", closefd=True), encoding="utf-8")
 
 
-def write_private_text(path: Path, text: str) -> None:
+def write_private_text(path: Path, text: str, encoding: str = "utf-8") -> None:
     """以 0600 + ``O_NOFOLLOW`` 覆盖写。"""
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(str(path), flags, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    with os.fdopen(fd, "w", encoding=encoding) as f:
         f.write(text)
 
 
@@ -823,7 +829,7 @@ def max_inflight() -> int:
 _POOL_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("biz", ("/api/v1/analyze",)),
     ("review", ("/api/v1/review",)),
-    ("ops", ("/console",)),
+    ("ops", ("/console", "/api/v1/brain")),
     ("health", ("/api/v1/health",)),
 )
 

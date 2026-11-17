@@ -1,0 +1,39 @@
+[Unit]
+Description=AgentGate API Gateway (TypeScript)
+Documentation=https://gitcode.com/kenhkl/AgentGate
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__PROJECT_DIR__
+
+# 启动命令
+ExecStart=/usr/bin/node __PROJECT_DIR__/ts/dist/v3/cli.js gateway --config __PROJECT_DIR__/config/agent_gate.yaml
+
+# 重启策略
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=0
+
+# 日志
+StandardOutput=append:__PROJECT_DIR__/logs/gateway_ts.log
+StandardError=append:__PROJECT_DIR__/logs/gateway_ts_error.log
+
+# 环境变量（如果需要）
+# Environment=MIMO_API_KEY=your-key-here
+# EnvironmentFile=/etc/agentgate/environment
+
+# 安全限制（可选）
+# NoNewPrivileges=true
+# PrivateTmp=true
+
+# 优雅关闭
+TimeoutStopSec=10
+KillSignal=SIGTERM
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

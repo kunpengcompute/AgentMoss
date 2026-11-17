@@ -171,16 +171,50 @@ class AnalyzeResponse(BaseModel):
     # 结构化攻击链图（前端可视化）：{"nodes": [...], "edges": [...]}
     violation_graph: dict | None = Field(default=None,
                                          description="Structured attack-chain graph for visualization")
+    #: 本次判定的**能力降级说明**（2026-11）：正常为空数组。
+    #: 例：链状态时间线触顶 → "L2.2 组合链检测未覆盖本次动作"。
+    #: 调用方（AgentGate）应记录/上报，让客户在**不需要读日志**的情况下也能感知。
+    degraded: list[str] = Field(
+        default_factory=list,
+        description="Capability degradation notes for this analysis (empty when fully evaluated)",
+    )
+    #: 本次 **L3（LLM 语义分析）** 的实际结局（2026-11，稳定枚举）。
+    #: 让调用方在**不读日志**的情况下就能区分「这条 Allow 是 L3 认真判过的」
+    #: 还是「L3 挂了按 fail_open 放的」。取值见 ``engine.types.L3_OUTCOMES``：
+    #: ok / reasoning_fallback / not_reached / skipped /
+    #: fail_open / fail_closed / failed_but_blocked / circuit_open。
+    l3_outcome: str = Field(
+        default="",
+        description="L3 outcome: ok|reasoning_fallback|not_reached|skipped|"
+                    "fail_open|fail_closed|failed_but_blocked|circuit_open",
+    )
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
-    status: str = Field(default="healthy", description="Service status")
+    """Health check response.
+
+    ``status`` 取值（2026-11 起）：
+    - ``healthy``：一切正常
+    - ``degraded``：服务可用，但**某项安全能力已降级**（如链状态触顶导致组合链
+      检测失效）。这是"被动可感知"的关键 —— 任何探活脚本/监控/负载均衡只看
+      status 就能发现异常，不需要人去读日志。
+    """
+    status: str = Field(default="healthy", description="Service status: healthy | degraded")
+    #: 降级原因（status=degraded 时非空）；正常时为空数组
+    degraded: list[str] = Field(
+        default_factory=list,
+        description="Reasons the service is degraded (empty when healthy)",
+    )
     version: str = Field(default=__version__, description="Service version")
+    #: 实际监听端口（2026-11）。端口被占用自动漂移后，调用方从这里/health 得知新端口。
+    port: int = Field(default=0, description="Actual listening port (0 = unknown/not reported)")
     # 归属实例标识：值来自 env AGENT_MOSS_INSTANCE（spawn/systemd 注入），默认空串。
     # 多个 agentmoss 同机并存时，调用方按 instance 过滤避免连到别人的进程。
     # 空=未配置（独立部署或旧版），调用方可选择兼容或严格过滤。
     instance: str = Field(default="", description="Owner instance id (env AGENT_MOSS_INSTANCE), for multi-instance disambiguation")
+    # 运行态指标（2026-11 增强）：事件循环延迟、并发池占用、链状态规模。
+    # 附加字段，老客户端忽略即可；取不到时为空 dict，不影响健康判定。
+    metrics: dict = Field(default_factory=dict, description="Runtime metrics (loop lag, pools, chain state size)")
 
 
 class ErrorResponse(BaseModel):

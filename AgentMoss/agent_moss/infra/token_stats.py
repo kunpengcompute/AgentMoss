@@ -36,37 +36,6 @@ ENV_STATS_PATH = "AGENT_MOSS_TOKEN_STATS_PATH"
 
 # 最大记录条数（超过时自动裁剪）
 MAX_RECORDS = 10000
-_WRITE_LOCK = threading.RLock()
-
-
-@contextmanager
-def _stats_write_lock(stats_path: Path):
-    """Serialize read/append/write across threads and service/SDK processes."""
-    with _WRITE_LOCK:
-        stats_path.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(stats_path) + ".lock", flags, 0o600)
-        locked = False
-        try:
-            if os.name == "nt":
-                import msvcrt
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"\0")
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            locked = True
-            yield
-        finally:
-            if locked:
-                if os.name == "nt":
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
 
 
 def get_stats_path() -> Path:
@@ -127,34 +96,116 @@ def record_token_usage(
     )
 
 
+_WRITE_LOCK = threading.RLock()
+
+
+@contextmanager
+def _stats_write_lock(stats_path: Path):
+    """跨线程 + 跨进程串行化「读-改-写」。
+
+    服务进程和 SDK 进程可能同时记录用量；无锁的 read-modify-write 会互相
+    覆盖（后写者拿旧快照，前者的记录丢失）。Windows 用 msvcrt，POSIX 用 flock。
+    """
+    with _WRITE_LOCK:
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(stats_path) + ".lock", flags, 0o600)
+        locked = False
+        try:
+            if os.name == "nt":
+                import msvcrt
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            yield
+        finally:
+            if locked:
+                if os.name == "nt":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
+#: 记录缓存：path -> ((mtime_ns, size), records)。
+#: 为什么需要（2026-11 招行）：console 前端每 10 秒轮询一次 token 统计，单轮
+#: 触发 4 次全量 `read_text + json.loads`；记录到 1 万条时每次约 25ms，全部
+#: 跑在事件循环上。加指纹缓存后命中路径只做一次 `stat`。
+_RECORDS_CACHE: dict[str, tuple[tuple[int, int], list[dict]]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
 def _load_all_records(stats_path: Path) -> list[dict]:
-    """加载所有统计记录"""
-    if not stats_path.exists():
+    """加载所有统计记录（带 mtime/size 指纹缓存）。
+
+    返回**浅拷贝**：调用方可以 append 而不会污染缓存里的列表。
+    """
+    key = str(stats_path)
+    try:
+        st = stats_path.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
         return []
+    except OSError:
+        return []
+    with _CACHE_LOCK:
+        cached = _RECORDS_CACHE.get(key)
+        if cached is not None and cached[0] == sig:
+            return list(cached[1])
     try:
         data = json.loads(stats_path.read_text(encoding="utf-8"))
         # 兼容两种格式：纯列表 或 {"records": [...]} 包装
         if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and "records" in data:
-            return data["records"]
-        return []
+            records = data
+        elif isinstance(data, dict) and "records" in data:
+            records = data["records"]
+        else:
+            records = []
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Token stats file %s read error: %s", stats_path, e)
         return []
+    with _CACHE_LOCK:
+        _RECORDS_CACHE[key] = (sig, records)
+    return list(records)
 
 
 def _save_records(stats_path: Path, records: list[dict]) -> None:
-    """Atomically publish complete JSON; readers never see a truncated file."""
+    """**原子**保存统计记录（临时文件 + os.replace），并同步刷新缓存指纹。
+
+    直接 O_TRUNC 覆盖写在进程崩溃时会留下半截 JSON（下次读取整份丢弃）。
+    原子替换保证读者要么看到旧文件、要么看到完整新文件；权限保持 0600。
+    """
     stats_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = None
     try:
         fd, tmp_name = tempfile.mkstemp(prefix=stats_path.name + ".", dir=stats_path.parent)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(records, stream, indent=2, ensure_ascii=False)
-            stream.flush()
-            os.fsync(stream.fileno())
+        try:
+            os.fchmod(fd, 0o600)
+        except (AttributeError, OSError):
+            pass  # Windows 不支持 fchmod；mkstemp 已是私有文件
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(records, indent=2, ensure_ascii=False))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_name, stats_path)
+        tmp_name = None
+        # 写后同步缓存：避免下一次查询再读一遍刚落盘的同一份内容
+        try:
+            st = stats_path.stat()
+            with _CACHE_LOCK:
+                _RECORDS_CACHE[str(stats_path)] = (
+                    (st.st_mtime_ns, st.st_size),
+                    list(records),
+                )
+        except OSError:
+            with _CACHE_LOCK:
+                _RECORDS_CACHE.pop(str(stats_path), None)
     except OSError as e:
         logger.warning("Token stats file %s write error: %s", stats_path, e)
     finally:
@@ -331,7 +382,6 @@ def get_token_trend(
 def reset_token_stats() -> None:
     """重置（删除）所有 token 统计记录"""
     stats_path = get_stats_path()
-    with _stats_write_lock(stats_path):
-        if stats_path.exists():
-            stats_path.unlink()
-            logger.info("Token stats reset: %s deleted", stats_path)
+    if stats_path.exists():
+        stats_path.unlink()
+        logger.info("Token stats reset: %s deleted", stats_path)

@@ -21,6 +21,19 @@ class LLMConfig:
     max_tokens: int = 4096
     base_url: str = "https://openrouter.ai/api/v1"
     provider: str = ""
+    #: 原样透传给模型接口的额外请求体字段（OpenAI SDK 的 ``extra_body``）。
+    #:
+    #: 为什么需要（2026-11 招行）：不同私有化部署的网关对「关闭思考模式」
+    #: 各有一套私有参数，且没有统一标准 ——
+    #:   - vLLM + DeepSeek-V3.2/V4: {"chat_template_kwargs": {"enable_thinking": false}}
+    #:   - vLLM + DeepSeek-V3.1:    {"chat_template_kwargs": {"thinking": false}}
+    #:   - vLLM + Qwen3:            {"chat_template_kwargs": {"enable_thinking": false}}
+    #:   - 阿里云百炼:               {"enable_thinking": false}
+    #:   - OpenRouter:              {"reasoning": {"enabled": false}}
+    #:   - OpenAI o 系列:            {"reasoning_effort": "minimal"}
+    #: 客户无法通过固定字段覆盖所有情况，所以给一个通用透传口子，参数名由
+    #: 部署方按自己的推理框架填。空 dict 表示不传（保持历史行为）。
+    extra_body: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -206,6 +219,7 @@ def _load_toml(path: Path) -> dict:
 
 def _build_config(data: dict) -> Config:
     llm_data = data.get("llm", {})
+    _extra_body = llm_data.get("extra_body", {})
     llm_config = LLMConfig(
         api_key=llm_data.get("api_key", ""),
         model=llm_data.get("model", "anthropic/claude-3.5-sonnet"),
@@ -213,6 +227,8 @@ def _build_config(data: dict) -> Config:
         max_tokens=llm_data.get("max_tokens", 4096),
         base_url=llm_data.get("base_url", "https://openrouter.ai/api/v1"),
         provider=llm_data.get("provider", ""),
+        # 非法类型（不是 dict）直接忽略：透传体写错不能拖垮整个配置加载
+        extra_body=_extra_body if isinstance(_extra_body, dict) else {},
     )
 
     api_key_env = llm_data.get("api_key_env", "")
@@ -558,6 +574,19 @@ def is_policy_gen_enabled() -> bool:
     return enable_value == "1"
 
 
+def is_brain_enabled() -> bool:
+    """判断是否启用 Brain 自学习机制。
+
+    默认关闭（开发中，避免污染 L1/L2 判定和 L3 prompt），仅当显式设置
+    AGENT_MOSS_BRAIN_ENABLED=1（env 或 agent_moss_settings.json）时启用。
+
+    cold / builtin 模式下**强制关闭**：Brain 自学习规则来自用户数据目录，属于
+    用户级运行期规则来源，不属于冷启动/内置输入。
+    """
+    if is_runtime_config_disabled():
+        return False
+    enable_value = get_agent_moss_setting("AGENT_MOSS_BRAIN_ENABLED", "")
+    return enable_value == "1"
 
 
 def is_heuristic_enabled() -> bool:

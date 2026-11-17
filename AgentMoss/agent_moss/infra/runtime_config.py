@@ -14,6 +14,8 @@ import json
 import logging
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from .rules_mode import get_rules_mode, is_runtime_config_disabled
@@ -241,6 +243,9 @@ def _l2_intent_patterns_to_rules(profile) -> list[dict]:
             "intent_keywords": pat.intent_keywords,
             "dangerous_actions": pat.dangerous_actions,
             "reason": pat.reason,
+            # 旧 runtime 里没有这个字段：缺省 False，但 _get_intent_patterns 会按
+            # reason 回填 profile 默认值，避免旧配置让新豁免失效。
+            "allow_if_write_intent": getattr(pat, "allow_if_write_intent", False),
             "skip_l3_on_disabled": True,
             "enabled": True,
             "builtin": True,
@@ -361,6 +366,12 @@ def _agent_rules_to_defaults() -> dict:
             "category_desc": "agent 专属敏感路径（L1 末尾追加）",
             "rules": [{**sp, "enabled": True, "builtin": True}
                       for sp in data.get("extra_sensitive_paths", [])],
+        }
+        cats["extra_single_file_write_tools"] = {
+            "category_enabled": True,
+            "category_desc": "agent 专属单文件写工具（read_before_write 只取声明路径）",
+            "rules": [{"value": v, "enabled": True, "builtin": True}
+                      for v in data.get("extra_single_file_write_tools", [])],
         }
         out[agent_id] = cats
     return out
@@ -615,17 +626,15 @@ def save_runtime_config(config: dict) -> None:
 #: 约定：调用方**不得原地修改**返回的 dict（需改请 copy 后改，或改完落盘使缓存失效）。
 _RUNTIME_CONFIG_CACHE: dict[tuple[str, int, int], dict] = {}
 
-
-from contextlib import contextmanager
-from contextvars import ContextVar
-
-_READONLY_RUNTIME = ContextVar('prefilter_readonly_runtime', default=None)
+#: 预筛（prefilter）只读快照：在该上下文内 load_runtime_config 直接返回快照，
+#: 不创建、不改写用户配置文件（prefilter RuleSource 读取规则源时使用）。
+_READONLY_RUNTIME: ContextVar = ContextVar('prefilter_readonly_runtime', default=None)
 
 
 def load_runtime_config_readonly() -> dict:
-    """Use normal merge semantics without creating or rewriting configuration."""
+    """按正常合并语义读取运行时配置，但不创建/改写配置文件。"""
     if is_runtime_config_disabled():
-        return {'version': 1, 'layers': dict(DEFAULT_LAYERS)}
+        return {"version": 1, "layers": dict(DEFAULT_LAYERS)}
     path = get_runtime_config_path()
     try:
         user = json.loads(path.read_text(encoding='utf-8'))
@@ -1732,6 +1741,11 @@ def get_enabled_agent_extensions(runtime: dict, agent_id: str):
         for sp in _agent_category_enabled_rules(cats.get("extra_sensitive_paths", {}))
         if "path" in sp
     ]
+    single_file_write_tools = [
+        str(t["value"]).lower()
+        for t in _agent_category_enabled_rules(cats.get("extra_single_file_write_tools", {}))
+        if "value" in t
+    ]
     return AgentExtensions(
         agent_id=agent_id,
         description="",
@@ -1740,6 +1754,7 @@ def get_enabled_agent_extensions(runtime: dict, agent_id: str):
         extra_sensitive_paths=sensitive_paths,
         builtin_safe_skills=[s["value"] for s in safe_skills if "value" in s],
         builtin_safe_action_types=[a["value"] for a in safe_action if "value" in a],
+        extra_single_file_write_tools=single_file_write_tools,
         extra_skills=[],
     )
 

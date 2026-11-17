@@ -1,0 +1,30 @@
+[Unit]
+Description=AgentGate v2 Daemon (eBPF Syscall + Payload Collector)
+Documentation=https://github.com/kenhkl/AgentGate
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m agent_gate.v3.cli daemon --mode production
+Restart=on-failure
+RestartSec=5
+
+# eBPF capabilities
+AmbientCapabilities=CAP_BPF CAP_SYS_ADMIN CAP_PERFMON CAP_NET_RAW CAP_NET_ADMIN CAP_KILL
+
+# Resource limits
+CPUQuota=5%
+MemoryMax=512M
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agent_gate /var/log/agent_gate
+NoNewPrivileges=false
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-gated
+
+[Install]
+WantedBy=multi-user.target

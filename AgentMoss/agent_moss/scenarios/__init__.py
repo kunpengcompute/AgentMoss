@@ -30,9 +30,9 @@ Python 与 TypeScript 两端共享同一份 rules.json：
 无 scenario_id 或 rules.json 不存在时返回 None（通用模式）。
 """
 
-from contextlib import nullcontext
 from pathlib import Path
 import threading
+from contextlib import nullcontext
 import logging
 
 from ..infra.paths import asset_dir, is_safe_id

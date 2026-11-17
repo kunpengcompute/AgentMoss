@@ -7,6 +7,12 @@
 - L2.2 形式化验证（行为图 + 性质验证，含跨会话组合链）
 - L2.3 脚本内容 L2 扫描（对预处理后脚本内容复用 L2 规则）
 - L3.1 LLM + Skill 深度分析（特征匹配和逻辑规则结果作为提示注入）
+   → Deny 结果异步喂给 Brain 提取规则和 Skill
+
+Brain 规则融入：
+- Layer 1 类型 brain 规则在 L1.1/L1.2 检测后执行（violated_layers=brain_L1）
+- Layer 2 类型 brain 规则在 L2.x 检测后执行（violated_layers=brain_L2）
+- Brain Skill 写入 skills/ 目录，由 SkillEngine 自动匹配
 
 配置控制（优先级：环境变量 > agent_moss_settings.json > 默认值）：
 - AGENT_MOSS_DISABLE_LLM=1: 禁用第三层 LLM 分析，只执行前两层静态分析
@@ -16,6 +22,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,7 +30,7 @@ if TYPE_CHECKING:
     from ..profiles.base import OSProfile
     from ..agents.base import AgentExtensions
 
-from ..infra.config import Config, is_llm_enabled
+from ..infra.config import Config, is_brain_enabled, is_llm_enabled
 from ..profiles import get_profile
 from .heuristic import (
     HeuristicDetector, is_safe_bash_command,
@@ -38,7 +45,7 @@ from .script_content_analyzer import (
     scan_script_chain_with_l2,
     ScriptChainAnalysisResult,
 )
-from .skill_engine import SkillEngine
+from .skill_engine import SkillEngine, default_skills_dir
 from .types import HeuristicResult, SecurityJudgment
 
 logger = logging.getLogger(__name__)
@@ -74,8 +81,21 @@ class AgentMossBot:
         # 形式化引擎（L2.2）：多 session 行为图 + 性质验证（跨会话组合链/敏感数据传播）
         from .formal_engine import FormalEngine
         self._formal_engine = FormalEngine()
+        # 保存 skills_dir 供 brain 注入用（brain skill 也写该目录，对齐 SkillEngine 加载源）
+        self._skills_dir = skills_dir
         self._skill_engine = SkillEngine(skills_dir=skills_dir, agent_ext=agent_ext)
         self._llm_analyzer = LLMAnalyzer(skill_engine=self._skill_engine)
+
+        # Brain 模块（默认关闭，AGENT_MOSS_BRAIN_ENABLED=1 才启用）
+        # 为避免默认开启时产生建库/写文件/读库等副作用，实例化延迟到首次访问：
+        # 未启用时 _brain_rule_store 保持 None，_check_brain_rules_layer 与提取触发点
+        # 均直接短路。启用后通过 _ensure_brain() 惰性实例化。
+        self._brain_enabled = is_brain_enabled()
+        self._brain_rule_store = None
+        self._brain_skill_manager = None
+        self._brain_extractor = None
+        self._brain_curator = None
+        self._brain_last_maintenance = 0
 
     def judge(
         self,
@@ -134,6 +154,12 @@ class AgentMossBot:
 
         violated_layers: list[str] = []
 
+        # ========== Brain 维护（节流，仅启用时） ==========
+        # 定期执行 curator：draft 规则自动激活 + 规则/skill 生命周期（stale/archived）。
+        # 节流：每 MIN_BRAIN_MAINT_INTERVAL 秒最多一次，避免每次 judge 都跑 SQL。
+        if self._brain_enabled:
+            self._maybe_run_brain_maintenance()
+
         # ========== 内联脚本命令检查（假阳性防护） ==========
         # 对内联脚本命令（python -c, perl -e 等）和 echo/printf 文本输出命令，
         # Layer 1/2 的 file_access 模式（如 /etc/shadow）不立即 Deny。因为敏感路径
@@ -146,13 +172,33 @@ class AgentMossBot:
 
         # ========== 层1: 特征匹配静态检测 ==========
         if heuristic_enabled:
+            _l1_t0 = time.monotonic()
             heuristic_result = self._heuristic_detector.detect(a_next, reason, prompt_session)
+            try:
+                from ..infra import metrics as _m
+
+                _m.LAYER_DURATION.observe(time.monotonic() - _l1_t0, layer="L1")
+            except Exception:  # noqa: BLE001
+                pass
             logger.debug(
                 "特征匹配检测结果: hit=%s, risk_level=%s, reason=%s",
                 heuristic_result.hit,
                 heuristic_result.risk_level,
                 heuristic_result.reason,
             )
+            try:
+                from ..infra.trace_log import trace_summary as _tls
+
+                _tls(
+                    "l1.result",
+                    hit=heuristic_result.hit,
+                    risk_level=heuristic_result.risk_level,
+                    risk_type=heuristic_result.risk_type,
+                    reason=heuristic_result.reason,
+                    matched=heuristic_result.matched_patterns,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             if heuristic_result.hit:
                 # 对内联脚本/文本输出命令，file_access 风险不立即 Deny（交 inline_analyzer 静态判定）
                 skip_inline_file_access = (
@@ -212,6 +258,7 @@ class AgentMossBot:
             script_chain_result = analyze_script_content(
                 _l15_action_type, _l15_action_detail, command_scanner=_scanner,
                 cwd=cwd,
+                # L1 关闭时继续追踪子脚本（不因 critical 短路），线索留给 L2/L3。
                 stop_on_critical=heuristic_enabled,
             )
             # ⚠️ 「脚本存在但内容读不了」（超过大小上限 / 权限）**不能当安全放行**：
@@ -258,6 +305,22 @@ class AgentMossBot:
                             action_desc=a_next.get("action_detail", ""),
                             violated_layers=violated_layers,
                         )
+
+        # ========== Brain Layer 1 规则检查 ==========
+        brain_l1_deny = self._check_brain_rules_layer(a_next, layer=1)
+        if brain_l1_deny:
+            violated_layers.append("brain_L1")
+            logger.info("Brain Layer 1 规则拦截: %s", brain_l1_deny.explanation[:100])
+            return SecurityJudgment(
+                allowed=False,
+                reason=f"[Brain L1] {brain_l1_deny.explanation}",
+                risk_level="high",
+                risk_type="brain_rule",
+                confidence=int(brain_l1_deny.confidence * 100),
+                source="brain_rule",
+                action_desc=a_next.get("action_detail", ""),
+                violated_layers=violated_layers,
+            )
 
         # ========== 白名单快速放行（两级） ==========
         action_type = a_next.get("action_type", "").lower()
@@ -356,16 +419,36 @@ class AgentMossBot:
 
         # ========== 层2: 逻辑规则检测 ==========
         if logic_rules_enabled:
+            _l2_t0 = time.monotonic()
             logic_result = self._logic_rules_checker.check(
                 prompt_session, action_history, a_next, reason, cwd=cwd,
                 prompt_history=prompt_history,
             )
+            try:
+                from ..infra import metrics as _m
+
+                _m.LAYER_DURATION.observe(time.monotonic() - _l2_t0, layer="L2")
+            except Exception:  # noqa: BLE001
+                pass
             logger.debug(
                 "逻辑规则检测结果: hit=%s, risk_level=%s, reason=%s",
                 logic_result.hit,
                 logic_result.risk_level,
                 logic_result.reason,
             )
+            try:
+                from ..infra.trace_log import trace_summary as _tls
+
+                _tls(
+                    "l2.result",
+                    hit=logic_result.hit,
+                    risk_level=logic_result.risk_level,
+                    risk_type=getattr(logic_result, "risk_type", ""),
+                    reason=logic_result.reason,
+                    violated_rule=getattr(logic_result, "violated_rule", ""),
+                )
+            except Exception:  # noqa: BLE001
+                pass
             # file_access 命中合并：敏感路径/危险模式现已在 L1（heuristic_result），
             # 间接文件访问仍在 L2（logic_result）。两者任一命中 file_access 都需进入
             # inline/credential 包装判定。优先采用 logic_result（L2 indirect 仍是 L2 职责），
@@ -456,8 +539,8 @@ class AgentMossBot:
                 # （open( / system( …），于是 `Image.open('/tmp/x.png')`、
                 # `print(open('/tmp/x').read())` 这类正常脚本被 critical 误杀
                 # （0.15.4 起）。无证据时不判定，交回后续 L2.2 / L3 语义分析
-                # （数据外传等仍由 L3 兜住）。echo/printf 保持无条件调用：
-                # 步骤 2 已跳过它们，只用于提前 Allow 跳过 L3。
+                # （数据外传等仍由 L3 兜住）。
+                # echo/printf 保持无条件调用：步骤 2 已跳过它们，只用于提前 Allow 跳过 L3。
                 if is_literal_text_cmd or (
                     is_inline_script_cmd
                     and has_inline_danger_evidence(
@@ -521,7 +604,7 @@ class AgentMossBot:
                 if security_cfg.formal_observe_mode:
                     # observe 模式：只记录不拦截（灰度观察 FP 率用，如商用前的
                     # 大体量数据回放阶段）。违规仍标记进 violated_layers 供
-                    # 调用方观测，但不短路 Deny，继续走后续层。
+                    # actrail/调用方观测，但不短路 Deny，继续走后续层。
                     logger.warning(
                         "形式化验证 observe（只记录不拦截）: property=%s risk=%s path_len=%d reason=%s",
                         v.property_id if v else "?",
@@ -575,6 +658,22 @@ class AgentMossBot:
                         action_desc=a_next.get("action_detail", ""),
                         violated_layers=violated_layers,
                     )
+
+        # ========== Brain Layer 2 规则检查 ==========
+        brain_l2_deny = self._check_brain_rules_layer(a_next, layer=2, action_history=action_history)
+        if brain_l2_deny:
+            violated_layers.append("brain_L2")
+            logger.info("Brain Layer 2 规则拦截: %s", brain_l2_deny.explanation[:100])
+            return SecurityJudgment(
+                allowed=False,
+                reason=f"[Brain L2] {brain_l2_deny.explanation}",
+                risk_level="high",
+                risk_type="brain_rule",
+                confidence=int(brain_l2_deny.confidence * 100),
+                source="brain_rule",
+                action_desc=a_next.get("action_detail", ""),
+                violated_layers=violated_layers,
+            )
 
         # ========== L3.1: LLM + Skill 深度分析 ==========
         if skip_llm:
@@ -640,6 +739,14 @@ class AgentMossBot:
                 )
             except Exception as e:
                 logger.warning("LLM 分析异常: %s", e)
+                # 熔断打开 ≠ 调用失败：前者连请求都没发（上游早就判定不可用），
+                # 后者是真去调了但失败。两者对运维的含义不同，source 分开。
+                from ..infra.llm_client import LLMCircuitOpenError
+                _l3_fail_source = (
+                    "llm_circuit_open"
+                    if isinstance(e, LLMCircuitOpenError)
+                    else "llm_failure_fallback"
+                )
                 # 前两层已拦截 → 无论 fail_mode 都 Deny
                 if violated_layers:
                     return SecurityJudgment(
@@ -662,7 +769,7 @@ class AgentMossBot:
                         allowed=True,
                         reason=f"LLM 分析失败（warn-allow，fail_open）: {e}",
                         risk_level="low",
-                        source="llm_failure_fallback",
+                        source=_l3_fail_source,
                         action_desc=a_next.get("action_detail", ""),
                         violated_layers=violated_layers,
                     )
@@ -670,15 +777,33 @@ class AgentMossBot:
                     allowed=False,
                     reason=f"LLM 分析失败，因无法完成深度语义分析，按 fail-closed 原则拒绝: {e}",
                     risk_level="medium",
-                    source="llm_failure_fallback",
+                    source=_l3_fail_source,
                     action_desc=a_next.get("action_detail", ""),
                 )
             if not llm_judgment.allowed:
                 violated_layers.append("L3.1")
                 llm_judgment.violated_layers = violated_layers
+                # Layer 3 Deny → 异步喂给 Brain 提取规则和 Skill（仅启用时）
+                if (
+                    self._brain_enabled
+                    and llm_judgment.confidence and llm_judgment.confidence >= 90
+                ):
+                    try:
+                        self._ensure_brain()
+                        self._brain_extractor.extract(
+                            event={"action_detail": action_detail, "event_id": ""},
+                            llm_result={
+                                "confidence": llm_judgment.confidence / 100.0,
+                                "reason": llm_judgment.reason or "",
+                                "risk_type": llm_judgment.risk_type or "",
+                                "action_detail": action_detail,
+                            },
+                        )
+                    except Exception as e:
+                        logger.debug("Brain 提取异常（不影响主流程）: %s", e)
             elif "L2.2" in violated_layers:
                 # observe 模式：formal 引擎命中但未拦截 → 把标记合并进 LLM Allow 结果，
-                # 使调用方可见"本会拦但未拦"（与 skip_llm / LLM 禁用路径一致）。
+                # 使调用方/actrail 可见"本会拦但未拦"（与 skip_llm / LLM 禁用路径一致）。
                 llm_judgment.violated_layers = list(dict.fromkeys(
                     ["L2.2", *llm_judgment.violated_layers]
                 ))
@@ -693,6 +818,168 @@ class AgentMossBot:
                 violated_layers=violated_layers,
             )
 
+    def _maybe_run_brain_maintenance(self) -> None:
+        """节流执行 Brain curator 维护（draft 自动激活 + 生命周期）。
+
+        频率：每 BRAIN_MAINT_INTERVAL 秒最多一次（默认 300s）。失败不影响主流程。
+        """
+        try:
+            import time as _time
+            now = _time.time()
+            if self._brain_last_maintenance and \
+                    now - self._brain_last_maintenance < 300:
+                return
+            self._ensure_brain()
+            if self._brain_curator:
+                self._brain_curator.run_maintenance(auto_approve=True)
+            self._brain_last_maintenance = now
+        except Exception as e:
+            logger.debug("Brain 维护异常（不影响主流程）: %s", e)
+
+    def _ensure_brain(self):
+        """惰性实例化 Brain 模块（仅当 AGENT_MOSS_BRAIN_ENABLED=1 时被调用）"""
+        if self._brain_rule_store is not None:
+            return
+        from ..brain.curator import BrainCurator
+        from ..brain.pattern_extractor import PatternExtractor
+        from ..brain.rule_store import BrainRuleStore
+        from ..brain.skill_manager import BrainSkillManager
+
+        _skills_dir = self._skills_dir or default_skills_dir()
+        self._brain_rule_store = BrainRuleStore()
+        self._brain_skill_manager = BrainSkillManager(
+            skills_dir=_skills_dir, skill_engine=self._skill_engine
+        )
+        # 去重：收集内置规则正则以传给 extractor。源 = profile dangerous_commands
+        # pattern + sensitive_paths deny 路径 + runtime_config L1 命令规则。
+        # 新增 pattern 若被内置规则覆盖则跳过，避免与 L1/L2 重复。
+        builtin_patterns: list[str] = []
+        try:
+            for cp in self._profile.dangerous_commands:
+                builtin_patterns.append(cp.pattern)
+            for sp in self._profile.sensitive_paths:
+                if sp.deny_mode in ("deny_both", "deny_write", "deny_read"):
+                    builtin_patterns.append(re.escape(sp.path))
+                elif sp.credential:
+                    builtin_patterns.append(re.escape(sp.path))
+        except Exception:
+            pass
+        try:
+            from ..infra.runtime_config import (
+                get_enabled_l1_command_patterns_or_default,
+                load_runtime_config,
+            )
+            # 不传 os_type：按当前运行环境取（Brain 的内置规则去重集，
+            # 与被检测环境一致即可）。runtime 覆盖按平台隔离在函数内部完成。
+            runtime = load_runtime_config()
+            enabled = get_enabled_l1_command_patterns_or_default(runtime)
+            if enabled:
+                    for p in enabled:
+                        if isinstance(p, dict):
+                            builtin_patterns.append(p.get("pattern", ""))
+                        else:
+                            builtin_patterns.append(getattr(p, "pattern", ""))
+        except Exception:
+            pass
+        builtin_patterns = [p for p in builtin_patterns if p]
+
+        self._brain_extractor = PatternExtractor(
+            rule_store=self._brain_rule_store,
+            skill_manager=self._brain_skill_manager,
+            builtin_patterns=builtin_patterns,
+            reviewer=self._make_brain_reviewer(),
+        )
+        self._brain_curator = BrainCurator(
+            self._brain_rule_store, self._brain_skill_manager
+        )
+
+    def _make_brain_reviewer(self):
+        """创建 Brain LLM 审核器。无 LLM 配置时 reviewer 内部会降级（返回 None）。
+
+        审核是 L3 Deny 后的一次额外 LLM 调用（只对达到阈值的候选，且每 pattern 一生
+        最多一次）。默认开启；可通过 AGENT_MOSS_BRAIN_REVIEW=0 关闭。
+        """
+        try:
+            if os.getenv("AGENT_MOSS_BRAIN_REVIEW") == "0":
+                return None
+            from ..brain.reviewer import BrainReviewer
+            return BrainReviewer(timeout=10.0)
+        except Exception as e:
+            logger.debug("Brain 审核器初始化跳过: %s", e)
+            return None
+
+    def _check_brain_rules_layer(
+        self,
+        a_next: dict[str, str],
+        layer: int,
+        action_history: list[dict] | None = None,
+    ) -> "BrainRule | None":
+        """检查 Brain 指定 layer 的活跃规则，返回匹配的规则或 None"""
+        if not self._brain_enabled or self._brain_rule_store is None:
+            return None
+        try:
+            rules = self._brain_rule_store.get_active_rules(layer=layer)
+            if not rules:
+                return None
+
+            action_detail = a_next.get("action_detail", "").lower()
+            action_type = a_next.get("action_type", "").lower()
+            combined = f"{action_type} {action_detail}"
+
+            for rule in rules:
+                try:
+                    if re.search(rule.pattern, combined, re.IGNORECASE):
+                        # Layer 2 规则可能需要检查 action_history
+                        if layer == 2 and action_history:
+                            if not self._check_layer2_context(rule, action_history, a_next):
+                                continue
+                        self._brain_rule_store.record_trigger(rule.id)
+                        return rule
+                except re.error:
+                    logger.debug("Brain 规则正则错误: %s", rule.pattern)
+                    continue
+        except Exception as e:
+            logger.debug("Brain 规则检查异常: %s", e)
+        return None
+
+    def _check_layer2_context(
+        self,
+        rule: "BrainRule",
+        action_history: list[dict],
+        a_next: dict[str, str],
+    ) -> bool:
+        """Layer 2 类型的 Brain 规则需要检查上下文"""
+        # 行为链模式匹配
+        if rule.pattern.startswith("BEHAVIOR_CHAIN:"):
+            chain_type = rule.pattern.replace("BEHAVIOR_CHAIN:", "")
+            if chain_type == "external_read→sensitive_write":
+                # 检查历史中是否有外部读取 + 当前是敏感写入
+                has_external_read = any(
+                    "curl" in str(h.get("action_detail", "")).lower()
+                    or "wget" in str(h.get("action_detail", "")).lower()
+                    or "http" in str(h.get("action_detail", "")).lower()
+                    for h in action_history[-5:]
+                )
+                is_sensitive_write = any(
+                    k in a_next.get("action_detail", "").lower()
+                    for k in [".ssh", ".gnupg", "authorized_keys", "bashrc", "profile"]
+                )
+                return has_external_read and is_sensitive_write
+            if chain_type == "multi_config_read→privilege_action":
+                # 检查历史中是否连续读取多个配置文件
+                config_reads = sum(
+                    1 for h in action_history[-5:]
+                    if any(k in str(h.get("action_detail", "")).lower()
+                           for k in ["/etc/", "config", ".conf", ".yaml", ".json"])
+                )
+                is_privilege = any(
+                    k in a_next.get("action_detail", "").lower()
+                    for k in ["sudo", "su ", "chmod", "chown"]
+                )
+                return config_reads >= 2 and is_privilege
+            return False
+        # 非行为链规则，正则已匹配，直接通过
+        return True
 
 
 def judge_security(

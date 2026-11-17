@@ -1,8 +1,10 @@
 """FastAPI application entry point for AgentMoss HTTP API server."""
 
 import asyncio
+import json
 import logging
 import os
+from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -37,6 +39,21 @@ def _is_public_page(path: str) -> bool:
     return False
 
 
+#: 分析线程池引用（启动时写入，health/metrics 读取队列深度）
+_ANALYSIS_EXECUTOR: list = [None]
+
+
+def _executor_queue_depth() -> int | None:
+    """当前线程池排队任务数（取不到返回 None）。"""
+    ex = _ANALYSIS_EXECUTOR[0] if _ANALYSIS_EXECUTOR else None
+    if ex is None:
+        return None
+    try:
+        return ex._work_queue.qsize()  # noqa: SLF001 —— 标准库没有公开 API
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class _PooledLimiter:
     """分层并发闸门：未认证全局 → 未认证单 IP → agent → 路径池。
 
@@ -66,9 +83,21 @@ class _PooledLimiter:
             else:
                 self._counts[key] = cur - 1
 
+    async def snapshot(self) -> dict[str, int]:
+        """当前各池占用快照（健康检查用）。"""
+        async with self._lock:
+            return dict(self._counts)
+
 
 def _busy(detail: str, status: int = 503) -> JSONResponse:
     """并发超限响应，带 ``Connection: close`` 缩短连接占用。"""
+    try:
+        from ..infra import metrics as _m
+
+        # 503 = 并发池满（服务繁忙），429 = 限流/恶意排队
+        _m.REJECTED_TOTAL.inc(reason="busy" if status == 503 else "rate_limited")
+    except Exception:  # noqa: BLE001
+        pass
     return JSONResponse(
         status_code=status,
         content={"detail": detail},
@@ -227,7 +256,63 @@ def create_app() -> FastAPI:
     async def init_config():
         """Initialize config on startup (triggers config file auto-creation)."""
         from ..infra.config import get_default_config
-        get_default_config()
+        cfg = get_default_config()
+        # ⚠️ 必须显式初始化日志（2026-11 发现）：setup_logger 此前**从未被调用**——
+        # RotatingFileHandler 没挂上（agent_moss.log 一直是空/旧文件），日志级别
+        # 也随 uvicorn 的 root 配置漂移。客户反馈「日志太少」有一部分原因是这个：
+        # 文件日志压根没写。放在配置加载之后，用配置里的 log_level。
+        try:
+            from ..infra.logging import setup_logger
+
+            setup_logger(cfg.log_level)
+        except Exception as exc:  # noqa: BLE001 —— 日志初始化失败不能拖垮服务
+            logging.getLogger(__name__).warning("日志初始化失败: %s", exc)
+
+        # ⚠️ 显式设置分析线程池大小（2026-11，客户 TPS < 1 的根因之一）：
+        # `/api/v1/analyze` 通过 `loop.run_in_executor(None, ...)` 执行，而 `None`
+        # 用的是 Python 默认线程池 `min(32, cpu+4)` —— **8 核机器只有 12 个**。
+        # 于是 `AGENT_MOSS_POOL_BIZ` 调到 512 也没用：实际能同时分析的永远是 12 个，
+        # TPS = 12 / 单请求耗时。开 L3 时单请求几十秒，TPS 就掉到 1 以下。
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+
+            _cpu = os.cpu_count() or 4
+            _default = max(32, _cpu * 8)
+            try:
+                _workers = int(os.getenv("AGENT_MOSS_EXECUTOR_WORKERS", str(_default)) or _default)
+            except ValueError:
+                _workers = _default
+            if _workers > 0:
+                _executor = ThreadPoolExecutor(
+                    max_workers=_workers, thread_name_prefix="am-analysis"
+                )
+                asyncio.get_running_loop().set_default_executor(_executor)
+                # 保存引用供 health 读取队列深度（TPS 低时区分"算得慢"还是"排不上队"）
+                _ANALYSIS_EXECUTOR[0] = _executor
+                logger.info(
+                    "分析线程池: %d 线程（CPU %d，可用 AGENT_MOSS_EXECUTOR_WORKERS 调整）",
+                    _workers, _cpu,
+                )
+        except Exception as exc:  # noqa: BLE001 —— 设置失败退回默认线程池
+            logging.getLogger(__name__).warning("设置分析线程池失败（用默认值）: %s", exc)
+
+        # 多进程模式（2026-11）：AGENT_MOSS_WORKERS>1 或显式 AGENT_MOSS_MULTI_PROCESS=1
+        # 时，链状态改为「每请求增量同步 + 立即落盘 + 跨进程文件锁」，否则各 worker
+        # 的内存缓存互相看不见（实测 4 worker 各 200 请求只记 59 个节点）。
+        try:
+            _workers_env = int(os.getenv("AGENT_MOSS_WORKERS", "1") or "1")
+        except ValueError:
+            _workers_env = 1
+        if os.getenv("AGENT_MOSS_MULTI_PROCESS", "").strip() in ("1", "true", "yes", "on") or _workers_env > 1:
+            try:
+                from ..engine.formal_engine.chain_state import get_chain_state_store
+
+                get_chain_state_store().enable_multi_process()
+                logger.info(
+                    "链状态多进程模式：已启用（每请求增量同步 + 文件锁）"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning("启用链状态多进程模式失败: %s", exc)
         # 规则包契约：schema 版本 / 完整性 / 内容指纹。
         # 显式指定了 AGENT_MOSS_RULES_ROOT 且校验失败 → 这里会抛异常，服务拒绝启动
         # （带着残缺规则跑 = 静默放开一批防护）。
@@ -242,18 +327,36 @@ def create_app() -> FastAPI:
         sp.fail_fast_on_auth_error()
         # 部署自检：明确告知场景规则是否启用（未启用 = 银行沙箱目录白名单不生效）
         _log_deployment_selfcheck()
-        # 每个 worker 显式启动后台预筛包监控；首包未加载时请求继续走 Python。
-        from ..engine.prefilter_reload import start_configured_manager
-        start_configured_manager()
+        # 预筛包监控（可选模块）：每个 worker 显式启动；首包未加载时请求继续走 Python。
+        try:
+            from ..engine.prefilter_reload import start_configured_manager
+            start_configured_manager()
+        except ImportError:
+            pass
         # 在默认线程池里预热：真实请求也是经 run_in_executor 跑的（routes.py:350），
         # 这样线程池本身、以及 worker 线程里才会触发的惰性导入也一并热掉。
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _warm_up_engine)
+        # 事件循环延迟探针：同步阻塞最直接的观测指标（见 infra/loop_monitor.py）。
+        from ..infra.loop_monitor import get_loop_monitor
+
+        get_loop_monitor().start()
+
+    @app.on_event("shutdown")
+    async def shutdown_loop_monitor():
+        from ..infra.loop_monitor import get_loop_monitor
+
+        await get_loop_monitor().stop()
 
     async def close_prefilter_manager():
-        from ..engine.prefilter_reload import stop_managers
+        """关闭预筛包监控（可选模块；未安装时静默跳过）。"""
+        try:
+            from ..engine.prefilter_reload import stop_managers
+        except ImportError:
+            return
         stop_managers()
 
+    # 用 router.add_event_handler 而非 @app.on_event，避免新增 FastAPI 弃用告警。
     app.router.add_event_handler("shutdown", close_prefilter_manager)
 
     # CORS：**不再默认全放行**（2026-10 安全加固）。
@@ -300,6 +403,8 @@ def create_app() -> FastAPI:
 
     # ==================== 安全闸门（最外层，先于业务路由） ====================
     _pools = _PooledLimiter()
+    # 暴露给健康检查 / console 观测（只读快照）
+    app.state.pools = _pools
     _limiter = _RateLimiter(sp.rate_limit_qps())
 
     @app.middleware("http")
@@ -409,6 +514,53 @@ def create_app() -> FastAPI:
     # Policy Console（浏览器策略管控台，挂载在 /console 前缀）
     app.include_router(console_router)
 
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics_endpoint():
+        """Prometheus 抓取端点（2026-11 新增，见 infra/metrics.py）。
+
+        与 `/api/v1/health` 同级免鉴权（见 ``sp.HEALTH_PATHS``）：指标只是
+        聚合数字，不含命令原文。需要收紧时在网关层做 IP 白名单。
+        """
+        from fastapi.responses import PlainTextResponse
+
+        from ..infra import metrics as metrics_mod
+        from ..infra.loop_monitor import get_loop_monitor
+
+        # 瞬时值在拉取时刷新（Gauge 不适合每次请求都写）
+        try:
+            pools_snap = await _pools.snapshot()
+        except Exception:  # noqa: BLE001
+            pools_snap = {}
+        chain_nodes = None
+        chain_bytes = None
+        try:
+            from ..engine.formal_engine.chain_state import get_chain_state_store
+
+            store = get_chain_state_store()
+            with store._lock:  # noqa: SLF001 —— 同包内只读快照
+                chain_nodes = sum(len(t.nodes) for t in store._trackers.values())  # noqa: SLF001
+            db_path = getattr(store, "db_path", "")
+            if db_path and os.path.exists(db_path):
+                chain_bytes = os.path.getsize(db_path)
+        except Exception:  # noqa: BLE001
+            pass
+        lag = {}
+        try:
+            lag = get_loop_monitor().snapshot()
+        except Exception:  # noqa: BLE001
+            pass
+        metrics_mod.refresh_runtime_gauges(
+            pools=pools_snap,
+            chain_nodes=chain_nodes,
+            chain_db_bytes=chain_bytes,
+            loop_lag_ms=lag.get("loop_lag_ms"),
+            loop_lag_max_ms=lag.get("loop_lag_max_ms"),
+        )
+        return PlainTextResponse(
+            metrics_mod.render_prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
     return app
 
 
@@ -489,9 +641,11 @@ def _find_free_port(start_port: int, host: str = "127.0.0.1", scan: int = 100) -
     端口，配合 bridge.py 探测兜底，保证服务总能起来且消费方能连上。
     """
     import socket
+    # IPv6 地址（含冒号，如 ::1/::）必须用 AF_INET6 探测，否则永远 bind 失败。
+    family = socket.AF_INET6 if ":" in (host or "") else socket.AF_INET
     for candidate in range(start_port, start_port + scan):
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind((host, candidate))
                 if candidate != start_port:
@@ -505,11 +659,36 @@ def _find_free_port(start_port: int, host: str = "127.0.0.1", scan: int = 100) -
     return start_port
 
 
+def _write_port_file(port: int) -> None:
+    """把**实际监听端口**写到数据目录，供调用方发现。
+
+    端口被占用自动漂移后，调用方（agent/bridge）必须知道新端口，否则连不上。
+    文件内容为 JSON：``{"port": <实际端口>, "pid": <进程号>, "started_at": <UTC>}``。
+    写失败只记日志（调用方仍可用配置端口或 health 探测）。
+    """
+    try:
+        from ..infra.paths import get_data_root
+        path = get_data_root() / "agent_moss_server.port.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "port": port,
+            "pid": os.getpid(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+        logger.info("端口文件已写入: %s (port=%d)", path, port)
+    except Exception:  # noqa: BLE001 — 端口发现是附加能力，失败不影响服务
+        logger.warning("写端口文件失败（调用方需自行配置端口）", exc_info=True)
+
+
 def run_server(
     host: str = "127.0.0.1",
     port: int = 9090,
     mode: str = "http",
     socket_path: str = "/var/run/agent_moss/agent_moss.sock",
+    workers: int = 1,
 ) -> None:
     """
     Start AgentMoss server in the specified mode.
@@ -526,12 +705,23 @@ def run_server(
     else:
         import uvicorn
         actual_port = _find_free_port(port, host)
-        app = create_app()
-        logger.info("Starting AgentMoss HTTP server on %s:%d", host, actual_port)
-        uvicorn.run(
-            app, host=host, port=actual_port, log_level="info",
+        # health 接口通过环境变量回报实际端口（多 worker 各自进程也能读到）。
+        os.environ["AGENT_MOSS_ACTUAL_PORT"] = str(actual_port)
+        _write_port_file(actual_port)
+        logger.info("Starting AgentMoss HTTP server on %s:%d (workers=%d)", host, actual_port, workers)
+        _common = dict(
+            host=host, port=actual_port, log_level="info",
             # 连接层防护（2026-10）：限并发连接 + 空闲连接超时，
             # 挡住"只占连接不发完整请求"的慢速攻击。
             limit_concurrency=sp.max_connections(),
             timeout_keep_alive=sp.keep_alive_sec(),
         )
+        if workers and workers > 1:
+            # 多进程必须用 import string（uvicorn 要求），不能传 app 对象。
+            # 每个 worker 是独立进程、独立 GIL —— 这是突破 Python GIL 的唯一
+            # 办法（实测 1→4 进程 TPS 10.3→23.6）。链状态由 multi_process
+            # 模式保证跨进程一致（见 create_app 的 enable_multi_process）。
+            os.environ["AGENT_MOSS_WORKERS"] = str(workers)
+            uvicorn.run("agent_moss.server.app:create_app", factory=True, workers=workers, **_common)
+        else:
+            uvicorn.run(create_app(), **_common)

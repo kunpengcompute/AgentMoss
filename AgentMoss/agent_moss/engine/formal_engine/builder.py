@@ -13,6 +13,7 @@
 用于跨会话数据流边（同一文件被先后读写 = 数据传播通道）。
 """
 
+import functools
 import re
 from dataclasses import dataclass, field
 
@@ -43,9 +44,18 @@ _PATH_RE = re.compile(r"(?:^|\s|[@=])((?:/|~/)[\w./~-]+)")
 # 常见临时文件/脚本载体（跨会话传播的关键通道）
 _CARRIER_RE = re.compile(r"(?:/tmp/|/var/tmp/|~/|\./)[\w./-]+\.(?:sh|py|js|rb|pl|php|txt|log|json|db)")
 
+#: 公共目录不是「数据载体」：所有命令都共享 /tmp 等目录，把它当资源会把
+#: 无关动作连成一条数据链。2026-11 鸿蒙实测：历史里 `npm install`（低完整性源）
+#: 与后续 `npm view` 因都提到 `/tmp`（cd 进入）被「低完整性多跳可达」判 critical。
+#: 真实载体是**具体文件**（/tmp/x.sh），仍保留。
+_COMMON_DIR_RESOURCES = frozenset(
+    {"/", "/tmp", "/var/tmp", "/dev/shm", "/home", "/root", "/usr", "/etc", "/var", "/data", "/storage"}
+)
 
-def extract_resources(action_detail: str) -> set:
-    """从动作详情提取涉及资源（文件路径 + 载体文件）。"""
+
+@functools.lru_cache(maxsize=8192)
+def _extract_resources_cached(action_detail: str) -> frozenset:
+    """``extract_resources`` 的缓存内核（不可变返回值才能进 lru_cache）。"""
     resources: set = set()
     text = re.sub(r"'[^']*'|\"[^\"]*\"", "", action_detail)  # 剥引号内容
     for m in _PATH_RE.finditer(text):
@@ -53,16 +63,36 @@ def extract_resources(action_detail: str) -> set:
         # 过滤明显非文件路径（/dev/ 设备、URL 内路径）
         if p.startswith("/dev/") or "://" in p:
             continue
+        # 公共目录（含尾部 / 的目录写法）不是具体载体文件：不参与数据链共享。
+        if p in _COMMON_DIR_RESOURCES or p.endswith("/"):
+            continue
         resources.add(p)
-    return resources
+    return frozenset(resources)
 
 
+def extract_resources(action_detail: str) -> set:
+    """从动作详情提取涉及资源（文件路径 + 载体文件）。
+
+    返回新 set；内部走 lru_cache —— 历史里同一命令反复出现，500 条 × 5 session
+    时每请求要提取 3000 次，缓存后只算一次。
+    """
+    return set(_extract_resources_cached(action_detail))
+
+
+@functools.lru_cache(maxsize=8192)
 def _mark_stage(action_detail: str) -> str:
-    """匹配动作命中的组合链阶段（空 = 未命中）。P1：先解码再匹配（抗编码绕过）。"""
+    """匹配动作命中的组合链阶段（空 = 未命中）。P1：先解码再匹配（抗编码绕过）。
+
+    lru_cache（2026-11）：analyze 每次都要对**整段历史**重建行为图，
+    每条动作都要跑一遍 stage 正则。实测 500 条历史要 229ms、2000 条要 5 秒，
+    而同一个 action_detail 在历史里大量重复（同类命令反复出现）——
+    缓存后重复命令直接命中，不再重跑正则。
+    """
     from .decode import match_stage_any
     return match_stage_any(action_detail, _load_stages())
 
 
+@functools.lru_cache(maxsize=8192)
 def _mark_integrity(action_detail: str) -> tuple[str, bool]:
     """标记完整性标签 + 是否低完整性源。
 
@@ -227,17 +257,23 @@ def _add_cross_data_edges(mg: MultiSessionGraph) -> None:
         for r in n.resources:
             res_index.setdefault(r, []).append(i)
     seen: set[tuple[int, int]] = set()
+    # 同一资源涉及的节点很多时（真实历史里「反复 cat 同一个文件」极常见），
+    # 两两配对是 O(n²)：实测 5000 条共享同一资源 = 1250 万次配对、51 秒。
+    # 超过阈值后退化成**链式**连接（按时间序相邻的跨 session 对）。
+    # taint 传播仍能沿链到达所有节点（传递性），语义不变，边数从 O(n²) 降到 O(n)。
+    _PAIRWISE_LIMIT = 64
     for idxs in res_index.values():
         if len(idxs) < 2:
             continue
-        for a in range(len(idxs)):
-            i = idxs[a]
-            for b in range(a + 1, len(idxs)):
-                j = idxs[b]
-                if nodes[i].session_id == nodes[j].session_id:
-                    continue
-                key = (i, j)
-                if key in seen:
-                    continue
-                seen.add(key)
-                mg.cross_edges.append(BehaviorEdge(src=i, dst=j, kind="data"))
+        if len(idxs) <= _PAIRWISE_LIMIT:
+            pairs = ((idxs[a], idxs[b]) for a in range(len(idxs)) for b in range(a + 1, len(idxs)))
+        else:
+            pairs = ((idxs[k], idxs[k + 1]) for k in range(len(idxs) - 1))
+        for i, j in pairs:
+            if nodes[i].session_id == nodes[j].session_id:
+                continue
+            key = (i, j)
+            if key in seen:
+                continue
+            seen.add(key)
+            mg.cross_edges.append(BehaviorEdge(src=i, dst=j, kind="data"))

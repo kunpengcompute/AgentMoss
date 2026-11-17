@@ -31,6 +31,12 @@ from .logic_rules import _is_write_operation, _SensitivePathMatcher, _is_directo
 from .logic_rules import has_exec_bypass_chain, ALL_QUOTES_RE
 # 引号感知命令段切分同样下沉 logic_rules（NEW-FN-M 起含单管道切分），单一事实源：
 from .logic_rules import _SEPARATOR_SEGMENTS, _split_shell_segments
+# 写文件/编辑的 content 按目标语言分析（文档不跑命令执行检测；脚本只扫危险片段）。
+from .written_content_analyzer import (
+    is_file_write_action,
+    analyze_written_content,
+    strip_shell_docs_only,
+)
 
 # 默认用户规则文件路径（随包内置；builtin 模式下唯一允许读取的 user_rules.json）
 # 用户自定义规则文件（随规则目录走）。函数而非常量：AGENT_MOSS_RULES_ROOT 改了立即生效。
@@ -375,7 +381,9 @@ class DangerousPatternChecker:
         # NEW-FP-2: 临时目录豁免扩充相对 var/tmp 前缀——rm -rf var/tmp/* 清理本地 venv
         # 的临时目录（相对路径），旧豁免只认绝对 /tmp 等 4 个，相对 var/tmp/* 漏过 →
         # 通配符+删除误报。相对 var/tmp（无前导 /）也是标准临时目录名，一并豁免。
-        _scan = _strip_heredoc_content(action_detail)
+        # NEW-FP（2026-11 鸿蒙压测）：检索命令的引号内容是搜索模式/glob——
+        # `rg "remove|delete" --glob "*.py"` 是只读检索，不是批量误删。
+        _scan = strip_search_pattern_literals(_strip_heredoc_content(action_detail))
         _TEMP_DIRS = _HEURISTIC_TEMP_DIRS
         # NEW-FP-2 审核：相对 var/tmp（无前导 /）& 深层绝对路径（/opt/app/var/tmp）——
         # 裸露的 (?:^|[\s/])td(?:[\s/]|$) 会把「以 var/tmp 结尾的深层子路径」误当临时目录
@@ -1165,6 +1173,45 @@ def _split_command_segments(action_detail: str) -> list[str]:
     return segments
 
 
+#: 文本检索命令：引号内是搜索模式 / glob 过滤，是数据不是被执行的命令 token。
+_TEXT_SEARCH_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "ack", "ack-grep"})
+
+#: 命令前缀词：`sudo rg ...` / `time rg ...` 的实际命令词在后面。
+_COMMAND_PREFIX_WORDS = frozenset({"sudo", "command", "nohup", "time"})
+
+#: 引号内容（单/双引号，保持与 _strip_literal_text_segments 相同的简化语义）。
+_QUOTED_CONTENT_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def strip_search_pattern_literals(action_detail: str) -> str:
+    """剥离文本检索命令段里的引号内容（搜索模式/glob 是数据，不是命令）。
+
+    NEW-FP（2026-11 鸿蒙压测）：`rg -n -c "remove|delete" --glob "*.py" x`
+    被「通配符+删除」判成批量误删——`*.py` 的 `*` 与引号内 `remove|delete`
+    距离 <40 字符命中正则；实际是一次纯只读检索。引号内的删除词是搜索模式，
+    `--glob "*.py"` 是文件过滤条件，都不构成删除动作。
+
+    只剥检索命令段：`rm -rf "*"` 这类删除命令的引号参数原样保留（Windows
+    `del "*.txt"` 的引号通配符由命令自身展开，不能当字面量）。
+    `rg --pre <cmd>` 的预处理器参数是会被执行的命令，出现时不剥离（保守）。
+
+    对应原则 L1-4「危险规则只匹配真实命令 token」。
+    """
+    parts: list[str] = []
+    for seg in _split_command_segments(action_detail):
+        low = seg.strip().lower()
+        words = low.split()
+        idx = 0
+        while idx < len(words) and words[idx] in _COMMAND_PREFIX_WORDS:
+            idx += 1
+        is_search = idx < len(words) and words[idx] in _TEXT_SEARCH_COMMANDS
+        if is_search and "--pre" not in low:
+            parts.append(_QUOTED_CONTENT_RE.sub(" ", seg))
+        else:
+            parts.append(seg)
+    return "".join(parts)
+
+
 class CommandPatternScanner:
     """子检测器：关键命令正则扫描（从 OSProfile 获取模式）
 
@@ -1274,7 +1321,12 @@ class CommandPatternScanner:
         # 的重定向仍被检测，echo pass | passwd 的管道后 passwd 仍被匹配）。非 echo/printf
         # 段（rm -rf /tmp; echo done 的 rm 段）不剥，真实危险命令不漏报。
         # NORM-PATH: 再折叠路径混淆段（//、/./），堵路径穿越变体（cat /etc//shadow 漏检）。
-        scan_text = _normalize_path_segments(_strip_literal_text_segments(action_detail))
+        # NEW-FP（2026-11）：先剥「不会执行的 shell 区域」（quoted heredoc/注释/
+        # 文本段字面量，保留 $(...) 与管道给解释器），再做原有 echo/printf 字面量
+        # 处理。`cat <<'EOF'` 里的 rm 是文档正文；`echo "$(rm ...)"` 的命令替换保留。
+        scan_text = _normalize_path_segments(
+            _strip_literal_text_segments(strip_shell_docs_only(action_detail))
+        )
         # WIN-SEP: 同 SensitivePathChecker —— Windows 下追加分隔符归一化变体，
         # 让 `type C:/Windows/.../SAM` 这类正斜杠写法也能命中按反斜杠书写的规则。
         # 原文保留，故 `net user /add`、`https://` 等含 / 的命令模式不受影响。
@@ -1736,7 +1788,8 @@ class HeuristicDetector:
             HeuristicResult: 检测结果
         """
         action_type = a_next.get("action_type", "").lower()
-        action_detail = a_next.get("action_detail", "").lower()
+        action_detail_raw = a_next.get("action_detail", "")
+        action_detail = action_detail_raw.lower()
         # 注入关键词检测**用原文 action_detail**（不过字面量剥离）：echo 引号内的
         # "ignore previous instructions" 是**载荷本体**——echo 输出会进入下游 LLM
         # 上下文，构成间接 prompt injection 通道（deny-08/177/232、agent-xiaoo-03
@@ -1771,7 +1824,24 @@ class HeuristicDetector:
             return result
 
         # 2. 关键命令正则
-        best: HeuristicResult = self._command_scanner.scan(action_detail)
+        from .written_content_analyzer import handles_written_content
+
+        handled_write = handles_written_content(action_type, action_detail_raw)
+        if handled_write:
+            # 写文件/编辑：content 不是「本次执行的命令」。按目标语言分析：
+            # 文档/数据不跑命令执行检测；shell/python 用对应解析器只扫危险片段。
+            # 用原始 action_detail（保留路径/内容大小写）。
+            best: HeuristicResult = (
+                analyze_written_content(
+                    action_type,
+                    action_detail_raw,
+                    self._command_scanner,
+                    literal_stripper=_strip_literal_text_segments,
+                )
+                or HeuristicResult(hit=False)
+            )
+        else:
+            best = self._command_scanner.scan(action_detail)
 
         # 3. Prompt 注入
         # 搜索/查询类工具（search-WebSearch 等）的 action_detail 是查询参数（数据载荷），
@@ -1801,18 +1871,21 @@ class HeuristicDetector:
             best = _merge_heuristic_hit(best, result)
 
         # 5. 危险操作模式检测（从 L2 搬入）：通配符+删除、重定向覆盖关键目录
-        result = self._dangerous_pattern_checker.check(a_next)
-        if result.hit:
-            best = _merge_heuristic_hit(best, result)
+        # 已按内容语言处理的写工具调用跳过（content 里的 rm/*/重定向是数据）；
+        # 未走内容分析的（如 `write echo ... >> /etc/hosts`）保持原检查。
+        if not handled_write:
+            result = self._dangerous_pattern_checker.check(a_next)
+            if result.hit:
+                best = _merge_heuristic_hit(best, result)
 
-        # 5b. 主目录删除/写改检测（NEW-FN）：rm -rf ~ / $HOME / 变量间接删主目录
-        result = self._home_deletion_checker.check(a_next)
-        if result.hit:
-            best = _merge_heuristic_hit(best, result)
+            # 5b. 主目录删除/写改检测（NEW-FN）：rm -rf ~ / $HOME / 变量间接删主目录
+            result = self._home_deletion_checker.check(a_next)
+            if result.hit:
+                best = _merge_heuristic_hit(best, result)
 
-        # 6. 横向移动检测（从 L2 搬入，原死代码启用）：ssh/scp/rsync 到非本机
-        result = self._lateral_movement_checker.check(a_next)
-        if result.hit:
-            best = _merge_heuristic_hit(best, result)
+            # 6. 横向移动检测（从 L2 搬入，原死代码启用）：ssh/scp/rsync 到非本机
+            result = self._lateral_movement_checker.check(a_next)
+            if result.hit:
+                best = _merge_heuristic_hit(best, result)
 
         return best

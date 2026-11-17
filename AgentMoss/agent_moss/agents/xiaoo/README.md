@@ -2,13 +2,13 @@
 
 ## 文件
 
-- `rules.json` — xiaoO 专属命令规则、注入关键词及内置信任 Skill 配置
+- `rules.json` — xiaoO 专属规则的单一事实源，Python 与 TypeScript 两端共享
 
 ## 规则内容
 
 ### extra_command_patterns（5 条）
 
-以下规则保护 xiaoO 的配置、凭据和安全组件目录：
+同步自 `xiaoO/plugins/hookers/audit_agent/audit_policy_checker/audit_policy_checker/security/heuristic_detector.py` 行 98–132：
 
 1. `xiaoo\.env|xiaoo\.toml|llm_secrets\.json` — 访问 xiaoO 配置/密钥文件（high）
 2. `/usr/lib/\.xiaoo/skills/xiaoo-guardian/.*<写命令>` — 系统级 xiaoO-guardian 目录写保护（critical）
@@ -20,7 +20,7 @@
 
 ### extra_injection_keywords（6 条）
 
-xiaoO 专属的防护绕过关键词：
+xiaoO 专属绕过词（同步自 audit_agent heuristic_detector.py 行 361–367）：
 
 - EN: `bypass audit` / `skip security check` / `disable guard`（全 critical）
 - ZH: `绕过审计` / `禁用安全检查` / `关闭防护`（全 critical）
@@ -31,10 +31,11 @@ xiaoO 专属的防护绕过关键词：
 
 ## 加载机制
 
-`agent_moss.agents.get_agent_extensions("xiaoo")` 读取规则并返回 `AgentExtensions`。
+- py: `agent_moss.agents.get_agent_extensions("xiaoo")` → `AgentExtensions`
+- ts: `ts/src/agents/index.ts:getAgentExtensions("xiaoo")` → `AgentExtensions`
 
-检测流程把 `extra_*` 规则追加到通用规则之后；通用规则先命中时直接返回判定。
+detection pipeline 把 `extra_*` 追加到通用规则之后；通用规则先匹配命中即短路。
 
 ## 调用方
 
-调用方请求 AgentMoss 的 POST `/api/v1/analyze` 时，传入 `agent_id: "xiaoo"`，服务端据此加载本规则集。
+`hooks/xiaoO/bridge.py` 在 POST `/api/v1/analyze` 时带 `agent_id: "xiaoo"`，AgentMoss 服务端据此加载本规则集。

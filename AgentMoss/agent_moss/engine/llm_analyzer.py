@@ -20,7 +20,7 @@ from ..infra.config import (
     get_llm_timeout,
     get_log_path,
 )
-from ..infra.llm_client import LLMResponseError, call_llm
+from ..infra.llm_client import LLMCircuitOpenError, LLMResponseError, call_llm
 from .script_analyzer import (
     ScriptAnalysisResult,
     analyze_script_content,
@@ -200,6 +200,26 @@ class LLMAnalyzer:
         if log_path:
             self._log_prompt(judge_prompt, a_next, log_path)
 
+        # 4.6 追踪日志：完整 prompt（AGENT_MOSS_TRACE_LEVEL=full 时）。
+        # 与上面的 llm_log_path 独立 —— 那个需要调用方显式配置路径，这个只要
+        # 打开追踪开关就落到数据目录，客户排障时不必先配 env。
+        try:
+            from ..infra.trace_log import is_trace_enabled, LEVEL_FULL, trace_full
+
+            if is_trace_enabled(LEVEL_FULL):
+                trace_full(
+                    "l3.prompt",
+                    phase="security_judge",
+                    model=llm_config_to_use.model,
+                    base_url=llm_config_to_use.base_url,
+                    action_type=a_next.get("action_type", ""),
+                    action_detail=a_next.get("action_detail", ""),
+                    prompt=judge_prompt,
+                    prompt_chars=len(judge_prompt),
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
         # 5. 调用 LLM（带超时和重试）
         max_retries = max(1, config.retry.max_retries)
         retry_interval = max(0.0, config.retry.retry_interval)
@@ -238,6 +258,9 @@ class LLMAnalyzer:
                 provider=overrides.get("provider", config.llm.provider),
                 temperature=config.llm.temperature,
                 max_tokens=config.llm.max_tokens,
+                # per-request 只覆盖调用相关字段；extra_body 是部署级参数
+                # （关思考等），始终跟随全局配置，不允许调用方替服务端决定。
+                extra_body=config.llm.extra_body,
             )
 
         # 非零重试间隔下，每次调用至少分到一个间隔的时间，避免短预算
@@ -275,6 +298,35 @@ class LLMAnalyzer:
                 finally:
                     executor.shutdown(wait=False, cancel_futures=True)
 
+                # 追踪日志：完整响应（full 级别）。
+                # 这里的 content 是**模型最终答案**；思考内容（reasoning_*）在
+                # 网关侧就被剥掉了，要看到它得靠 llm_client 的空返回诊断。
+                try:
+                    from ..infra.trace_log import (
+                        is_trace_enabled as _te,
+                        LEVEL_FULL as _LF,
+                        trace_full as _tf,
+                    )
+
+                    if _te(_LF):
+                        _tf(
+                            "l3.response",
+                            phase="security_judge",
+                            attempt=attempt,
+                            model=llm_result.model,
+                            content=llm_result.content,
+                            prompt_tokens=llm_result.prompt_tokens,
+                            completion_tokens=llm_result.completion_tokens,
+                            elapsed_ms=round((time.monotonic() - _call_start) * 1000, 1),
+                            # 兜底可见性（2026-11）：追踪日志里也标明这次答案
+                            # 是从 reasoning 取的，而不是模型正常写在 content。
+                            reasoning_fallback=llm_result.used_reasoning_fallback,
+                            fallback_field=llm_result.fallback_field,
+                            original_content_state=llm_result.original_content_state,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+
                 # 记录 token 用量（step="L3_security_judge"）
                 try:
                     from ..infra.token_stats import record_token_usage
@@ -301,7 +353,28 @@ class LLMAnalyzer:
                         llm_result.content[:300],
                     )
                     raise
-                judgment.source = "llm"
+                # 2026-11 招行：区分「模型正常写在 content」与「从 reasoning
+                # 回退取的」。判定结果一样可用，但运维需要能看出模型行为异常
+                # （下游据此填 l3_outcome 与 degraded，不再只是日志里有痕迹）。
+                judgment.source = (
+                    "llm_reasoning_fallback"
+                    if getattr(llm_result, "used_reasoning_fallback", False)
+                    else "llm"
+                )
+                try:
+                    from ..infra.trace_log import trace_summary as _ts
+
+                    _ts(
+                        "l3.verdict",
+                        allowed=judgment.allowed,
+                        risk_level=judgment.risk_level,
+                        risk_type=judgment.risk_type,
+                        reason=judgment.reason,
+                        confidence=judgment.confidence,
+                        elapsed_ms=round((time.monotonic() - _call_start) * 1000, 1),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 # 写入缓存（超出上限时淘汰最旧条目）
                 if len(self._cache) >= self._cache_max:
                     self._cache.popitem(last=False)
@@ -339,6 +412,12 @@ class LLMAnalyzer:
                     raise LLMAnalysisFailure(
                         f"LLM 调用网络超时（已重试 {max_retries} 次）: {e}"
                     )
+
+            except LLMCircuitOpenError:
+                # 熔断打开：连请求都没发，重试只会让调用方多等两轮 —— 直接
+                # 向上抛原异常，让 coordinator 能把它与普通失败区分开
+                # （l3_outcome=circuit_open 而非 fail_open，2026-11）。
+                raise
 
             except Exception as e:
                 # 空响应仍可能消耗推理 token；仅记录服务端明确报告的用量。

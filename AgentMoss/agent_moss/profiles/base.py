@@ -56,6 +56,9 @@ class IntentDeviationPattern:
     dangerous_actions: list[str]      # a_next 中不应出现的危险关键词
     reason: str                       # 命中时的描述
     os: str = ""                      # 原始平台归属，语义同 CommandPattern.os
+    #: prompt 明确含写意图时跳过本规则（只对「查询→修改」这类分支置 True）。
+    #: 依据：用户说「搜索后写入 B」时写入是显式要求，不是意图偏离。
+    allow_if_write_intent: bool = False
 
 
 class OSProfile(ABC):

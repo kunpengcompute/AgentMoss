@@ -58,6 +58,10 @@ def local_model(monkeypatch, tmp_path):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Model)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
+    # 原仓有熔断器：本文件多个用例故意制造失败，不重置会让后续用例直接被熔断拦下
+    # （裁剪仓无此机制，移植时补上）。
+    from agent_moss.infra.circuit_breaker import reset_breaker_for_tests
+    reset_breaker_for_tests()
     monkeypatch.setenv("NO_PROXY", "127.0.0.1")
     monkeypatch.setenv("no_proxy", "127.0.0.1")
     monkeypatch.setenv("AGENT_MOSS_TOKEN_STATS_PATH", str(tmp_path / "usage.json"))

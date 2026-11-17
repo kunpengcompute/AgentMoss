@@ -2,7 +2,6 @@
 
 from .__version__ import __version__  # noqa: F401 — single source of truth
 
-
 def shutdown_acceleration():
     """Stop this process's shared acceleration monitors (at most five seconds).
 
@@ -10,6 +9,8 @@ def shutdown_acceleration():
     retain their packages; a later accelerated scan starts monitoring again.
     This does not disable rules or change AGENT_MOSS_ACCEL.
     """
-    from .engine.prefilter_reload import stop_managers
-
+    try:
+        from .engine.prefilter_reload import stop_managers
+    except ImportError:
+        return
     stop_managers()

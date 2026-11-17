@@ -14,7 +14,7 @@ def test_prefilter_shutdown_registration_adds_no_legacy_warning():
         warnings.simplefilter("always", DeprecationWarning)
         server_app.create_app()
     legacy = [item for item in caught if "on_event is deprecated" in str(item.message)]
-    assert len(legacy) <= 2  # main's existing startup registration emits two.
+    assert len(legacy) <= 4  # 基线现有 4 处 on_event；prefilter 用 add_event_handler 不新增
 
 
 def test_worker_lifecycle_owns_prefilter_manager(tmp_path, monkeypatch):

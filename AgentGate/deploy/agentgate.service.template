@@ -10,8 +10,8 @@ User=__USER__
 Group=__GROUP__
 WorkingDirectory=__PROJECT_DIR__
 
-# 启动命令（V1 分析服务）
-ExecStart=__PROJECT_DIR__/venv/bin/agent-gate server --host 0.0.0.0 --port 9100
+# 启动命令（需要指定 upstream）
+ExecStart=__PROJECT_DIR__/venv/bin/agent-gate gateway --upstream __UPSTREAM_URL__
 
 # 重启策略
 Restart=on-failure
@@ -19,8 +19,8 @@ RestartSec=5
 StartLimitInterval=0
 
 # 日志
-StandardOutput=append:__PROJECT_DIR__/logs/agent_gate.log
-StandardError=append:__PROJECT_DIR__/logs/agent_gate_error.log
+StandardOutput=append:__PROJECT_DIR__/logs/gateway.log
+StandardError=append:__PROJECT_DIR__/logs/gateway_error.log
 
 # 环境变量（如果需要）
 # Environment=ANTHROPIC_API_KEY=your-key-here

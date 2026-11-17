@@ -155,12 +155,14 @@ def cmd_server(args):
 
     # --port 0 表示"自动从 9090 开始找空闲端口"，不是字面端口 0
     port = args.port if args.port != 0 else 9090
+    workers = int(getattr(args, "workers", 1) or 1)
 
     run_server(
         host=args.host,
         port=port,
         mode=args.mode,
         socket_path=args.socket,
+        workers=workers,
     )
     return 0
 
@@ -420,11 +422,37 @@ def main():
         default="/var/run/agent_moss/agent_moss.sock",
         help="Unix socket path (socket mode)",
     )
+    server_parser.add_argument(
+        "--workers", type=int, default=1,
+        help="多进程 worker 数（默认 1）。>1 可突破 Python GIL 提升 CPU 吞吐；"
+             "链状态会自动切换为跨进程一致模式",
+    )
+
+    # accel 子命令（预筛包手动构建与磁盘检查；prefilter 可选模块）
+    accel_parser = subparsers.add_parser("accel", help="预筛包手动构建与磁盘检查")
+    accel_sub = accel_parser.add_subparsers(dest="accel_command")
+    accel_build = accel_sub.add_parser("build-db", help="在固定目录生成或更新预筛包")
+    accel_build.add_argument("--profile", choices=["linux", "windows", "macos", "harmony"], default="linux")
+    accel_build.add_argument("--rules-file", help="完整规则快照；提供后不追加默认规则")
+    accel_build.add_argument("--out", required=True, help="加速包专用目录（不能是软链接）")
+    accel_build.add_argument("--disable-rule", action="append", default=[], metavar="RULE_KEY",
+                             help="禁用某条规则（可重复）")
+    accel_status = accel_sub.add_parser("status", help="只读检查磁盘包")
+    accel_status.add_argument("--db", help="包目录；默认 AGENT_MOSS_ACCEL_DB")
 
     install_parser = subparsers.add_parser("install", help="Install systemd service for AgentMoss")
     install_parser.add_argument("--enable", action="store_true", help="Enable service on boot (systemctl enable)")
 
     status_parser = subparsers.add_parser("status", help="Show service status, port and Console URL")
+
+    # 部署自检（2026-11）：配置/规则/权限/磁盘/链状态，一条命令看清
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="部署自检：配置 / 规则 / 权限 / 磁盘 / 链状态"
+    )
+    doctor_parser.add_argument(
+        "--llm", action="store_true",
+        help="额外测试 LLM 连通性（会真实发一次请求，默认不测）",
+    )
 
     # rules 子命令（规则目录自查 / 生成模板；2026-10 客户要"够简单"）
     rules_parser = subparsers.add_parser(
@@ -440,37 +468,74 @@ def main():
     rules_init.add_argument("--with-builtin", action="store_true",
                             help="override.json 写成内置 L1 规则全量拷贝（就地把内置某条删/改时用）")
 
-    accel_parser = subparsers.add_parser("accel", help="预筛包手动构建与磁盘检查")
-    accel_sub = accel_parser.add_subparsers(dest="accel_command")
-    accel_build = accel_sub.add_parser("build-db", help="在固定目录生成或更新预筛包")
-    accel_build.add_argument("--profile", choices=["linux", "windows", "macos", "harmony"], default="linux")
-    accel_build.add_argument("--rules-file", help="完整规则快照；提供后不追加默认规则")
-    accel_build.add_argument("--out", required=True, help="加速包专用目录（不能是软链接）")
-    accel_build.add_argument("--disable-rule", action="append", default=[], metavar="RULE_KEY",
-                             help="离线选择不对某条规则启用预筛（规则 SHA256 身份）")
-    accel_status = accel_sub.add_parser("status", help="只读检查磁盘包")
-    accel_status.add_argument("--db", help="包目录；默认 AGENT_MOSS_ACCEL_DB")
+    # verify 子命令（批量验证一组命令的判定，用于规则变更前后对比）
+    verify_parser = subparsers.add_parser(
+        "verify", help="批量验证一组命令的判定（规则改动前后对比用）"
+    )
+    verify_parser.add_argument("file", help="命令清单文件，每行一条；空行和 # 忽略")
+    verify_parser.add_argument(
+        "--no-llm", action="store_true", help="禁用 L3（只跑 L1/L2，快且可复现）"
+    )
+    verify_parser.add_argument("--json", action="store_true", help="输出 JSON（便于 diff/CI）")
+
+    # state 子命令（链状态库：查看 / 备份 / 恢复 / 重置）
+    state_parser = subparsers.add_parser(
+        "state", help="链状态库：状态 / 备份 / 恢复 / 重置"
+    )
+    state_sub = state_parser.add_subparsers(dest="state_command")
+    state_sub.add_parser("status", help="查看状态库大小、节点数、agent 分桶")
+    state_backup = state_sub.add_parser("backup", help="一致性备份（服务在跑也能备）")
+    state_backup.add_argument("output", help="备份文件路径，如 /tmp/chains.bak")
+    state_backup.add_argument("--force", action="store_true", help="覆盖已存在的目标文件")
+    state_restore = state_sub.add_parser("restore", help="从备份恢复（必须先停服务）")
+    state_restore.add_argument("input", help="备份文件路径")
+    state_restore.add_argument("--port", type=int, default=9090, help="用于探测服务是否在跑")
+    state_reset = state_sub.add_parser("reset", help="清空状态库（必须先停服务）")
+    state_reset.add_argument("--yes", action="store_true", help="确认删除")
+    state_reset.add_argument("--port", type=int, default=9090, help="用于探测服务是否在跑")
+
+    # brain 子命令（contribute = 提交本地沉淀为 MR；中心化上传接口在此预留）
+    from agent_moss.brain.contributor import add_contribute_parser
+    add_contribute_parser(subparsers)
 
     args = parser.parse_args()
 
-    if args.command == "accel":
-        from .accel_cli import cmd_accel
-        sys.exit(cmd_accel(args))
     if args.command == "init":
         cmd_init(args)
     elif args.command == "analyze":
         sys.exit(cmd_analyze(args))
     elif args.command == "server":
         sys.exit(cmd_server(args))
+    elif args.command == "accel":
+        from .accel_cli import cmd_accel
+        sys.exit(cmd_accel(args))
     elif args.command == "install":
         sys.exit(cmd_install(args))
     elif args.command == "status":
         sys.exit(cmd_status(args))
+    elif args.command == "doctor":
+        from .doctor import cmd_doctor
+
+        sys.exit(cmd_doctor(args))
+    elif args.command == "state":
+        from .state_tool import cmd_state
+
+        sys.exit(cmd_state(args))
+    elif args.command == "verify":
+        from .verify_tool import cmd_verify
+
+        sys.exit(cmd_verify(args))
     elif args.command == "rules":
         if not getattr(args, "rules_command", None):
             print("rules 子命令：status（自查规则目录）/ init（生成模板）")
             sys.exit(1)
         sys.exit(cmd_rules(args))
+    elif args.command == "brain":
+        if not args.brain_command:
+            print("Brain 子命令：contribute（贡献本地规则/Skill 为 MR）")
+            sys.exit(1)
+        if args.brain_command == "contribute":
+            sys.exit(cmd_brain_contribute(args))
     else:
         parser.print_help()
         sys.exit(1)
@@ -508,6 +573,12 @@ def cmd_rules(args) -> int:
         print(f"  4) 自查：agent-moss rules status")
         return 0
     return 1
+
+
+def cmd_brain_contribute(args):
+    """Brain contribute 入口（延迟导入避免无依赖时 CLI 报错）"""
+    from agent_moss.brain.contributor import contribute
+    return contribute(args)
 
 
 if __name__ == "__main__":
