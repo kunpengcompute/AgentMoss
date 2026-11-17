@@ -329,24 +329,31 @@ def _parse_case_stmt(block: str) -> Optional[CaseStmt]:
     # body = header("... in") 之后到 esac 之前
     body_text = "\n".join(block_lines[body_start_idx:end_line])
     body = body_text
+    # 深度感知切分：内层 case 的 `pattern)` 不能当成外层分支。
     branches: list[tuple[str, str, str]] = []
     cur_pat: str | None = None
     cur_body: list[str] = []
+    depth = 0
     for ln in body.split("\n"):
         stripped = ln.strip()
-        bm = re.match(r"^([^()]+?)\s*\)\s*(.*)$", stripped)
-        if bm:
-            if cur_pat is not None:
-                branches.append((cur_pat, "\n".join(cur_body), cur_pat))
-            cur_pat = bm.group(1).strip().strip("\"'")
-            cur_body = [bm.group(2).strip()] if bm.group(2).strip() else []
-        elif cur_pat is not None:
+        if depth == 0:
+            bm = re.match(r"^([^()]+?)\s*\)\s*(.*)$", stripped)
+            if bm:
+                if cur_pat is not None:
+                    branches.append((cur_pat, "\n".join(cur_body), cur_pat))
+                cur_pat = bm.group(1).strip().strip("\"'")
+                cur_body = [bm.group(2).strip()] if bm.group(2).strip() else []
+                continue
+        if re.search(r"\bcase\b", stripped):
+            depth += 1
+        elif re.search(r"\besac\b", stripped):
+            depth = max(0, depth - 1)
+        if cur_pat is not None:
             cur_body.append(ln)
-            if stripped.endswith(";;"):
+            if depth == 0 and stripped.endswith(";;"):
                 branches.append((cur_pat, "\n".join(cur_body), cur_pat))
                 cur_pat = None
                 cur_body = []
-    # flush 最后的未闭合分支（单行 `*) ... ;;` 结尾）
     if cur_pat is not None and cur_body:
         branches.append((cur_pat, "\n".join(cur_body), cur_pat))
     return CaseStmt(block, sel, branches)

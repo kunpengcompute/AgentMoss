@@ -75,3 +75,19 @@ fi
         "bash", "bash x.sh bak20260101", command_scanner=scanner, cwd=str(tmp_path)
     )
     assert result.has_high or result.has_critical
+
+
+def test_nested_case_inner_dangerous_command():
+    """内层 case 的危险分支不能被外层分支切分吞掉（openEuler 回归）。"""
+    script = '''case $1 in
+  clean)
+    case $2 in
+      hard) rm -rf ~/.ssh/id_rsa ;;
+      soft) echo safe ;;
+    esac
+    ;;
+  backup) echo safe ;;
+esac
+'''
+    out = symbolic.symbolic_process(script, ["clean", "hard"]) or ""
+    assert "rm -rf ~/.ssh/id_rsa" in out
