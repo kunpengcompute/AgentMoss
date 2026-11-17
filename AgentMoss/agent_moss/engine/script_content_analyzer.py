@@ -522,16 +522,15 @@ def analyze_script_content(
     cwd: str = "",
     stop_on_critical: bool = True,
 ) -> ScriptChainAnalysisResult:
-    """分析脚本内容（递归追踪 + 预处理 + L1/L2 扫描）。
+    """分析脚本内容（递归追踪、即时 L1 扫描和关键词检查）。
 
     只在 action_type 为 bash 且命令中包含脚本执行时才进行分析。
 
     流程：
     1. 提取脚本路径
     2. 递归追踪读取调用链（传入 command_scanner，递归过程中即时做 L1 扫描）
-    3. L1 CommandPatternScanner 兜底扫描预处理内容
-    4. 关键词扫描（兼容 L3）
-    5. 返回 ScriptChainAnalysisResult
+    3. 关键词扫描（兼容 L3）
+    4. 返回 ScriptChainAnalysisResult
 
     Args:
         action_type: 动作类型
@@ -574,11 +573,7 @@ def analyze_script_content(
     if not chain_result.nodes:
         return chain_result
 
-    # L1 兜底扫描：递归过程中已内联扫描的命中节点（l1_hit）跳过，其余补扫
-    if command_scanner is not None:
-        scan_script_chain_with_l1(chain_result, command_scanner, stop_on_critical)
-
-    # 关键词扫描（兼容 L3）
+    # tracker 已完成各节点正文的 L1 扫描；这里只补充独立的关键词证据。
     scan_script_chain_keywords(chain_result)
 
     return chain_result
