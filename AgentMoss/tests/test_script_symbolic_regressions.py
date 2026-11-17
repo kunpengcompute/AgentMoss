@@ -91,3 +91,16 @@ esac
 '''
     out = symbolic.symbolic_process(script, ["clean", "hard"]) or ""
     assert "rm -rf ~/.ssh/id_rsa" in out
+
+
+def test_nested_if_keeps_outer_command():
+    """报告示例的嵌套 if 形态：外层危险命令不能被内层 if 覆盖。"""
+    script = '''if [ "$1" = x ]; then
+  rm -rf /opt/data
+  if [ "$2" = x ]; then
+    echo inner
+  fi
+fi
+'''
+    out = symbolic.symbolic_process(script, ["x", "x"]) or ""
+    assert "rm -rf /opt/data" in out
