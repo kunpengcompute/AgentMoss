@@ -819,7 +819,10 @@ class LogicRulesChecker:
         write_keywords = self._profile.write_keywords
         read_keywords = self._profile.read_keywords
 
-        action_detail = a_next.get("action_detail", "").lower()
+        # 关键词检测可以忽略大小写，路径提取与磁盘查询必须保留原文。
+        # 否则 Linux 上 App.conf 会被当成 app.conf，已有文件可能误判为新建。
+        action_detail_raw = a_next.get("action_detail", "")
+        action_detail = action_detail_raw.lower()
         action_type = a_next.get("action_type", "").lower()
 
         # 豁免非文件类工具前缀（仅通用基线，与 EXCLUDED_PREFIXES 一致）。
@@ -970,7 +973,7 @@ class LogicRulesChecker:
             r">{1,2}\s*(?!&)(?:'(/[^']+)'|\"(/[^\"]+)\"|(/[^\s;|&><'\"]+))"
         )
         target_paths: list[str] = []
-        for seg in _split_shell_segments(action_detail):
+        for seg in _split_shell_segments(action_detail_raw):
             seg = seg.strip()
             if not seg:
                 continue
@@ -1042,14 +1045,19 @@ class LogicRulesChecker:
         for action in action_history:
             hist_detail_raw = action.get("action_detail", "") if isinstance(action, dict) else ""
             if isinstance(hist_detail_raw, dict):
-                hist_detail = json.dumps(hist_detail_raw, ensure_ascii=False).lower()
+                hist_detail = json.dumps(hist_detail_raw, ensure_ascii=False)
             else:
-                hist_detail = str(hist_detail_raw).lower()
+                hist_detail = str(hist_detail_raw)
             hist_name = action.get("name", action.get("action_type", "")).lower() if isinstance(action, dict) else ""
-            is_read = any(kw in hist_name or kw in hist_detail for kw in read_keywords)
+            is_read = any(kw in hist_name or kw in hist_detail.lower() for kw in read_keywords)
             if is_read:
                 hist_paths = self._profile.extract_file_paths(hist_detail)
                 history_read_paths.update(hist_paths)
+
+        # Windows 路径比较保持不区分大小写；实际 exists 查询仍使用原始路径。
+        case_insensitive_paths = self._profile.os_type == "windows"
+        if case_insensitive_paths:
+            history_read_paths = {p.lower() for p in history_read_paths}
 
         # 豁免「纯临时文件生成」写目标：`dd if=/dev/zero of=/tmp/file`（用 /dev/zero
         # 填充临时文件）是明确的 scratch 空间生成，无敏感语义（A2 定义里 /tmp 清理
@@ -1068,8 +1076,9 @@ class LogicRulesChecker:
         # 检查写入目标是否在已读取的路径中
         unread_paths = []
         for path in target_paths:
+            path_key = path.lower() if case_insensitive_paths else path
             if not any(
-                path == rp or path.startswith(rp) or rp.startswith(path)
+                path_key == rp or path_key.startswith(rp) or rp.startswith(path_key)
                 for rp in history_read_paths
             ):
                 # 排除新文件创建：文件不存在于磁盘时视为新建，直接放行

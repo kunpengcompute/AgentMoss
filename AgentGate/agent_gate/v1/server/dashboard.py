@@ -927,22 +927,47 @@ function drawTimeline(data) {
   ctx.clearRect(0,0,W,H);
 
   const maxVal = Math.max(1, ...data.map(d=>Math.max(d.Allow||0, d.Deny||0)));
-  const barW = Math.max(2, (W - 40) / data.length - 2);
-  const chartH = H - 40;
+  const tickStep = Math.max(1, Math.ceil(maxVal / 4));
+  const scaleMax = Math.ceil(maxVal / tickStep) * tickStep;
+  const left = 42, top = 28, bottom = H - 28;
+  const chartW = Math.max(1, W - left - 14);
+  const chartH = Math.max(1, bottom - top);
+  const slotW = chartW / data.length;
+  const barW = Math.max(0.5, slotW - Math.min(4, slotW / 5));
+
+  // 显示计数和分钟刻度，让图中的柱高及时间可以直接读出。
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let value = 0; value <= scaleMax; value += tickStep) {
+    const y = bottom - value / scaleMax * chartH;
+    ctx.fillStyle = '#8E8E93';
+    ctx.fillText(String(value), left - 6, y);
+    ctx.strokeStyle = '#E5E5EA';
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(left + chartW, y); ctx.stroke();
+  }
+  const labelEvery = Math.max(1, Math.ceil(data.length / Math.max(1, Math.floor(chartW / 70))));
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
 
   data.forEach((d, i) => {
-    const x = 20 + i * (barW + 2);
+    const x = left + i * slotW + (slotW - barW) / 2;
     // Allow bar
-    const allowH = ((d.Allow||0) / maxVal) * chartH;
+    const allowH = ((d.Allow||0) / scaleMax) * chartH;
     ctx.fillStyle = '#34C759';
-    ctx.fillRect(x, chartH - allowH + 10, barW/2, allowH);
+    ctx.fillRect(x, bottom - allowH, barW/2, allowH);
     // Deny bar
-    const denyH = ((d.Deny||0) / maxVal) * chartH;
+    const denyH = ((d.Deny||0) / scaleMax) * chartH;
     ctx.fillStyle = '#FF3B30';
-    ctx.fillRect(x + barW/2, chartH - denyH + 10, barW/2, denyH);
+    ctx.fillRect(x + barW/2, bottom - denyH, barW/2, denyH);
+    if (i % labelEvery === 0) {
+      ctx.fillStyle = '#8E8E93';
+      ctx.fillText(fmtTime(d.minute).slice(0, 5), x + barW/2, bottom + 6);
+    }
   });
 
   // Legend
+  ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = '#34C759'; ctx.fillRect(W-120, 8, 10, 10);
   ctx.fillStyle = '#8E8E93'; ctx.font='11px sans-serif'; ctx.textAlign='left';
   ctx.fillText('Allow', W-106, 18);

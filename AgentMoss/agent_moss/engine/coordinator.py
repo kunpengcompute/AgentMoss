@@ -212,12 +212,14 @@ class AgentMossBot:
             script_chain_result = analyze_script_content(
                 _l15_action_type, _l15_action_detail, command_scanner=_scanner,
                 cwd=cwd,
+                stop_on_critical=heuristic_enabled,
             )
             # ⚠️ 「脚本存在但内容读不了」（超过大小上限 / 权限）**不能当安全放行**：
             # 否则把恶意脚本用注释撑到 2MB 就能让整个内容扫描静默跳过（实测
             # `bash huge2mb.sh`（末尾 rm -rf /）→ Deny 变 Allow）。这与「脚本不存在」
             # 本质不同：后者跑也跑不起来。客户可用 AGENT_MOSS_SCRIPT_MAX_FILE_SIZE 放宽。
-            if script_chain_result and script_chain_result.nodes:
+            # 关闭 L1 时仅关闭本层拒绝，脚本内容与风险线索仍供 L2/L3 使用。
+            if heuristic_enabled and script_chain_result and script_chain_result.nodes:
                 for node in script_chain_result.nodes:
                     if getattr(node, "unanalyzable", False):
                         violated_layers.append("L1.2")

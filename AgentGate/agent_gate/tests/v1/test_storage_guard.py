@@ -126,3 +126,48 @@ def test_archive_noop_when_below_keep(tmp_path):
 
 
 import os  # noqa: E402  （放在末尾便于上方语义阅读）
+
+
+def test_clip_text_enforces_utf8_byte_budget():
+    value = "你" * 80
+    out = clip_text(value, 100)
+    assert out.startswith("你" * 33 + "…[truncated 141B sha256:")
+    assert len(out.split("…[truncated", 1)[0].encode("utf-8")) <= 100
+
+
+def test_degraded_unicode_fields_follow_byte_limits():
+    out = degrade_record(_record(
+        command="查" * 1000, action_detail="读" * 1000, reason="因" * 1000,
+    ))
+    assert len(out["command"].split("…[degraded]", 1)[0].encode()) <= 512
+    assert len(out["action_detail"].encode()) <= 512
+    assert len(out["reason"].encode()) <= 256
+
+
+@pytest.mark.parametrize("degraded", [False, True])
+def test_repository_guards_moss_reason_before_persisting(monkeypatch, tmp_path, degraded):
+    from agent_gate.v1.storage import record_guard
+    import json
+
+    monkeypatch.setattr(record_guard, "should_degrade_writes", lambda _: degraded)
+    db = Database(str(tmp_path / "guard.db"))
+    db.init_schema()
+    repo = Repository(db)
+    aid = repo.get_or_create_agent("test", "host", "1.0")
+    repo.get_or_create_session("guarded", aid)
+    reason = "原因" * 3000
+    repo.insert_tool_call(
+        "guarded", _record(description="diagnostic context"),
+        {**_moss(), "reason": reason},
+    )
+    row = repo.get_session_traces("guarded")[0]
+    if degraded:
+        assert len(row["reason"].encode()) <= 256
+        assert row["description"] == ""
+    else:
+        assert "[truncated" in row["reason"]
+        assert len(row["reason"].split("…[truncated", 1)[0].encode()) <= 4096
+        assert row["description"] == "diagnostic context"
+    # The original structured result remains available for auditing.
+    assert json.loads(row["moss_response"])["reason"] == reason
+    db.close()

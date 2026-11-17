@@ -1,7 +1,7 @@
 """Pydantic models for AgentMoss API requests and responses."""
 
 from typing import Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..__version__ import __version__
 
@@ -13,6 +13,21 @@ class ActionItem(BaseModel):
     #: 动作真实发生时间（调用方上报）。可选 —— 供 P4「提权→外传」时间窗口
     #: 判定；缺省时该性质退回不设窗口的旧行为。
     called_at: str = Field(default="", description="Action timestamp (optional)")
+
+    @field_validator("action_type")
+    @classmethod
+    def _validate_action_type(cls, value: str) -> str:
+        # 自定义工具名称保持开放；空白或控制字符无法标识有效动作。
+        if not value.strip() or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value):
+            raise ValueError("action_type must be nonempty and contain no control characters")
+        return value
+
+    @field_validator("action_detail")
+    @classmethod
+    def _reject_nul(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("action_detail must not contain NUL characters")
+        return value
 
     class Config:
         extra = "allow"
@@ -34,13 +49,23 @@ class PromptTurn(BaseModel):
         extra = "allow"
 
 
+class SessionHistoryItem(BaseModel):
+    """Validate nested actions while preserving caller-provided context."""
+
+    session_id: str = ""
+    action_history: list[ActionItem] = Field(default_factory=list)
+
+    class Config:
+        extra = "allow"
+
+
 class AnalyzeRequest(BaseModel):
     """Security analysis request (v2: added os_type, cwd; v3: added agent_id; v4: added prompt_history; v5: added session_history; v6: added stateful incremental)."""
     session_id: str = Field(..., description="Session / agent unique identifier")
     prompt_session: str = Field(default="", description="User / upstream original prompt or task description (most recent user message; kept for backward compat)")
     prompt_history: list[PromptTurn] = Field(default_factory=list, description="Full interleaved prompt history (ordered turns, each with its triggered actions). Optional; empty = fall back to prompt_session only.")
     action_history: list[ActionItem] = Field(default_factory=list, description="Historical action sequence")
-    session_history: list[dict] = Field(default_factory=list, description="Multi-session historical actions (optional): [{session_id, action_history: [{action_type, action_detail}]}] for L2.2 formal engine cross-session verification. Provided by caller (incl. agentgate).")
+    session_history: list[SessionHistoryItem] = Field(default_factory=list, description="Multi-session historical actions (optional): [{session_id, action_history: [{action_type, action_detail}]}] for L2.2 formal engine cross-session verification. Provided by caller (incl. agentgate).")
     a_next: ActionItem = Field(..., description="Next action to be executed")
     reason: str = Field(default="", description="Reason for executing this action")
     os_type: str = Field(default="", description="OS type: 'linux', 'windows', or empty for auto-detect")

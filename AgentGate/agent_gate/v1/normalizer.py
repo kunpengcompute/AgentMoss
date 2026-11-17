@@ -170,7 +170,10 @@ class Normalizer:
                 or str(_a_next.get("action_detail") or "")
                 or input_data.description
             ),
-            "called_at": str(_a_next.get("called_at") or "") or datetime.datetime.now().isoformat(),
+            # SQLite CURRENT_TIMESTAMP 历史按 UTC 记录；当前动作也须带明确时区，
+            # 避免非 UTC 主机上的本地时间被 Moss 当成 UTC 而错过时效窗口。
+            "called_at": str(_a_next.get("called_at") or "")
+            or datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
 
         # Convert prompt_history turns to dicts (interleaved prompt + actions)

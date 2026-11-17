@@ -97,7 +97,9 @@ class Repository:
         # 存储治理：单条截断 + 磁盘低水位降级（旧数据不动，只约束这一条）
         from .record_guard import prepare_record_for_storage
 
-        tool_call, _degraded = prepare_record_for_storage(tool_call, self._db._db_path)
+        tool_call, _degraded = prepare_record_for_storage(
+            {**tool_call, "reason": moss_result.get("reason", "")}, self._db._db_path,
+        )
         # 在同一个 write lock 内原子化生成 seq 并写入，避免并发请求拿到相同 seq
         conn = self._db._get_connection()
         with self._db._write_lock:
@@ -125,7 +127,7 @@ class Repository:
                     moss_result.get("risk_level", ""),
                     moss_result.get("risk_type", ""),
                     json.dumps(moss_result.get("violated_layers", [])),
-                    moss_result.get("reason", ""),
+                    tool_call.get("reason", ""),
                     moss_result.get("confidence", 0),
                     moss_result.get("analysis_duration_ms", 0),
                     json.dumps(moss_result, ensure_ascii=False),
@@ -144,14 +146,19 @@ class Repository:
         return tool_call_id
 
     def get_action_history(self, session_id: str, limit: int = 100) -> list[dict]:
+        """Return the most recent actions in chronological order."""
         # called_at 供 AgentMoss 的 P4 时间窗口（提权→外传）判定用；
         # 旧调用方没有这个字段时，AgentMoss 退回不设窗口的旧行为。
         cursor = self._db.execute(
             """SELECT action_type, action_detail, called_at
-               FROM tool_calls
-               WHERE session_id = ?
-               ORDER BY seq ASC
-               LIMIT ?""",
+               FROM (
+                   SELECT seq, action_type, action_detail, called_at
+                   FROM tool_calls
+                   WHERE session_id = ?
+                   ORDER BY seq DESC
+                   LIMIT ?
+               )
+               ORDER BY seq ASC""",
             (session_id, limit),
         )
         return [

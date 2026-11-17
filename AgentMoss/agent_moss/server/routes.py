@@ -154,16 +154,7 @@ async def analyze(req: AnalyzeRequest, request: Request):
         # session_history: 多 session 历史动作（可选），每项 {"session_id",
         # "action_history": [{action_type, action_detail}]}。供 L2.2 形式化引擎
         # 跨会话组合链/敏感数据传播验证；由调用方（含 agentgate）提供。
-        session_history = [
-            {
-                "session_id": s.get("session_id", ""),
-                "action_history": [
-                    {"action_type": a.get("action_type", ""), "action_detail": a.get("action_detail", "")}
-                    for a in s.get("action_history", [])
-                ],
-            }
-            for s in req.session_history
-        ]
+        session_history = [s.model_dump() for s in req.session_history]
 
         # agent_id 透传：用于加载三方 agent 定制化规则（agent_moss/agents/<id>/rules.json）
         # 优先顶层 agent_id；为空时兜底从 metadata.agent_type 取（AgentGate V1

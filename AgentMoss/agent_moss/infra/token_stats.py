@@ -23,6 +23,9 @@
 import json
 import logging
 import os
+import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -33,6 +36,37 @@ ENV_STATS_PATH = "AGENT_MOSS_TOKEN_STATS_PATH"
 
 # 最大记录条数（超过时自动裁剪）
 MAX_RECORDS = 10000
+_WRITE_LOCK = threading.RLock()
+
+
+@contextmanager
+def _stats_write_lock(stats_path: Path):
+    """Serialize read/append/write across threads and service/SDK processes."""
+    with _WRITE_LOCK:
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(stats_path) + ".lock", flags, 0o600)
+        locked = False
+        try:
+            if os.name == "nt":
+                import msvcrt
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            locked = True
+            yield
+        finally:
+            if locked:
+                if os.name == "nt":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 
 def get_stats_path() -> Path:
@@ -79,13 +113,14 @@ def record_token_usage(
         "total_tokens": total_tokens,
     }
 
-    records = _load_all_records(stats_path)
-    records.append(record)
+    with _stats_write_lock(stats_path):
+        records = _load_all_records(stats_path)
+        records.append(record)
 
-    if len(records) > MAX_RECORDS:
-        records = records[-MAX_RECORDS:]
+        if len(records) > MAX_RECORDS:
+            records = records[-MAX_RECORDS:]
 
-    _save_records(stats_path, records)
+        _save_records(stats_path, records)
     logger.debug(
         "Token usage recorded: step=%s, model=%s, total_tokens=%d",
         step, model, total_tokens,
@@ -110,17 +145,21 @@ def _load_all_records(stats_path: Path) -> list[dict]:
 
 
 def _save_records(stats_path: Path, records: list[dict]) -> None:
-    """保存统计记录到文件"""
+    """Atomically publish complete JSON; readers never see a truncated file."""
     stats_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = None
     try:
-        from . import security_policy as sp
-        sp.write_private_text(
-            stats_path,
-            json.dumps(records, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        fd, tmp_name = tempfile.mkstemp(prefix=stats_path.name + ".", dir=stats_path.parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(records, stream, indent=2, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_name, stats_path)
     except OSError as e:
         logger.warning("Token stats file %s write error: %s", stats_path, e)
+    finally:
+        if tmp_name is not None:
+            Path(tmp_name).unlink(missing_ok=True)
 
 
 def _filter_records_by_date(
@@ -292,6 +331,7 @@ def get_token_trend(
 def reset_token_stats() -> None:
     """重置（删除）所有 token 统计记录"""
     stats_path = get_stats_path()
-    if stats_path.exists():
-        stats_path.unlink()
-        logger.info("Token stats reset: %s deleted", stats_path)
+    with _stats_write_lock(stats_path):
+        if stats_path.exists():
+            stats_path.unlink()
+            logger.info("Token stats reset: %s deleted", stats_path)

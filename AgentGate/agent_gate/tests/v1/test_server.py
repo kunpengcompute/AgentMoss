@@ -1080,7 +1080,7 @@ class TestNormalizer:
         from agent_gate.v1.server.models import AgentGateInput
 
         normalizer = Normalizer(repo=None)
-        before = datetime.datetime.now() - datetime.timedelta(seconds=5)
+        before = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=5)
         input_data = AgentGateInput(
             agent_type="test",
             session_id="sess-a-next-called-at",
@@ -1092,6 +1092,7 @@ class TestNormalizer:
         moss_request = await normalizer.normalize(input_data, SystemContext())
 
         stamp = datetime.datetime.fromisoformat(moss_request["a_next"]["called_at"])
+        assert stamp.utcoffset() == datetime.timedelta(0)
         assert stamp >= before
 
 

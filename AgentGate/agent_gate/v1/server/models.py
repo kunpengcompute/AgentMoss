@@ -10,7 +10,7 @@ Defines:
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from ... import __version__
 
@@ -193,8 +193,7 @@ class ToolCallRecord(BaseModel):
 class SessionTraceResponse(BaseModel):
     """Response for GET /api/v1/sessions/{session_id}/traces.
 
-    ``tool_calls`` 与 TS 版同名字段（此前叫 ``traces``，同一端点两种结构）。
-    其余会话元信息两端一致。
+    ``tool_calls`` 与 TS 版同名；``traces`` 保留为兼容字段。
     """
     session_id: str
     agent_type: str = ""
@@ -205,6 +204,12 @@ class SessionTraceResponse(BaseModel):
     created_at: str = ""
     tool_call_count: int = 0
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def traces(self) -> list[ToolCallRecord]:
+        """兼容按接口路径读取 traces 的客户端，顺序与 tool_calls 相同。"""
+        return self.tool_calls
 
 
 class HealthResponse(BaseModel):

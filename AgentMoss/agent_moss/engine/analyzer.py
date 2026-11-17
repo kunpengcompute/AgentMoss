@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from ..profiles.base import OSProfile
 
 from ..infra.config import Config, get_agent_moss_setting, get_default_config, is_policy_gen_enabled
-from ..infra.llm_client import call_llm
+from ..infra.llm_client import LLMResponseError, call_llm
 from ..infra.parsers import parse_policy_from_llm
 from ..infra.policy_cache import PolicyCache, get_default_cache
 from ..infra.prompt_templates import get_prompt1
@@ -252,6 +252,15 @@ def analyze(
                     step2_error = None
                     break
                 except (TimeoutError, ValueError, Exception) as e:
+                    if isinstance(e, LLMResponseError) and e.result is not None:
+                        try:
+                            from ..infra.token_stats import record_token_usage
+                            record_token_usage(
+                                session_id=session_id, step="step2_policy_gen",
+                                **e.result.to_usage_dict(),
+                            )
+                        except Exception:
+                            pass  # 统计故障不能覆盖原始模型错误
                     step2_error = e
                     if attempt < max_retries:
                         moss_log.log_error("step2_generate_policy", e)

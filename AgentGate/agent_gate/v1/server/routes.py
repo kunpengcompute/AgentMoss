@@ -184,34 +184,24 @@ async def analyze(
     )
 
     # 2. Check decision cache
-    if cache:
-        cached = cache.get(input_data.session_id, input_data.cwd, command)
-        if cached:
-            elapsed = (time.monotonic() - start) * 1000
-            logger.debug(f"Cache hit for {tool_name}:{command[:50]}")
-            return AgentGateResponse(
-                decision=cached["decision"],
-                reason=cached.get("reason", "Cached decision"),
-                risk_level=cached.get("risk_level", ""),
-                risk_type=cached.get("risk_type", ""),
-                violated_layers=cached.get("violated_layers", []),
-                confidence=cached.get("confidence", 100),
-                analysis_duration_ms=elapsed,
-                source="cache",
-            )
+    cached = cache.get(input_data.session_id, input_data.cwd, command) if cache else None
 
     # 3. Collect system context (in background thread pool)
     context = orchestrator.collect()
 
-    # 4. Normalize to AgentMoss format (includes DB action_history lookup)
-    moss_request = await normalizer.normalize(input_data, context)
-
-    # Phase 2: these steps are now done after MossClient call
-    # For now, defer system_snapshot write to after the analysis
-    # (we need tool_call_id which we don't have yet)
-
-    # 5. Call AgentMoss
-    moss_result = await moss_client.analyze(moss_request)
+    # 缓存命中也需落库和采集快照；事件推送保持仅用于新的上游判定。
+    if cached is not None:
+        logger.debug(f"Cache hit for {tool_name}:{command[:50]}")
+        moss_result = {
+            **cached,
+            "source": "cache",
+            "analysis_duration_ms": (time.monotonic() - start) * 1000,
+        }
+    else:
+        # 4. Normalize to AgentMoss format (includes DB action_history lookup)
+        moss_request = await normalizer.normalize(input_data, context)
+        # 5. Call AgentMoss
+        moss_result = await moss_client.analyze(moss_request)
 
     # 6. Write tool_call record
     tool_call_dict = {
@@ -237,7 +227,7 @@ async def analyze(
     )
 
     # 8. Update cache (Allow only)
-    if cache:
+    if cache and cached is None:
         cache.set(input_data.session_id, input_data.cwd, command, moss_result)
 
     elapsed = (time.monotonic() - start) * 1000
@@ -247,16 +237,17 @@ async def analyze(
     )
 
     # 9. Broadcast to dashboard WebSocket clients
-    broadcast_event({
-        "type": "analyze_complete",
-        "agent_type": input_data.agent_type,
-        "session_id": input_data.session_id,
-        "tool_name": tool_name,
-        "command": command,
-        "decision": moss_result.get("decision", "Deny"),
-        "risk_level": moss_result.get("risk_level", ""),
-        "analysis_duration_ms": elapsed,
-    })
+    if cached is None:
+        broadcast_event({
+            "type": "analyze_complete",
+            "agent_type": input_data.agent_type,
+            "session_id": input_data.session_id,
+            "tool_name": tool_name,
+            "command": command,
+            "decision": moss_result.get("decision", "Deny"),
+            "risk_level": moss_result.get("risk_level", ""),
+            "analysis_duration_ms": elapsed,
+        })
 
     # 10. 低频回顾（fire-and-forget）：每 N 条落库触发一次，让 AgentMoss 直读
     #     本地存储重建链状态 + 提取待攻击前序；
@@ -274,7 +265,7 @@ async def analyze(
         analysis_duration_ms=elapsed,
         violation_graph=moss_result.get("violation_graph"),
         collected_context=context,
-        source="agent_moss",
+        source="cache" if cached is not None else "agent_moss",
     )
 
 

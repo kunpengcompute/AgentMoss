@@ -18,7 +18,7 @@ AgentGate，AgentGate 采集系统上下文并转发给 AgentMoss 判定，返�
 AgentGate 负责：
 
 - 采集系统 / 进程 / 网络 / 用户 / 环境上下文；
-- 按 `session_id` 从 SQLite 自动补齐 `action_history`；
+- 按 `session_id` 从 SQLite 自动补齐最近 100 条 `action_history`，保持调用顺序；
 - 把请求转发给 AgentMoss，并把判定结果落库；
 - 提供看板、查询接口和存储治理。
 
@@ -130,6 +130,10 @@ agent-gate clean --retention-days 30 [--config config/agent_gate.yaml]
 - `--mode http`（默认）：TCP 监听；
 - `--mode socket --socket /path/to.sock`：Unix Domain Socket。
 
+HTTP 端口被占用时，AgentGate 会在同一监听地址上向后查找可用端口，最多尝试
+100 个端口。以启动日志中的实际地址访问服务，并同步更新客户端配置；全部占用时
+启动失败。
+
 AgentMoss 地址解析优先级：
 
 ```
@@ -220,7 +224,9 @@ app = create_app()
 | `collected_context` | object/null | AgentGate 采集的系统上下文 |
 | `source` | string | 结果来源：`agent_moss` / `cache`。AgentMoss 不可用时的 fail-closed Deny 也标为 `agent_moss`，用 `risk_type=service_unavailable` / `analysis_timeout` 区分 |
 
-`GET /api/v1/sessions/{session_id}/traces` 使用 `tool_calls` 字段返回调用轨迹。
+`GET /api/v1/sessions/{session_id}/traces` 使用 `tool_calls` 字段返回调用轨迹，
+同时提供内容相同的 `traces` 兼容字段，均按会话内的 `seq` 递增排序。
+命中判定缓存的调用也会保存独立的调用记录和系统快照，并计入会话调用次数。
 
 #### GET /api/v1/health
 
@@ -336,12 +342,15 @@ agent 的 token，并保证请求的 `agent_type` 与 token 绑定关系一致�
   agent 过滤，并带跨会话批量访问检测（`AGENT_GATE_SESSION_SWEEP_*`）；
 - **看板 XSS 防护**：所有不可信字段渲染前转义；HTML 页面带 CSP 与安全响应头；
 - **存储治理**：
-  - 单条记录超过 `AGENT_GATE_MAX_RECORD_BYTES` 时截断并附长度/校验值；
-  - 磁盘剩余低于 `AGENT_GATE_DISK_DEGRADE_PERCENT` 时新记录降级为摘要；
+  - `command` / `action_detail` 超过 `AGENT_GATE_MAX_RECORD_BYTES` 时按 UTF-8 字节保留头部并附长度/校验值；
+  - 磁盘剩余低于 `AGENT_GATE_DISK_DEGRADE_PERCENT` 时，新记录的命令头部保留 512 字节、`reason` 保留 256 字节、`description` 清空；
   - 条数达到 `AGENT_GATE_ARCHIVE_THRESHOLD` 时归档旧记录（保留
     `AGENT_GATE_ARCHIVE_KEEP` 条）并 VACUUM；
   - 后台维护线程启动时执行一次，之后每 6 小时执行一次；
 - **日志脱敏**：访问日志中的 token 参数打码。
+
+常态下 `reason` / `description` 最多保留 4096 字节头部，截断标记另占少量空间。
+`moss_response` 仍保存完整分析响应，以上字段限制不代表整条数据库记录的大小上限。
 
 ## 配置
 

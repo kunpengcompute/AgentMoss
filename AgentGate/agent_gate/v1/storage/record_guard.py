@@ -19,16 +19,23 @@ from ..server import security as sp
 DEGRADE_COMMAND_BYTES = 512
 
 
+def _byte_prefix(value: str, limit: int) -> str:
+    """Keep complete UTF-8 characters within a byte budget."""
+    return value.encode("utf-8", "surrogatepass")[:limit].decode("utf-8", "ignore")
+
+
 def clip_text(value, limit: int | None = None) -> str:
-    """截断到 ``limit`` 字节以内，尾部附长度与校验值（保留可定位性）。"""
+    """保留至多 ``limit`` 字节的正文，另附长度与校验标记。"""
     if limit is None:
         limit = sp.max_record_bytes()
     s = "" if value is None else str(value)
-    if limit <= 0 or len(s) <= limit:
+    raw = s.encode("utf-8", "surrogatepass")
+    if limit <= 0 or len(raw) <= limit:
         return s
-    head = s[:limit]
-    digest = hashlib.sha256(s.encode("utf-8", "surrogatepass")).hexdigest()[:16]
-    return f"{head}…[truncated {len(s) - limit}B sha256:{digest}]"
+    head = _byte_prefix(s, limit)
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    removed = len(raw) - len(head.encode("utf-8"))
+    return f"{head}…[truncated {removed}B sha256:{digest}]"
 
 
 def disk_free_percent(target_path: str | Path) -> float:
@@ -62,15 +69,15 @@ def degrade_record(rec: dict) -> dict:
     """把一条记录降级成摘要：保留判定结论与命令头部，丢弃其余明细。"""
     command = str(rec.get("command") or "")
     clipped = (
-        f"{command[:DEGRADE_COMMAND_BYTES]}…[degraded]"
-        if len(command) > DEGRADE_COMMAND_BYTES
+        f"{_byte_prefix(command, DEGRADE_COMMAND_BYTES)}…[degraded]"
+        if len(command.encode("utf-8", "surrogatepass")) > DEGRADE_COMMAND_BYTES
         else command
     )
     out = dict(rec)
     out["command"] = clipped
-    out["action_detail"] = str(rec.get("action_detail") or "")[:DEGRADE_COMMAND_BYTES]
+    out["action_detail"] = _byte_prefix(str(rec.get("action_detail") or ""), DEGRADE_COMMAND_BYTES)
     out["description"] = ""
-    out["reason"] = str(rec.get("reason") or "")[:256]
+    out["reason"] = _byte_prefix(str(rec.get("reason") or ""), 256)
     return out
 
 

@@ -325,6 +325,66 @@ def _print_dashboard_urls(host: str, port: int) -> None:
             logger.info("  Cookie 有效期到浏览器关闭为止；换机器/换浏览器需重新带一次 token。")
 
 
+def _find_free_port(start_port: int, host: str, scan: int = 100, *, workers: int = 1) -> int:
+    """在原监听地址上有限扫描，全部占用时由服务器报告原端口错误。"""
+    import errno
+    import socket
+    from contextlib import ExitStack
+
+    skip_unavailable = False
+    if workers > 1:
+        # Uvicorn 的父进程用 Config.bind_socket 创建一个共享 socket，
+        # 地址族和双栈设置沿用该路径，不能套用单 worker 的 IPv6-only 设置。
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        addresses = [(family, socket.SOCK_STREAM, 0, "", (host, 0))]
+    else:
+        # run_server 使用 Uvicorn 默认 loop="auto"，其选择规则同样是
+        # 尝试导入 uvloop；仅 asyncio 回退会忽略未配置到本机的地址。
+        try:
+            import uvloop  # noqa: F401
+        except ImportError:
+            skip_unavailable = True
+        # 单 worker 由 asyncio/uvloop.create_server 解析所有监听地址；
+        # IPv6 主机名没有冒号，同样需要 AF_UNSPEC 解析并逐一检查。
+        try:
+            addresses = set(socket.getaddrinfo(
+                host or None, 0, socket.AF_UNSPEC, socket.SOCK_STREAM,
+                0, socket.AI_PASSIVE,
+            ))
+        except OSError:
+            return start_port
+
+    for candidate in range(start_port, min(start_port + scan, 65536)):
+        try:
+            with ExitStack() as probes:
+                bound = 0
+                for family, socktype, proto, _, address in addresses:
+                    try:
+                        probe = probes.enter_context(socket.socket(family, socktype, proto))
+                    except OSError:
+                        if workers > 1:
+                            raise
+                        continue
+                    if workers > 1 or (os.name == "posix" and sys.platform != "cygwin"):
+                        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    if workers <= 1 and family == socket.AF_INET6:
+                        probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                    try:
+                        probe.bind((address[0], candidate, *address[2:]))
+                    except OSError as exc:
+                        if skip_unavailable and exc.errno == errno.EADDRNOTAVAIL:
+                            probe.close()
+                            continue
+                        raise
+                    probe.listen()
+                    bound += 1
+            if bound:
+                return candidate
+        except OSError:
+            continue
+    return start_port
+
+
 def run_server(
     host: str = "0.0.0.0",
     port: int = 9100,
@@ -339,7 +399,7 @@ def run_server(
     Args:
         host: Bind host (HTTP mode). **保持 0.0.0.0 不变** —— 改成回环会破坏跨机
             采集。访问控制由鉴权承担（``AGENT_GATE_AUTH_MODE=auto``，无凭证 401）。
-        port: Bind port (HTTP mode).
+        port: Bind port (HTTP mode); try subsequent ports if occupied.
         mode: 'http' or 'socket'.
         socket_path: Unix socket path (socket mode).
         log_level: Logging level.
@@ -354,17 +414,17 @@ def run_server(
         format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
     )
 
+    # 先读取继承的鉴权 FD。否则缺失的 FD（常见为 3）可能被后续 SQLite
+    # 打开复用，数据库内容就会被误当成 token，掩盖坏配置并关闭数据库 FD。
+    logger.info(sp.describe())
+    sp.fail_fast_on_auth_error()
+
     # Initialize database
     from ..storage.db import get_db
     db = get_db(db_path)
     logger.info(f"Database path: {db_path or 'default'}")
     # 库里是全量命令与用户 prompt，收紧到 0600 / 目录 0700
     sp.harden_db_files(db.db_path)
-
-    logger.info(sp.describe())
-    # 鉴权配置坏了（例如显式指定了 AUTH_TOKEN_FD 却读不到）就**不要带病运行**：
-    # 要么全部 401（看着像客户端问题），要么悄悄退回无鉴权（安全问题）。
-    sp.fail_fast_on_auth_error()
 
     app = create_app()
 
@@ -405,6 +465,10 @@ def run_server(
         finally:
             os.umask(_old_umask)
     else:
+        actual_port = _find_free_port(port, host, workers=workers)
+        if actual_port != port:
+            logger.info("Port {} in use, using {} instead", port, actual_port)
+        port = actual_port
         if host in ("0.0.0.0", "::"):
             # 只提示，不改行为：监听地址保持不变，访问控制交给鉴权。
             logger.info(

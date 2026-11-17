@@ -20,7 +20,7 @@ from ..infra.config import (
     get_llm_timeout,
     get_log_path,
 )
-from ..infra.llm_client import call_llm
+from ..infra.llm_client import LLMResponseError, call_llm
 from .script_analyzer import (
     ScriptAnalysisResult,
     analyze_script_content,
@@ -201,10 +201,20 @@ class LLMAnalyzer:
             self._log_prompt(judge_prompt, a_next, log_path)
 
         # 5. 调用 LLM（带超时和重试）
-        max_retries = config.retry.max_retries
-        retry_interval = config.retry.retry_interval
+        max_retries = max(1, config.retry.max_retries)
+        retry_interval = max(0.0, config.retry.retry_interval)
         _call_start = time.monotonic()  # 记录调用开始时间，用于精确计算耗时
         llm_timeout = get_llm_timeout()
+        deadline = _call_start + max(0.0, llm_timeout)
+
+        def remaining_budget() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LLMAnalysisFailure(f"LLM 安全分析超时（总上限 {llm_timeout}s）")
+            return remaining
+
+        def wait_for_retry() -> None:
+            time.sleep(min(retry_interval, remaining_budget()))
 
         # 如果请求携带了 per-request LLM 配置，用它覆盖全局配置
         llm_config_to_use = config.llm
@@ -230,26 +240,40 @@ class LLMAnalyzer:
                 max_tokens=config.llm.max_tokens,
             )
 
-        # 根据 LLM 超时时间自动计算单次 call_llm 超时时间
+        # 非零重试间隔下，每次调用至少分到一个间隔的时间，避免短预算
+        # 几乎全部花在等待上：N * interval + (N - 1) * interval <= 总预算。
+        # 裁剪为一次时直接使用全部预算；零间隔不限制配置的尝试次数。
+        if retry_interval > 0:
+            affordable_attempts = max(
+                1, int((llm_timeout + retry_interval) / (2 * retry_interval))
+            )
+            max_retries = min(max_retries, affordable_attempts)
+
+        # 根据有效尝试次数计算单次 call_llm 超时时间。
         # 公式：总超时 = N 次调用 + (N-1) 次重试间隔
         # 所以：单次超时 = (总超时 - 重试间隔 * (max_retries - 1)) / max_retries
         single_call_timeout = (
             llm_timeout - retry_interval * (max_retries - 1)
         ) / max_retries
-        # 确保单次超时至少 10 秒
-        single_call_timeout = max(single_call_timeout, 10.0)
+        # 小预算也必须生效；重试与等待共用一个截止时间。
+        single_call_timeout = max(single_call_timeout, 0.001)
 
         for attempt in range(1, max_retries + 1):
+            call_timeout = min(single_call_timeout, remaining_budget())
             try:
-                # 使用 ThreadPoolExecutor 包装 LLM 调用，支持超时控制
-                with ThreadPoolExecutor(max_workers=1) as executor:
+                # 上下文管理器退出时会 wait=True，反而等完已超时的请求。
+                # HTTP 传输自身也使用预算内超时，超时返回不等待工作线程退出。
+                executor = ThreadPoolExecutor(max_workers=1)
+                try:
                     future = executor.submit(
                         call_llm,
                         prompt=judge_prompt,
-                        timeout=single_call_timeout,
+                        timeout=call_timeout,
                         config=llm_config_to_use,
                     )
-                    llm_result = future.result(timeout=llm_timeout)
+                    llm_result = future.result(timeout=call_timeout)
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
 
                 # 记录 token 用量（step="L3_security_judge"）
                 try:
@@ -295,7 +319,7 @@ class LLMAnalyzer:
                     max_retries,
                 )
                 if attempt < max_retries:
-                    time.sleep(retry_interval)
+                    wait_for_retry()
                 else:
                     raise LLMAnalysisFailure(
                         f"LLM 安全分析超时（耗时 {elapsed:.1f}s，上限 {llm_timeout}s，已重试 {max_retries} 次）"
@@ -310,13 +334,24 @@ class LLMAnalyzer:
                     max_retries,
                 )
                 if attempt < max_retries:
-                    time.sleep(retry_interval)
+                    wait_for_retry()
                 else:
                     raise LLMAnalysisFailure(
                         f"LLM 调用网络超时（已重试 {max_retries} 次）: {e}"
                     )
 
             except Exception as e:
+                # 空响应仍可能消耗推理 token；仅记录服务端明确报告的用量。
+                # 已成功返回但 JSON 解析失败的响应在上方已记过，不重复计数。
+                if isinstance(e, LLMResponseError) and e.result is not None:
+                    try:
+                        from ..infra.token_stats import record_token_usage
+                        record_token_usage(
+                            session_id="audit", step="L3_security_judge",
+                            **e.result.to_usage_dict(),
+                        )
+                    except Exception:
+                        pass  # 统计故障不能覆盖原始模型错误
                 # API 错误（如并发限制 500006、400/500 错误等），非超时
                 error_type = type(e).__name__
                 # OpenAI SDK 的 APIStatusError 带 status_code / body：str(e) 往往
@@ -341,7 +376,7 @@ class LLMAnalyzer:
                         e,
                     )
                 if attempt < max_retries:
-                    time.sleep(retry_interval)
+                    wait_for_retry()
                 else:
                     raise LLMAnalysisFailure(
                         f"LLM 安全分析失败（{max_retries} 次）[{error_type}]: {e}"

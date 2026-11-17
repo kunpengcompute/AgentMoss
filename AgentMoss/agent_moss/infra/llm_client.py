@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -40,19 +41,27 @@ class LLMResult:
         }
 
 
-def _get_openai_client_class():
+class LLMResponseError(ValueError):
+    """An unusable response that may still report actual token consumption."""
+
+    def __init__(self, message: str, result: LLMResult | None = None):
+        super().__init__(message)
+        self.result = result
+
+
+def _get_openai_client_class(*, asynchronous: bool = False):
     """延迟导入 openai.OpenAI，未安装时给出明确错误。
 
     将 openai 作为运行时依赖而非导入时硬依赖，使 LLM 成为可选项。
     """
     try:
-        from openai import OpenAI
+        from openai import AsyncOpenAI, OpenAI
     except ImportError as e:
         raise ImportError(
             "LLM 调用需要 openai SDK，但当前环境未安装。"
             "若不需要 LLM 分析，可设置 AGENT_MOSS_DISABLE_LLM=1 只运行静态分析。"
         ) from e
-    return OpenAI
+    return AsyncOpenAI if asynchronous else OpenAI
 
 
 def _resolve_api_key(config: LLMConfig) -> str:
@@ -238,6 +247,32 @@ def call_llm(
         TimeoutError: 调用超时
         Exception: API 调用失败
     """
+    async def bounded_call() -> LLMResult:
+        # HTTP read timeout is an idle timeout, so a slow stream can keep it
+        # alive indefinitely. Cancellation enforces a wall-clock deadline and
+        # closes the actual HTTP connection, including during header parsing.
+        try:
+            return await asyncio.wait_for(
+                _call_llm_async(prompt, timeout=timeout, config=config), timeout=timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"LLM 调用超时（{timeout}s）") from exc
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(bounded_call())
+    # Preserve the synchronous API for callers already inside an event loop.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(bounded_call())).result()
+
+
+async def _call_llm_async(
+    prompt: str,
+    timeout: float,
+    config: LLMConfig | None,
+) -> LLMResult:
     if config is None:
         config = get_default_config().llm
 
@@ -246,11 +281,13 @@ def call_llm(
     extra_headers = get_provider_headers(provider)
     api_key = _resolve_api_key(config)
 
-    OpenAI = _get_openai_client_class()
+    OpenAI = _get_openai_client_class(asynchronous=True)
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
         timeout=timeout,
+        # 调用方管理重试与总超时，避免 SDK 再重试而叠加等待时间。
+        max_retries=0,
         default_headers=extra_headers if extra_headers else None,
     )
 
@@ -258,7 +295,7 @@ def call_llm(
         # 先试非流式（多数端点默认支持）。某些端点（如阿里 compatible-mode 的 glm-4.5）
         # 仅支持流式，会报 400 "only support stream mode"——此时回退流式聚合 chunks。
         try:
-            response = client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=config.model,
                 messages=[
                     {"role": "user", "content": prompt},
@@ -270,6 +307,14 @@ def call_llm(
             message = response.choices[0].message
             content = message.content
             finish_reason = response.choices[0].finish_reason
+            usage = response.usage
+            llm_result = LLMResult(
+                content=content or "",
+                prompt_tokens=(usage.prompt_tokens or 0) if usage else 0,
+                completion_tokens=(usage.completion_tokens or 0) if usage else 0,
+                total_tokens=(usage.total_tokens or 0) if usage else 0,
+                model=response.model or config.model,
+            )
 
             if not content:
                 detail = _describe_response(response)
@@ -277,30 +322,19 @@ def call_llm(
                     logger.error(
                         "LLM 推理耗尽 token（finish_reason=length）: %s", detail
                     )
-                    raise ValueError(
-                        "LLM 推理耗尽 token（finish_reason=length），无实际输出"
+                    raise LLMResponseError(
+                        "LLM 推理耗尽 token（finish_reason=length），无实际输出",
+                        llm_result if usage else None,
                     )
                 logger.error("LLM 返回内容为空: %s", detail)
-                raise ValueError("LLM 返回内容为空")
+                raise LLMResponseError("LLM 返回内容为空", llm_result if usage else None)
 
             cleaned = content.strip()
             if cleaned.startswith("\ufeff"):
                 cleaned = cleaned[1:]
 
-            # 提取 token 用量统计
-            usage = response.usage
-            prompt_tokens = usage.prompt_tokens if usage else 0
-            completion_tokens = usage.completion_tokens if usage else 0
-            total_tokens = usage.total_tokens if usage else 0
-            model_used = response.model if response.model else config.model
-
-            return LLMResult(
-                content=cleaned,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                model=model_used,
-            )
+            llm_result.content = cleaned
+            return llm_result
         except Exception as mid_exc:
             # 流式回退条件：端点报"only support stream mode"或"stream parameter"
             mid_msg = str(mid_exc).lower()
@@ -308,7 +342,7 @@ def call_llm(
                 raise  # 不是流式问题，向上抛
 
             # 流式聚合 chunks
-            stream = client.chat.completions.create(
+            stream = await client.chat.completions.create(
                 model=config.model,
                 messages=[
                     {"role": "user", "content": prompt},
@@ -324,7 +358,8 @@ def call_llm(
             total_tokens = 0
             model_used = config.model
             chunk_count = 0
-            for chunk in stream:
+            usage_received = False
+            async for chunk in stream:
                 chunk_count += 1
                 if chunk.choices and chunk.choices[0].delta:
                     delta_content = chunk.choices[0].delta.content
@@ -335,11 +370,19 @@ def call_llm(
                 if chunk.model:
                     model_used = chunk.model
                 if chunk.usage:
+                    usage_received = True
                     prompt_tokens = chunk.usage.prompt_tokens or 0
                     completion_tokens = chunk.usage.completion_tokens or 0
                     total_tokens = chunk.usage.total_tokens or 0
 
             content = "".join(chunks_content)
+            llm_result = LLMResult(
+                content=content,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                model=model_used,
+            )
             if not content:
                 detail = (
                     f"chunks={chunk_count} finish_reason={finish_reason} "
@@ -349,26 +392,27 @@ def call_llm(
                     logger.error(
                         "LLM 流式推理耗尽 token（finish_reason=length）: %s", detail
                     )
-                    raise ValueError(
-                        "LLM 推理耗尽 token（finish_reason=length），无实际输出"
+                    raise LLMResponseError(
+                        "LLM 推理耗尽 token（finish_reason=length），无实际输出",
+                        llm_result if usage_received else None,
                     )
                 logger.error("LLM 流式返回内容为空: %s", detail)
-                raise ValueError("LLM 返回内容为空（流式聚合后仍空）")
+                raise LLMResponseError(
+                    "LLM 返回内容为空（流式聚合后仍空）",
+                    llm_result if usage_received else None,
+                )
 
             cleaned = content.strip()
             if cleaned.startswith("\ufeff"):
                 cleaned = cleaned[1:]
 
-            return LLMResult(
-                content=cleaned,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                model=model_used,
-            )
+            llm_result.content = cleaned
+            return llm_result
 
     except Exception as e:
         error_msg = str(e).lower()
         if "timeout" in error_msg or "timed out" in error_msg:
             raise TimeoutError(f"LLM 调用超时（{timeout}s）: {e}") from e
         raise
+    finally:
+        await client.close()
