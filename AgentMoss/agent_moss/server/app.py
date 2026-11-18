@@ -677,12 +677,15 @@ def _write_port_file(port: int) -> None:
     写失败只记日志（调用方仍可用配置端口或 health 探测）。
     """
     try:
-        from ..infra.paths import get_data_root
-        path = get_data_root() / "agent_moss_server.port.json"
+        from ..infra.paths import get_instance, get_port_file_path
+        path = get_port_file_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "port": port,
             "pid": os.getpid(),
+            # instance/version 供调用方校验，避免同机多实例端口文件串台
+            "instance": get_instance(),
+            "version": __version__,
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
         tmp = path.with_name(path.name + ".tmp")

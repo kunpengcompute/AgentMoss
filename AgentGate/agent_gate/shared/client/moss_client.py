@@ -25,10 +25,31 @@ _DEGRADED_LAST_LOGGED: dict[str, float] = {}
 _DEGRADED_LOG_INTERVAL = 300.0
 
 
-def _moss_port_file() -> Path:
-    """AgentMoss 端口文件路径（与 agent_moss 的端口发现约定一致）。"""
+def _moss_port_file() -> Path | None:
+    """AgentMoss 端口文件路径（按 instance 隔离，兼容旧共享路径）。
+
+    有 AGENT_MOSS_INSTANCE → <root>/<instance>/agent_moss_server.port.json；
+    该文件缺失时可回退旧共享文件，但仅当文件里记录的 instance 与期望一致
+    （旧文件没有 instance 字段时保守拒绝，避免串到同机其他实例）。
+    无 instance → 旧共享路径。
+    """
     root = os.environ.get("AGENT_MOSS_DATA_DIR") or str(Path.home() / ".config" / "agentmoss")
-    return Path(root) / "agent_moss_server.port.json"
+    instance = os.environ.get("AGENT_MOSS_INSTANCE", "").strip().strip("/\\")
+    base = Path(root)
+    if not instance:
+        return base / "agent_moss_server.port.json"
+    scoped = base / instance / "agent_moss_server.port.json"
+    if scoped.exists():
+        return scoped
+    legacy = base / "agent_moss_server.port.json"
+    if legacy.exists():
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+            if (data.get("instance") or "") == instance:
+                return legacy
+        except Exception:  # noqa: BLE001
+            pass
+    return None
 
 
 def _resolve_local_moss_port(url: str) -> str:
@@ -43,11 +64,20 @@ def _resolve_local_moss_port(url: str) -> str:
         if (parsed.hostname or "") not in ("127.0.0.1", "localhost", "::1"):
             return url
         pf = _moss_port_file()
-        if not pf.exists():
+        if pf is None or not pf.exists():
             return url
         import json
-        port = int(json.loads(pf.read_text(encoding="utf-8")).get("port") or 0)
+        data = json.loads(pf.read_text(encoding="utf-8"))
+        instance = os.environ.get("AGENT_MOSS_INSTANCE", "").strip().strip("/\\")
+        if instance and (data.get("instance") or "") not in ("", instance):
+            return url
+        port = int(data.get("port") or 0)
         configured = parsed.port or (443 if parsed.scheme == "https" else 80)
+        # 只有「使用默认端口 9090」时才用端口文件纠正漂移；显式配置的端口是调用方
+        # 的明确意图（如 OpenDesk 给 AgentGate 指定的自有端口），不能被共享目录里
+        # 其他实例的端口文件覆盖。
+        if configured != 9090:
+            return url
         if port <= 0 or port == configured:
             return url
         logger.warning(
