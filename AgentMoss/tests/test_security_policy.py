@@ -588,7 +588,7 @@ def test_pool_of_classifies_paths():
     assert sp.pool_of("/api/v1/analyze") == "biz"
     assert sp.pool_of("/api/v1/review") == "review"
     assert sp.pool_of("/console/api/config") == "ops"
-    # 裁剪版已移除 brain，不再断言 /api/v1/brain/* 的池分类
+    assert sp.pool_of("/api/v1/brain/rules") == "ops"
     assert sp.pool_of("/api/v1/health") == "health"
     assert sp.pool_of("/anything-else") == "other"
 

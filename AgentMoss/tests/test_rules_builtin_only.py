@@ -2,7 +2,7 @@
 
 目标（对应需求）：
 1. 开关打开后**完全不读用户 runtime 配置**：不 stat / 不 seed / 不 merge / 不写回；
-2. Console / 规则目录 / AGENT_MOSS_CUSTOM_RULES / 用户 skill 全部忽略；
+2. Console / 规则目录 / AGENT_MOSS_CUSTOM_RULES / 用户 skill / Brain 全部忽略；
 3. Console 写接口返回 403；
 4. 开关未设置时行为与改动前完全一致（默认热加载）。
 """
@@ -154,6 +154,12 @@ def test_builtin_only_ignores_rules_dirs_and_custom_rules(builtin_only_env, tmp_
 
     patterns = [r["pattern"] for r in get_enabled_l1_command_patterns_or_default({}, "linux")]
     assert not any("rules-dir-probe" in p or "env-rule-probe" in p for p in patterns)
+
+
+def test_builtin_only_disables_brain(builtin_only_env):
+    """Brain 自学习规则来自用户数据目录，仅内置模式下强制关闭。"""
+    from agent_moss.infra.config import is_brain_enabled
+    assert is_brain_enabled() is False
 
 
 def test_builtin_only_ignores_custom_rules_path(builtin_only_env, tmp_path):

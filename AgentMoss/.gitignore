@@ -28,3 +28,32 @@ secrets.yml
 .DS_Store
 .idea/
 .vscode/
+
+# ===== tests/cases_exec 生成产物（不预生成、不入 git，由 prep.sh/run_all.sh 生成）=====
+# 注意：prep.sh / clean.sh / run_all.sh / generate_bash_exc.py 是源码，必须提交，勿用通配符
+tests/cases_exec/allow.sh
+tests/cases_exec/deny.sh
+tests/cases_exec/allow-root-only.sh
+tests/cases_exec/deny-root-only.sh
+tests/cases_exec/deny-needs-context.sh
+tests/cases_exec/config.yaml
+tests/cases_exec/.env
+tests/cases_exec/deploy.sh
+tests/cases_exec/deploy.py
+tests/cases_exec/deploy_shift.sh
+tests/cases_exec/deploy-large.sh
+tests/cases_exec/deploy-xlarge.sh
+tests/cases_exec/build-xlarge.py
+tests/cases_exec/build-large.py
+tests/cases_exec/build-script/
+tests/cases_exec/*/allow.sh
+tests/cases_exec/*/deny.sh
+tests/cases_exec/*/allow-root-only.sh
+tests/cases_exec/*/deny-root-only.sh
+tests/cases_exec/*/deny-needs-context.sh
+tests/cases_exec/*/config.yaml
+tests/cases_exec/*/.env
+tests/cases_exec/.last_run_sandbox.txt
+tests/cases_exec/.last_run_agentmoss.txt
+tests/cases_exec/*/.last_run_sandbox.txt
+tests/cases_exec/*/.last_run_agentmoss.txt

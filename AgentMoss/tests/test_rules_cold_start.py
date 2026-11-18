@@ -162,7 +162,7 @@ def test_cold_allows_custom_env_rules(cold_env, monkeypatch):
     assert "env-cold" in rules[0]["pattern"]
 
 
-def test_cold_ignores_user_skill(cold_env, tmp_path):
+def test_cold_ignores_user_skill_and_brain(cold_env, tmp_path):
     data_root = tmp_path / "data"
     skill_dir = data_root / "agent_moss_skills"
     skill_dir.mkdir(parents=True)
@@ -170,6 +170,9 @@ def test_cold_ignores_user_skill(cold_env, tmp_path):
 
     from agent_moss.engine.skill_engine import SkillEngine
     assert SkillEngine()._load_user_skill("probe-skill") == ""
+
+    from agent_moss.infra.config import is_brain_enabled
+    assert is_brain_enabled() is False
 
 
 def test_cold_scenario_rules_dir_override(cold_env):

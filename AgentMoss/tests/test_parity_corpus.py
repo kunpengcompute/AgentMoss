@@ -38,7 +38,7 @@ def _decide(case: dict, index: int) -> tuple[str, str, str]:
     result = analyze(
         # session_id 固定且唯一：避开 AgentMoss 的决策缓存把不同输入串味
         session_id=f"parity-{index}",
-        prompt_session="",
+        prompt_session=case.get("prompt_session", ""),
         # 与 TS 侧同一份 snake_case 输入（含 output —— consent 类规则看的就是它）
         action_history=case.get("action_history", []),
         a_next={
