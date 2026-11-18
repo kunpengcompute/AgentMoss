@@ -163,6 +163,16 @@ class AgentGateResponse(BaseModel):
     collected_context: Optional[SystemContext] = Field(
         default=None, description="Collected system context (if requested)"
     )
+    #: 能力降级/预警说明（透传自 AgentMoss）：空 = 全部检测层完整完成。
+    degraded: list[str] = Field(
+        default_factory=list,
+        description="Capability degradation/warning notes passed through from AgentMoss",
+    )
+    #: L3 结局（2026-11）：透传 AgentMoss 的稳定枚举，便于客户直接看
+    #: 「L3 有没有真判」。空 = 旧版 AgentMoss 未返回该字段。
+    l3_outcome: str = Field(
+        default="", description="L3 outcome passed through from AgentMoss"
+    )
     source: str = Field(default="agent_moss", description="Analysis source: agent_moss / cache / fail_closed")
 
 
@@ -216,6 +226,8 @@ class HealthResponse(BaseModel):
     """与 TS 版 health 同构：status=healthy、包版本、身后 AgentMoss 状态。"""
     status: str = "healthy"
     version: str = __version__
+    #: 实际监听端口（端口被占用自动漂移后，调用方从这里得知新端口）。
+    port: int = 0
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     # 归属标识：由启动方注入 AGENT_GATE_INSTANCE（同机多套 AgentGate 时区分是谁起的），
     # 未注入时为空串。与 agent-moss 的 AGENT_MOSS_INSTANCE 同一套约定。

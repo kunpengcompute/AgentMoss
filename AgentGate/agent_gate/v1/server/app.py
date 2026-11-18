@@ -469,6 +469,8 @@ def run_server(
         if actual_port != port:
             logger.info("Port {} in use, using {} instead", port, actual_port)
         port = actual_port
+        # health 接口回报实际端口（与基线 v3 行为一致）
+        os.environ["AGENT_GATE_ACTUAL_PORT"] = str(port)
         if host in ("0.0.0.0", "::"):
             # 只提示，不改行为：监听地址保持不变，访问控制交给鉴权。
             logger.info(

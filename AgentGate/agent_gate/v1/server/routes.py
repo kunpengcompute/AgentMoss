@@ -118,6 +118,8 @@ async def health_check(moss_client=Depends(get_moss_client)):
     # 归属标识由启动方注入：同机多套 AgentGate 时供探测端区分是谁起的服务。
     return HealthResponse(
         instance=os.getenv("AGENT_GATE_INSTANCE", ""),
+        # 实际监听端口（端口漂移后调用方靠它发现）
+        port=int(os.getenv("AGENT_GATE_ACTUAL_PORT") or 0),
         moss_version=moss["moss_version"],
         moss_status=moss["moss_status"],
     )
@@ -264,6 +266,10 @@ async def analyze(
         confidence=moss_result.get("confidence", 0),
         analysis_duration_ms=elapsed,
         violation_graph=moss_result.get("violation_graph"),
+        # 能力降级/预警：透传给调用方，不要吞掉
+        degraded=moss_result.get("degraded") or [],
+        # L3 结局：透传 AgentMoss 的稳定枚举
+        l3_outcome=moss_result.get("l3_outcome") or "",
         collected_context=context,
         source="cache" if cached is not None else "agent_moss",
     )
