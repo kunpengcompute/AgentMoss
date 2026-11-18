@@ -494,9 +494,16 @@ def main():
     state_reset.add_argument("--yes", action="store_true", help="确认删除")
     state_reset.add_argument("--port", type=int, default=9090, help="用于探测服务是否在跑")
 
-    # brain 子命令（contribute = 提交本地沉淀为 MR；中心化上传接口在此预留）
-    from agent_moss.brain.contributor import add_contribute_parser
-    add_contribute_parser(subparsers)
+    # brain 子命令（contribute = 提交本地沉淀为 MR；中心化上传接口在此预留）。
+    # brain 是可选模块：场景裁剪版（如 openEuler）不交付，缺失时跳过子命令即可，
+    # 不能拖垮 --version / server / analyze 等主命令（2026-11 裁剪仓实测：硬导入
+    # 导致 `/usr/bin/agent-moss --version` 直接 ModuleNotFoundError）。
+    try:
+        from agent_moss.brain.contributor import add_contribute_parser
+    except ImportError:
+        pass
+    else:
+        add_contribute_parser(subparsers)
 
     args = parser.parse_args()
 

@@ -384,6 +384,9 @@ class DangerousPatternChecker:
         # NEW-FP（2026-11 鸿蒙压测）：检索命令的引号内容是搜索模式/glob——
         # `rg "remove|delete" --glob "*.py"` 是只读检索，不是批量误删。
         _scan = strip_search_pattern_literals(_strip_heredoc_content(action_detail))
+        # `$?`/`$$`/`$!`/`$#` 是 shell 数值特殊参数，不是通配符；`echo "exit=$?"`
+        # 里的 `?` 与 `rm` 相距 <40 字符会被误判「通配符+删除」。
+        _scan = re.sub(r"\$(?:\?|\$|!|#|\{[?$!#]\})", " ", _scan)
         _TEMP_DIRS = _HEURISTIC_TEMP_DIRS
         # NEW-FP-2 审核：相对 var/tmp（无前导 /）& 深层绝对路径（/opt/app/var/tmp）——
         # 裸露的 (?:^|[\s/])td(?:[\s/]|$) 会把「以 var/tmp 结尾的深层子路径」误当临时目录

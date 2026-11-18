@@ -1,7 +1,7 @@
 {
   "scenario": "boostkit",
   "baseline_repo": "AgentGate",
-  "baseline_commit": "2d6b5b7",
-  "baseline_version": "0.9.15",
-  "synced_at": "2026-11-17T13:35:35.603184+00:00"
+  "baseline_commit": "f6b1e65",
+  "baseline_version": "0.9.16",
+  "synced_at": "2026-11-18T04:02:30+00:00"
 }
