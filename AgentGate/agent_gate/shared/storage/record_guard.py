@@ -1,4 +1,4 @@
-"""记录写入守卫（2026-10 存储治理）。
+"""记录写入守卫（2026-10 存储治理）—— 镜像 TS `ts/src/shared/storage/record-guard.ts`。
 
 两个作用：
 
@@ -20,12 +20,16 @@ DEGRADE_COMMAND_BYTES = 512
 
 
 def _byte_prefix(value: str, limit: int) -> str:
-    """Keep complete UTF-8 characters within a byte budget."""
+    """保留至多 ``limit`` 个 **UTF-8 字节**的完整字符。
+
+    按字符切片（``s[:limit]``）会让中文/emoji 实际占用 2-4 倍字节，
+    字段上限形同虚设，且截断点可能落在多字节字符中间。
+    """
     return value.encode("utf-8", "surrogatepass")[:limit].decode("utf-8", "ignore")
 
 
 def clip_text(value, limit: int | None = None) -> str:
-    """保留至多 ``limit`` 字节的正文，另附长度与校验标记。"""
+    """保留至多 ``limit`` 字节的正文，另附长度与校验标记（保留可定位性）。"""
     if limit is None:
         limit = sp.max_record_bytes()
     s = "" if value is None else str(value)
@@ -75,7 +79,9 @@ def degrade_record(rec: dict) -> dict:
     )
     out = dict(rec)
     out["command"] = clipped
-    out["action_detail"] = _byte_prefix(str(rec.get("action_detail") or ""), DEGRADE_COMMAND_BYTES)
+    out["action_detail"] = _byte_prefix(
+        str(rec.get("action_detail") or ""), DEGRADE_COMMAND_BYTES
+    )
     out["description"] = ""
     out["reason"] = _byte_prefix(str(rec.get("reason") or ""), 256)
     return out

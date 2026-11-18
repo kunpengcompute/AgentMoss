@@ -31,6 +31,7 @@
 | ``AGENT_GATE_SESSION_SWEEP_WINDOW`` | 300 | 跨会话统计窗口（秒） |
 | ``AGENT_GATE_SESSION_SWEEP_ACTION`` | ``log`` | ``log`` 只告警 / ``deny`` 返回 429 |
 
+⚠️ 双端对称：TS 侧为 ``ts/src/shared/security.ts``，变量名与默认值必须一致。
 """
 from __future__ import annotations
 
@@ -130,7 +131,7 @@ DASHBOARD_PAGE_PATHS = ("/dashboard", "/dashboard/")
 DASHBOARD_COOKIE = "agent_gate_token"
 
 #: Dashboard **HTML 页面**的安全响应头（JSON API 不加）。单一事实源：
-#: 看板 HTML 的安全响应头单一事实源。
+#: V1 看板（FastAPI）与 V3 看板（http.server）共用同一份，避免两边漂移。
 #:
 #: - **CSP**：页面不引用任何外部资源（无 CDN / 外部字体 / 外部脚本），所以
 #:   ``default-src`` 可以收到 ``'self'``。内联 ``<script>`` / ``<style>`` /
@@ -639,7 +640,7 @@ def ws_enabled() -> bool:
     """是否注册 ``/ws/events``。**默认关**。
 
     V1 看板页面是 3 秒轮询（``/dashboard/stats`` 等），**根本不用 WebSocket** ——
-    这个路由是设计文档里的实时推送能力，页面没接。默认注册它
+    这个路由是设计文档里的实时推送能力，页面没接、TS 版也没实现。默认注册它
     等于白送一个独立的攻击面：WS 不走 HTTP 中间件，不受连接层上限约束。
 
     需要用实时推送的部署显式设 ``AGENT_GATE_ENABLE_WS=1``。

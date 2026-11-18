@@ -1,3 +1,3 @@
-"""AgentGate V1 — AI Agent 数据采集与安全分析中间层服务。"""
+"""AgentGate — AI agent security gateway."""
 
-__version__ = "0.9.17"
+from .version import __version__  # noqa: F401

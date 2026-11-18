@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .db import Database, get_db
-from agent_gate.v1.instance_id import get_instance_id
+from agent_gate.shared.instance_id import get_instance_id
 
 
 class Repository:
@@ -97,6 +97,8 @@ class Repository:
         # 存储治理：单条截断 + 磁盘低水位降级（旧数据不动，只约束这一条）
         from .record_guard import prepare_record_for_storage
 
+        # reason 也来自 moss_result，必须先合入再截断（否则写库存的是原始长文本，
+        # 单条上限/磁盘降级对它不生效）。
         tool_call, _degraded = prepare_record_for_storage(
             {**tool_call, "reason": moss_result.get("reason", "")}, self._db._db_path,
         )
@@ -146,9 +148,10 @@ class Repository:
         return tool_call_id
 
     def get_action_history(self, session_id: str, limit: int = 100) -> list[dict]:
-        """Return the most recent actions in chronological order."""
         # called_at 供 AgentMoss 的 P4 时间窗口（提权→外传）判定用；
         # 旧调用方没有这个字段时，AgentMoss 退回不设窗口的旧行为。
+        # 取**最近** limit 条（先 DESC 再翻回升序）：长会话历史超过 limit 时，
+        # 旧的 `ORDER BY seq ASC LIMIT ?` 返回的是最早的 N 条，最近动作丢失。
         cursor = self._db.execute(
             """SELECT action_type, action_detail, called_at
                FROM (

@@ -1,19 +1,22 @@
 """FastAPI application factory with HTTP and Unix Socket support."""
 
 import asyncio
+import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
+
+from agent_gate.version import __version__
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from ... import __version__
 from . import security as sp
 from .dashboard import dashboard_router, router as dash_api_router
 from .middleware import RequestLoggingMiddleware
@@ -326,26 +329,29 @@ def _print_dashboard_urls(host: str, port: int) -> None:
 
 
 def _find_free_port(start_port: int, host: str, scan: int = 100, *, workers: int = 1) -> int:
-    """在原监听地址上有限扫描，全部占用时由服务器报告原端口错误。"""
+    """在原监听地址上有限扫描，全部占用时由服务器报告原端口错误。
+
+    单 worker：由 asyncio/uvloop.create_server 解析**所有**监听地址（hostname 可能
+    对应多个地址），每个地址都能 bind 才可用；uvloop 下未配置到本机的地址
+    （EADDRNOTAVAIL）跳过而不是判占用。
+    多 worker：uvicorn 父进程用 Config.bind_socket 创建共享 socket，地址族与双栈
+    设置沿用该路径，不能套用单 worker 的 IPv6-only 设置。
+    """
     import errno
     import socket
     from contextlib import ExitStack
 
     skip_unavailable = False
     if workers > 1:
-        # Uvicorn 的父进程用 Config.bind_socket 创建一个共享 socket，
-        # 地址族和双栈设置沿用该路径，不能套用单 worker 的 IPv6-only 设置。
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         addresses = [(family, socket.SOCK_STREAM, 0, "", (host, 0))]
     else:
-        # run_server 使用 Uvicorn 默认 loop="auto"，其选择规则同样是
-        # 尝试导入 uvloop；仅 asyncio 回退会忽略未配置到本机的地址。
+        # run_server 使用 Uvicorn 默认 loop="auto"：它优先 uvloop，仅 asyncio
+        # 回退时会忽略未配置到本机的地址。
         try:
             import uvloop  # noqa: F401
         except ImportError:
             skip_unavailable = True
-        # 单 worker 由 asyncio/uvloop.create_server 解析所有监听地址；
-        # IPv6 主机名没有冒号，同样需要 AF_UNSPEC 解析并逐一检查。
         try:
             addresses = set(socket.getaddrinfo(
                 host or None, 0, socket.AF_UNSPEC, socket.SOCK_STREAM,
@@ -385,6 +391,29 @@ def _find_free_port(start_port: int, host: str, scan: int = 100, *, workers: int
     return start_port
 
 
+def _write_port_file(port: int, db_path: str | Path) -> None:
+    """把**实际监听端口**写到数据目录，供调用方发现（端口漂移后仍能连上）。
+
+    与 AgentMoss 同一约定：JSON ``{"port", "pid", "started_at"}``。
+    写失败只记日志（调用方仍可用配置端口/health 探测）。
+    """
+    try:
+        base = Path(db_path).parent if db_path else Path.home() / ".config" / "agentgate"
+        path = base / "agent_gate_server.port.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "port": port,
+            "pid": os.getpid(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+        logger.info(f"端口文件已写入: {path} (port={port})")
+    except Exception as exc:  # noqa: BLE001 — 端口发现是附加能力
+        logger.warning(f"写端口文件失败（调用方需自行配置端口）: {exc}")
+
+
 def run_server(
     host: str = "0.0.0.0",
     port: int = 9100,
@@ -399,7 +428,7 @@ def run_server(
     Args:
         host: Bind host (HTTP mode). **保持 0.0.0.0 不变** —— 改成回环会破坏跨机
             采集。访问控制由鉴权承担（``AGENT_GATE_AUTH_MODE=auto``，无凭证 401）。
-        port: Bind port (HTTP mode); try subsequent ports if occupied.
+        port: Bind port (HTTP mode).
         mode: 'http' or 'socket'.
         socket_path: Unix socket path (socket mode).
         log_level: Logging level.
@@ -414,17 +443,20 @@ def run_server(
         format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
     )
 
-    # 先读取继承的鉴权 FD。否则缺失的 FD（常见为 3）可能被后续 SQLite
-    # 打开复用，数据库内容就会被误当成 token，掩盖坏配置并关闭数据库 FD。
-    logger.info(sp.describe())
+    # 鉴权配置坏了（例如显式指定了 AUTH_TOKEN_FD 却读不到）就**不要带病运行**：
+    # 要么全部 401（看着像客户端问题），要么悄悄退回无鉴权（安全问题）。
+    # **必须在创建数据库/写文件之前拒绝**：否则运维会看到一个"启动失败但数据目录
+    # 已被初始化"的中间态。
     sp.fail_fast_on_auth_error()
 
     # Initialize database
     from ..storage.db import get_db
     db = get_db(db_path)
     logger.info(f"Database path: {db_path or 'default'}")
-    # 库里是全量命令与用户 prompt，收紧到 0600 / 目录 0700
+    # 库里是全量用户 prompt 与命令，收紧到 0600 / 目录 0700
     sp.harden_db_files(db.db_path)
+
+    logger.info(sp.describe())
 
     app = create_app()
 
@@ -465,24 +497,24 @@ def run_server(
         finally:
             os.umask(_old_umask)
     else:
-        actual_port = _find_free_port(port, host, workers=workers)
-        if actual_port != port:
-            logger.info("Port {} in use, using {} instead", port, actual_port)
-        port = actual_port
-        # health 接口回报实际端口（与基线 v3 行为一致）
-        os.environ["AGENT_GATE_ACTUAL_PORT"] = str(port)
         if host in ("0.0.0.0", "::"):
             # 只提示，不改行为：监听地址保持不变，访问控制交给鉴权。
             logger.info(
                 f"监听 {host}（网络可达）。访问控制由鉴权承担："
                 + ("已开启，无凭证一律 401" if sp.auth_enabled() else "⚠️ 当前未开启鉴权")
             )
-        logger.info(f"Starting AgentGate in HTTP mode: {host}:{port}")
-        _print_dashboard_urls(host, port)
+        actual_port = _find_free_port(port, host, workers=workers)
+        if actual_port != port:
+            logger.warning(f"Port {port} in use, using {actual_port} instead")
+        # health 接口回报实际端口；端口文件供调用方发现（漂移后仍能连上）。
+        os.environ["AGENT_GATE_ACTUAL_PORT"] = str(actual_port)
+        _write_port_file(actual_port, db.db_path)
+        logger.info(f"Starting AgentGate in HTTP mode: {host}:{actual_port}")
+        _print_dashboard_urls(host, actual_port)
         uvicorn.run(
             app,
             host=host,
-            port=port,
+            port=actual_port,
             log_level=log_level,
             workers=workers,
             limit_concurrency=sp.max_connections(),

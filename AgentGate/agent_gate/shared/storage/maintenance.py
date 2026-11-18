@@ -1,4 +1,4 @@
-"""存储维护（2026-10）：按条数归档 + 磁盘空间治理。
+"""存储维护（2026-10）—— 镜像 TS `ts/src/shared/storage/maintenance.ts`。
 
 触发条件：主库条数达到 ``AGENT_GATE_ARCHIVE_THRESHOLD``（默认 10 万）。
 顺序（**不能颠倒**）：

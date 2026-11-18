@@ -19,6 +19,67 @@ from ..config import get_config
 _MOSS_TOKEN_CACHE: tuple[str, float] = ("", 0.0)
 _MOSS_TOKEN_TTL = 60.0
 
+#: AgentMoss 能力降级的日志节流：同一条降级原因（数字归一化后）每 5 分钟
+#: 只记一次，避免链状态触顶后每个请求都刷一条 warning。
+_DEGRADED_LAST_LOGGED: dict[str, float] = {}
+_DEGRADED_LOG_INTERVAL = 300.0
+
+
+def _moss_port_file() -> Path:
+    """AgentMoss 端口文件路径（与 agent_moss 的端口发现约定一致）。"""
+    root = os.environ.get("AGENT_MOSS_DATA_DIR") or str(Path.home() / ".config" / "agentmoss")
+    return Path(root) / "agent_moss_server.port.json"
+
+
+def _resolve_local_moss_port(url: str) -> str:
+    """本地回环地址 + AgentMoss 端口文件存在且端口不同 → 采用文件里的实际端口。
+
+    端口漂移后（9090 被占 → 9091），写死的 URL 会连错；AgentMoss 启动时把
+    实际端口写到数据目录，这里优先采用。非回环地址（远程部署）原样返回。
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if (parsed.hostname or "") not in ("127.0.0.1", "localhost", "::1"):
+            return url
+        pf = _moss_port_file()
+        if not pf.exists():
+            return url
+        import json
+        port = int(json.loads(pf.read_text(encoding="utf-8")).get("port") or 0)
+        configured = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if port <= 0 or port == configured:
+            return url
+        logger.warning(
+            "AgentMoss 端口文件显示实际端口 {}（配置 {}），采用实际端口", port, configured,
+        )
+        host = parsed.hostname or "127.0.0.1"
+        if ":" in host:
+            host = f"[{host}]"
+        return f"{parsed.scheme or 'http'}://{host}:{port}"
+    except Exception:  # noqa: BLE001 — 端口发现失败按原配置，不阻断
+        return url
+
+
+def _log_degraded(notes: list[str]) -> None:
+    """记录 AgentMoss 返回的能力降级说明（2026-11）。
+
+    为什么在 AgentGate 侧记：客户不一定看 AgentMoss 的日志，但 AgentGate 是
+    每条操作的必经之路，它的日志客户/运维会看。这样「链状态触顶导致 L2.2 失效」
+    这类**能力降级**不需要客户主动查询也能被感知。
+    """
+    import re as _re
+
+    now = time.monotonic()
+    for note in notes:
+        # 归一化：去掉具体数字，让「92300 节点」和「95000 节点」算同一条
+        key = _re.sub(r"\d+", "#", str(note))
+        last = _DEGRADED_LAST_LOGGED.get(key)
+        if last is not None and now - last < _DEGRADED_LOG_INTERVAL:
+            continue
+        _DEGRADED_LAST_LOGGED[key] = now
+        logger.warning(f"AgentMoss 能力降级: {note}")
+
 
 def _moss_token_path() -> Path:
     root = os.getenv("AGENT_MOSS_DATA_DIR", "").strip()
@@ -92,7 +153,9 @@ class MossClient:
         # 所以这里必须自己读环境变量 —— 否则 V1 部署在分离机器上时，
         # `AGENT_MOSS_URL=http://...` 会被静默忽略，一直连默认的 127.0.0.1:9090。
         resolved = base_url or os.environ.get("AGENT_MOSS_URL") or os.environ.get("MOSS_URL")
-        self._base_url = (resolved or moss_cfg.get("url", "http://127.0.0.1:9090")).rstrip("/")
+        self._base_url = _resolve_local_moss_port(
+            (resolved or moss_cfg.get("url", "http://127.0.0.1:9090")).rstrip("/")
+        )
         # timeout 默认 100s：需覆盖 AgentMoss 总超时（90s）+ 余量，避免 AgentMoss
         # 还在分析时被 AgentGate 抢断后 fail-closed 误杀。
         self._timeout = timeout if timeout is not None else moss_cfg.get("timeout", 100.0)
@@ -166,6 +229,12 @@ class MossClient:
                     f"AgentMoss response: decision={result.get('decision')}, "
                     f"duration={result.get('analysis_duration_ms', 0)}ms"
                 )
+                # 能力降级（2026-11）：AgentMoss 在响应里标注「本次判定缺了哪层」
+                # 时，记到 AgentGate 自己的日志 —— 客户不一定看 AgentMoss 的日志，
+                # 但 AgentGate 是必经之路，这里记了才有"被动感知"。
+                _degraded = result.get("degraded") or []
+                if _degraded:
+                    _log_degraded(_degraded)
                 return result
 
             except httpx.TimeoutException as e:

@@ -6,7 +6,7 @@ Applies whitelist + blacklist to prevent leaking secrets.
 import os
 import re
 
-from agent_gate.v1.config import get_config
+from agent_gate.shared.config import get_config
 
 
 class EnvInfoCollector:

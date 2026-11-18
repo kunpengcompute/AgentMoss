@@ -16,7 +16,7 @@ router = APIRouter(prefix="/dashboard")
 dashboard_router = APIRouter()
 
 #: 安全响应头（HTML 页面才需要，JSON API 不加）。
-#: 定义在 ``security.py`` 里作为单一事实源。
+#: 定义在 ``security.py`` 里作为单一事实源 —— V3 看板（http.server）共用同一份。
 _DASHBOARD_SECURITY_HEADERS = sp.DASHBOARD_SECURITY_HEADERS
 
 # WebSocket connections pool
@@ -241,6 +241,74 @@ async def get_timeline(
 
 
 # ============================================================
+# Session log — payload data flow (inspired by dsh trajectory)
+# ============================================================
+
+def _sessionlog_dir() -> str:
+    from agent_gate.shared.sessionlog.convert import DEFAULT_LOG_DIR
+    return DEFAULT_LOG_DIR
+
+
+@router.get("/sessionlog")
+async def list_sessionlogs():
+    """List persisted session logs with aggregate summaries (data flow view)."""
+    import glob
+    import os
+    from agent_gate.shared.sessionlog import load, summarize
+
+    log_dir = _sessionlog_dir()
+    files = sorted(glob.glob(os.path.join(log_dir, "*.jsonl")),
+                   key=os.path.getmtime, reverse=True)
+    out = []
+    for f in files[:50]:
+        sid = os.path.basename(f)[:-len(".jsonl")]
+        try:
+            summary = summarize(load(f, session_id=sid))
+        except Exception:
+            summary = {}
+        out.append({
+            "session_id": sid,
+            "file": f,
+            "mtime": int(os.path.getmtime(f) * 1000),
+            "summary": summary,
+        })
+    return {"total": len(out), "logs": out}
+
+
+@router.get("/sessionlog/{session_id}")
+async def get_sessionlog_flow(session_id: str, request: Request):
+    """Assemble one session's payload data-flow records (trajectory view)."""
+    import os
+    from fastapi import HTTPException
+    from agent_gate.shared.sessionlog import load, summarize
+    from agent_gate.shared.sessionlog.trajectory import build_trajectory
+
+    # 跨会话批量访问信号：正常 agent 只碰自己那一个 session；短时间翻大量
+    # session_id 说明有人在扫库（默认只告警，不改判定）。
+    _principal = getattr(request.state, "principal", "") or (
+        "ip:" + (getattr(request.client, "host", "") or "-")
+    )
+    n, hit = sp.note_session_access(_principal, session_id)
+    if hit:
+        if sp.session_sweep_action() == "deny":
+            raise HTTPException(status_code=429, detail="会话访问过于集中，疑似批量扫描")
+        logger.warning(
+            "⚠️ 疑似跨会话扫描: key={} 窗口内访问了 {} 个不同 session", _principal, n,
+        )
+
+    path = os.path.join(_sessionlog_dir(), f"{session_id}.jsonl")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"no session log for {session_id}")
+    log = load(path, session_id=session_id)
+    return {
+        "session_id": session_id,
+        "summary": summarize(log),
+        "records": build_trajectory(log),
+        "events": [e.to_dict() for e in log.events],
+    }
+
+
+# ============================================================
 # Dashboard HTML page
 # ============================================================
 
@@ -367,6 +435,21 @@ table.select-mode .col-check { display:table-cell; }
 .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
 .toast.error { background:var(--red); }
 .footer { padding:12px 24px; color:var(--muted); font-size:12px; border-top:1px solid var(--border); margin-top:20px; text-align:center; }
+.flow-wrap { padding:12px 16px; max-height:520px; overflow-y:auto; }
+.flow-row { display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid #F5F5F7; }
+.flow-row .f-kind { flex:0 0 76px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; padding-top:2px; }
+.flow-row.k-user .f-kind { color:var(--accent); }
+.flow-row.k-llm .f-kind { color:var(--purple); }
+.flow-row.k-tool .f-kind { color:var(--yellow); }
+.flow-row.k-process .f-kind { color:var(--green); }
+.flow-row.k-syscall .f-kind { color:var(--muted); }
+.flow-row.k-system .f-kind { color:var(--muted); }
+.flow-row .f-body { flex:1; min-width:0; font-size:13px; }
+.flow-row .f-meta { font-size:12px; color:var(--muted); margin-top:2px; }
+.flow-row .f-arrow { flex:0 0 18px; color:var(--muted); text-align:center; padding-top:2px; }
+.f-ok { color:var(--green); }
+.f-err { color:var(--red); }
+.flow-btn { padding:2px 10px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--accent); font-size:12px; cursor:pointer; }
 .flow-btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
 .ag-chain-btn { padding:2px 8px; border-radius:5px; border:1px solid var(--accent); background:transparent; color:var(--accent); font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap; }
 .ag-chain-btn:hover { background:var(--accent); color:#fff; }
@@ -426,6 +509,7 @@ table.select-mode .col-check { display:table-cell; }
   <div class="tab active" data-tab="recent">Recent Calls</div>
   <div class="tab" data-tab="agents">Agents</div>
   <div class="tab" data-tab="timeline">Timeline</div>
+  <div class="tab" data-tab="flow">Data Flow</div>
   <span class="tab-actions">
     <button class="tab-action danger" id="enter-delete">Delete Records</button>
     <button class="tab-action" id="enter-copy">Copy Records</button>
@@ -478,6 +562,23 @@ table.select-mode .col-check { display:table-cell; }
   </div>
 </div>
 
+<!-- Data Flow (sessionlog payload flow) -->
+<div class="main-area" id="tab-flow" style="display:none">
+  <div class="panel" style="grid-column:1/-1">
+    <div class="panel-header">Session Logs (payload data flow)</div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th>Session</th><th>Turns</th><th>LLM</th><th>Tools</th><th>Errors</th>
+        <th>Proc</th><th>Tokens</th><th>Duration</th><th></th>
+      </tr></thead><tbody id="flow-sessions"></tbody></table>
+    </div>
+  </div>
+  <div class="panel" style="grid-column:1/-1">
+    <div class="panel-header" id="flow-title">Select a session to view its data flow</div>
+    <div id="flow-records" class="flow-wrap"><div class="empty">No session selected</div></div>
+  </div>
+</div>
+
 <div class="footer" id="footer">Loading versions...</div>
 
 <div class="ag-modal" id="chain-modal">
@@ -493,7 +594,6 @@ table.select-mode .col-check { display:table-cell; }
     <div class="ag-modal-reason" id="chain-modal-reason"></div>
   </div>
 </div>
-
 
 <script>
 const BASE = '';
@@ -530,6 +630,7 @@ document.querySelectorAll('.tab').forEach(t => {
     document.getElementById('tab-recent').style.display = activeTab==='recent' ? '' : 'none';
     document.getElementById('tab-agents').style.display = activeTab==='agents' ? '' : 'none';
     document.getElementById('tab-timeline').style.display = activeTab==='timeline' ? '' : 'none';
+    document.getElementById('tab-flow').style.display = activeTab==='flow' ? '' : 'none';
     refresh();
   });
 });
@@ -540,7 +641,7 @@ function badge(d, cls) {
   return `<span class="badge ${map[d]||''}">${escapeHtml(d)}</span>`;
 }
 
-// ==================== 存储超限横幅 + 清理 ====================
+// ==================== 存储超限横幅 + 清理（与 TS 版同构）====================
 let _storageVisible = false;
 function _fmtMB(n){ return (n / 1048576).toFixed(1); }
 function _getTotalMB(stats){ return _fmtMB((stats.dbBytes || 0) + (stats.jsonBytes || 0)); }
@@ -587,7 +688,7 @@ async function loadStorageStats(){
   });
 })();
 
-// ==================== 页脚版本（从 health 动态读取）====================
+// ==================== 页脚版本（与 TS 版同构：从 health 动态读取）====================
 (async function loadFooter(){
   try {
     const h = await fetch(BASE+'/api/v1/health').then(r=>r.json());
@@ -618,6 +719,7 @@ async function refresh() {
     updatePagination();
     if (activeTab === 'agents') updateAgents(stats);
     if (activeTab === 'timeline') updateTimeline();
+    if (activeTab === 'flow') updateFlow();
     loadStorageStats();
   } catch(e) { console.error(e); }
 }
@@ -985,6 +1087,84 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// ── Data Flow (sessionlog payload flow) ────────────────────────────────
+let _flowSelected = null;
+
+async function updateFlow() {
+  try {
+    const resp = await fetch(BASE+'/api/v1/sessionlog').then(r=>r.json());
+    const logs = (resp && resp.logs) || [];
+    const tb = document.getElementById('flow-sessions');
+    if (!logs.length) {
+      tb.innerHTML = '<tr><td colspan="9" class="empty">No session logs yet — run agent-gate with collectors enabled</td></tr>';
+      document.getElementById('flow-records').innerHTML = '<div class="empty">No session selected</div>';
+      return;
+    }
+    tb.innerHTML = logs.map(l => {
+      const s = l.summary || {};
+      return `<tr>
+        <td style="font-size:12px;color:var(--muted)">${escapeHtml(l.session_id)}</td>
+        <td>${s.turns ?? '-'}</td>
+        <td>${s.llm_calls ?? '-'}</td>
+        <td>${s.tool_calls ?? '-'}</td>
+        <td>${(s.tool_errors||0) > 0 ? `<span class="f-err">${s.tool_errors}</span>` : (s.tool_errors ?? '-')}</td>
+        <td>${s.process_execs ?? '-'}</td>
+        <td style="font-size:12px">${(s.input_tokens||0)+(s.output_tokens||0)}</td>
+        <td style="font-size:12px;color:var(--muted)">${s.duration_ms!=null ? s.duration_ms+'ms' : '-'}</td>
+        <td><button class="flow-btn" data-session="${escapeHtml(l.session_id)}">View</button></td>
+      </tr>`;
+    }).join('');
+    // 用事件委托而不是内联事件处理器：后者要把不可信字符串塞进 JS 字面量，
+    // HTML 转义（&#39;）会被浏览器在解析属性时还原成引号，仍能闭合字符串执行
+    // 任意 JS。data-* + addEventListener 让数据始终是数据，不进入代码上下文。
+    tb.querySelectorAll('button.flow-btn[data-session]').forEach(btn => {
+      btn.addEventListener('click', () => showFlow(btn.dataset.session));
+    });
+  } catch(e) { console.error(e); }
+}
+
+async function showFlow(sessionId) {
+  _flowSelected = sessionId;
+  try {
+    const data = await fetch(BASE+'/api/v1/sessionlog/'+encodeURIComponent(sessionId)).then(r=>r.json());
+    document.getElementById('flow-title').textContent = 'Data Flow — '+sessionId;
+    const recs = data.records || [];
+    const s = data.summary || {};
+    const wrap = document.getElementById('flow-records');
+    if (!recs.length) { wrap.innerHTML = '<div class="empty">No flow records in this session</div>'; return; }
+    wrap.innerHTML = recs.map(r => {
+      const kind = r.kind || 'system';
+      let body = '', meta = '';
+      if (kind === 'user') { body = escapeHtml(String(r.content||'')); }
+      else if (kind === 'llm') {
+        const u = r.usage || {};
+        meta = `model=${escapeHtml(String(r.model||'-'))} · in=${u.input_tokens||u.prompt_tokens||0} out=${u.output_tokens||u.completion_tokens||0}${r.duration_ms!=null?' · '+r.duration_ms+'ms':''}`;
+        body = escapeHtml(String(r.content||'')).substring(0,200);
+      } else if (kind === 'tool') {
+        const ok = !r.error || Object.keys(r.error||{}).length===0;
+        meta = `${escapeHtml(String(r.call_id||''))}${r.duration_ms!=null?' · '+r.duration_ms+'ms':''} · src=${escapeHtml(String(r.source||'llm'))}`;
+        body = `<span class="${ok?'f-ok':'f-err'}">${escapeHtml(String(r.name||''))}</span> ${escapeHtml(String(r.arguments||'')).substring(0,120)}`;
+        if (r.result!==null && r.result!==undefined) body += ` <span class="f-arrow">→</span> <span class="${ok?'f-ok':'f-err'}">${escapeHtml(String(r.result)).substring(0,160)}</span>`;
+      } else if (kind === 'process') {
+        meta = `pid=${r.pid??'-'}${r.exit_code!=null?' · exit='+r.exit_code:''}${r.duration_ms!=null?' · '+r.duration_ms+'ms':''}`;
+        body = escapeHtml(String(r.command||'')).substring(0,160);
+      } else if (kind === 'syscall') {
+        meta = `pid=${r.pid??'-'}`;
+        body = escapeHtml(String(r.syscall||''));
+      } else {
+        body = escapeHtml(String(r.detail||r.content||''));
+      }
+      return `<div class="flow-row k-${escapeHtml(kind)}"><div class="f-kind">${escapeHtml(kind)}</div><div class="f-body">${body}${meta?'<div class="f-meta">'+meta+'</div>':''}</div></div>`;
+    }).join('');
+    // Summary strip
+    const strip = document.createElement('div');
+    strip.className = 'f-meta';
+    strip.style.cssText = 'padding:0 16px 8px;';
+    strip.textContent = `turns=${s.turns??0} · llm=${s.llm_calls??0} · tools=${s.tool_calls??0} · errors=${s.tool_errors??0} · procs=${s.process_execs??0} · tokens=${(s.input_tokens||0)+(s.output_tokens||0)} · ${s.duration_ms!=null?s.duration_ms+'ms':''}`;
+    wrap.prepend(strip);
+  } catch(e) { console.error(e); }
 }
 
 // ── 复制记录 ───────────────────────────────────────────────────────────

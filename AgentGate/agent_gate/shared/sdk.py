@@ -3,7 +3,7 @@
 Provides a simple, synchronous HTTP client for Agents to call AgentGate.
 
 Usage:
-    from agent_gate.v1.sdk import GateClient
+    from agent_gate.shared.sdk import GateClient
     client = GateClient(base_url="http://127.0.0.1:9100")
     response = client.analyze(agent_type="claude-code", session_id="sess-001",
                                tool_name="bash", command="ls -la")

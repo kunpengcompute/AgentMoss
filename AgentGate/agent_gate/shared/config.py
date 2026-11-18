@@ -73,6 +73,36 @@ class Config:
                 "retention_days": 30,
                 "max_query_limit": 500,
             },
+            "proxy": {
+                "host": "127.0.0.1",
+                "port": 9110,
+                "intercept_hosts": [
+                    "api.openai.com",
+                    "api.anthropic.com",
+                ],
+                "agent_type": "auto",
+                "session_timeout": 300,
+                "redact": True,
+                "upstream_timeout": 60.0,
+                "debug_payload": False,
+                "level": 1,
+                "l2_timeout": 10.0,
+                "deny_action": "inform",  # "inform" | "block"
+            },
+            "gateway": {
+                "host": "127.0.0.1",
+                "port": 9110,
+                "model_routes": [],  # empty = use --upstream single-url mode
+            },
+            "privacy": {
+                "mode": "auto",  # "auto" | "cloud_only" | "local_only"
+                "redact_api_keys": True,
+                "redact_passwords": True,
+                "hash_file_content": True,
+                "truncate_system_prompt": 200,
+                "truncate_user_prompt": 500,
+                "max_payload_bytes": 10240,
+            },
             "security": {
                 "env_blacklist": [
                     ".*_TOKEN$",
@@ -222,6 +252,18 @@ class Config:
     @property
     def security(self) -> dict:
         return self._data["security"]
+
+    @property
+    def proxy(self) -> dict:
+        return self._data["proxy"]
+
+    @property
+    def privacy(self) -> dict:
+        return self._data["privacy"]
+
+    @property
+    def gateway(self) -> dict:
+        return self._data["gateway"]
 
     def get(self, dotted_key: str, default=None):
         keys = dotted_key.split(".")

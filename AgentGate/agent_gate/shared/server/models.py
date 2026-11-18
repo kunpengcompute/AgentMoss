@@ -12,8 +12,6 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, computed_field
 
-from ... import __version__
-
 
 # --- Sub-models for collected system context ---
 
@@ -163,13 +161,17 @@ class AgentGateResponse(BaseModel):
     collected_context: Optional[SystemContext] = Field(
         default=None, description="Collected system context (if requested)"
     )
-    #: 能力降级/预警说明（透传自 AgentMoss）：空 = 全部检测层完整完成。
+    #: 能力降级/预警说明（2026-11）：**透传**自 AgentMoss。
+    #: 空数组 = 本次判定由全部检测层完整完成；
+    #: 非空 = 某一层没跑全或即将失效。调用方（客户的 agent）应记录/展示/上报，
+    #: 不要静默丢弃 —— 否则客户永远不知道"这次判定缺了什么"。
     degraded: list[str] = Field(
         default_factory=list,
         description="Capability degradation/warning notes passed through from AgentMoss",
     )
-    #: L3 结局（2026-11）：透传 AgentMoss 的稳定枚举，便于客户直接看
-    #: 「L3 有没有真判」。空 = 旧版 AgentMoss 未返回该字段。
+    #: L3 结局（2026-11）：透传 AgentMoss 的稳定枚举（ok / reasoning_fallback /
+    #: not_reached / skipped / fail_open / fail_closed / failed_but_blocked /
+    #: circuit_open）。空 = 旧版 AgentMoss 未返回该字段。
     l3_outcome: str = Field(
         default="", description="L3 outcome passed through from AgentMoss"
     )
@@ -203,7 +205,8 @@ class ToolCallRecord(BaseModel):
 class SessionTraceResponse(BaseModel):
     """Response for GET /api/v1/sessions/{session_id}/traces.
 
-    ``tool_calls`` 与 TS 版同名；``traces`` 保留为兼容字段。
+    ``tool_calls`` 与 TS 版同名字段（此前叫 ``traces``，同一端点两种结构）。
+    其余会话元信息两端一致。
     """
     session_id: str
     agent_type: str = ""
@@ -218,16 +221,16 @@ class SessionTraceResponse(BaseModel):
     @computed_field
     @property
     def traces(self) -> list[ToolCallRecord]:
-        """兼容按接口路径读取 traces 的客户端，顺序与 tool_calls 相同。"""
+        """兼容按旧接口路径读取 traces 的客户端，顺序与 tool_calls 相同。"""
         return self.tool_calls
 
 
 class HealthResponse(BaseModel):
     """与 TS 版 health 同构：status=healthy、包版本、身后 AgentMoss 状态。"""
     status: str = "healthy"
-    version: str = __version__
     #: 实际监听端口（端口被占用自动漂移后，调用方从这里得知新端口）。
     port: int = 0
+    version: str = ""
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     # 归属标识：由启动方注入 AGENT_GATE_INSTANCE（同机多套 AgentGate 时区分是谁起的），
     # 未注入时为空串。与 agent-moss 的 AGENT_MOSS_INSTANCE 同一套约定。

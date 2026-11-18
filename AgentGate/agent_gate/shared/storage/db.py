@@ -154,7 +154,7 @@ def get_db(db_path: Optional[str] = None) -> Database:
 def get_agent_gate_db_path() -> str:
     """当前 AgentGate 存储路径（供 AgentMoss ``/api/v1/review`` 直读）。
 
-    AgentMoss 的 review 接口拿到这个
+    与 TS 版 ``getAgentGateDbPath()`` 对应：AgentMoss 的 review 接口拿到这个
     路径后**直接读文件**，把全量 tool_calls seed 进状态库 —— 数据不双份存储，
     全量事件流仍以 AgentGate 存储为唯一事实源。
 

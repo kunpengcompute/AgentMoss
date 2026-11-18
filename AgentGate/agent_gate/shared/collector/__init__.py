@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 from loguru import logger
 
-from agent_gate.v1.config import get_config
-from agent_gate.v1.server.models import SystemContext, OsInfo, ResourceInfo, ProcessInfo, NetworkInfo, UserInfo
+from agent_gate.shared.config import get_config
+from agent_gate.shared.server.models import SystemContext, OsInfo, ResourceInfo, ProcessInfo, NetworkInfo, UserInfo
 from .system_info import SystemInfoCollector
 from .process_info import ProcessInfoCollector
 from .env_info import get_env_collector

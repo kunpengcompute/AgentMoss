@@ -31,7 +31,7 @@ def get_repo():
 
 def get_orchestrator():
     """Dependency: get CollectorOrchestrator."""
-    from agent_gate.v1.collector import get_orchestrator as _get_orch
+    from agent_gate.shared.collector import get_orchestrator as _get_orch
     return _get_orch()
 
 
@@ -68,7 +68,7 @@ def reset_cache():
 
 def get_normalizer():
     """Dependency: get Normalizer with repository."""
-    from agent_gate.v1.normalizer import Normalizer
+    from agent_gate.shared.normalizer import Normalizer
     from ..storage.repository import Repository
     return Normalizer(repo=Repository())
 
@@ -77,7 +77,8 @@ router = APIRouter(prefix="/api/v1")
 
 
 #: 低频回顾触发计数：每 _REVIEW_INTERVAL 条落库触发一次 ``/api/v1/review``。
-#: 每 N 条落库触发一次 ``/api/v1/review``。
+#: 与 TS 版 ``ts/src/v1/routes.ts::v1ReviewCounter`` **一一对应** —— 此前只有
+#: TS 侧实现，Python 侧从未触发过 review（双端不一致，2026-10 补齐）。
 _REVIEW_INTERVAL = 100
 _review_counter = 0
 
@@ -111,13 +112,27 @@ def _maybe_trigger_review(moss_client, agent_id: str) -> None:
         logger.debug("review trigger skipped: %s", exc)
 
 
+def _agent_gate_version() -> str:
+    """包版本（与 TS 版 AGENTGATE_VERSION 对齐）。
+
+    此前 HealthResponse.version 硬编码 "0.2.2"，任何版本升级后看板页脚都显示
+    错误版本。打包安装读分发元数据；源码运行退化为 0.0.0-dev。
+    """
+    try:
+        from importlib.metadata import version as _pkg_version
+        return _pkg_version("agent-gate-sec")
+    except Exception:  # PackageNotFoundError / 其他元数据异常
+        return "0.0.0-dev"
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health_check(moss_client=Depends(get_moss_client)):
-    """Health check endpoint（网关状态 + 版本 + 身后 AgentMoss 状态）。"""
+    """Health check endpoint（与 TS 版同构：网关状态 + 版本 + 身后 AgentMoss 状态）。"""
     moss = await moss_client.health()
     # 归属标识由启动方注入：同机多套 AgentGate 时供探测端区分是谁起的服务。
     return HealthResponse(
         instance=os.getenv("AGENT_GATE_INSTANCE", ""),
+        version=_agent_gate_version(),
         # 实际监听端口（端口漂移后调用方靠它发现）
         port=int(os.getenv("AGENT_GATE_ACTUAL_PORT") or 0),
         moss_version=moss["moss_version"],
@@ -142,11 +157,19 @@ async def analyze(
     and returns the security decision.
     """
     start = time.monotonic()
-    # 只发 a_next（Python API 格式）的调用方，tool_name/command 从
-    # action_type/action_detail 兜底；两者都有时以顶层字段为准。
+    # 0'. 与 TS 版对齐：只发 a_next（Python API 格式）的调用方，tool_name/command
+    #     从 action_type/action_detail 兜底；两者都有时以顶层字段为准。
     _a_next_in = input_data.a_next or {}
     tool_name = input_data.tool_name or str(_a_next_in.get("action_type") or "unknown")
     command = input_data.command or str(_a_next_in.get("action_detail") or "")
+    # 临时排障：记录 OpenDesk 送进来的原始 history（不提交）
+    if os.environ.get("AGENT_GATE_DUMP"):
+        try:
+            import json as _json
+            with open(os.environ["AGENT_GATE_DUMP"], "a", encoding="utf-8") as _f:
+                _f.write(_json.dumps(input_data.model_dump(), ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     # 0. 身份绑定：配了 AGENT_GATE_AGENT_TOKENS 时，自报的 agent_type 必须与
     #    凭证一致 —— 否则任何人拿自己的 token 声称是 opendesk，就能把脏数据
@@ -202,6 +225,11 @@ async def analyze(
     else:
         # 4. Normalize to AgentMoss format (includes DB action_history lookup)
         moss_request = await normalizer.normalize(input_data, context)
+
+        # Phase 2: these steps are now done after MossClient call
+        # For now, defer system_snapshot write to after the analysis
+        # (we need tool_call_id which we don't have yet)
+
         # 5. Call AgentMoss
         moss_result = await moss_client.analyze(moss_request)
 
@@ -228,7 +256,7 @@ async def analyze(
         context=context_dict,
     )
 
-    # 8. Update cache (Allow only)
+    # 8. Update cache (Allow only；缓存命中的结果无需重复写回)
     if cache and cached is None:
         cache.set(input_data.session_id, input_data.cwd, command, moss_result)
 
@@ -238,7 +266,7 @@ async def analyze(
         f"({elapsed:.1f}ms total)"
     )
 
-    # 9. Broadcast to dashboard WebSocket clients
+    # 9. Broadcast to dashboard WebSocket clients（仅新判定推送，缓存命中不重复播报）
     if cached is None:
         broadcast_event({
             "type": "analyze_complete",
@@ -252,7 +280,7 @@ async def analyze(
         })
 
     # 10. 低频回顾（fire-and-forget）：每 N 条落库触发一次，让 AgentMoss 直读
-    #     本地存储重建链状态 + 提取待攻击前序；
+    #     本地存储重建链状态 + 提取待攻击前序。对齐 TS 版 v1/routes.ts；
     #     不阻塞本次响应，失败也不影响已算出的判定。
     _maybe_trigger_review(moss_client, agent_id)
 
@@ -265,10 +293,11 @@ async def analyze(
         policy=moss_result.get("policy", ""),
         confidence=moss_result.get("confidence", 0),
         analysis_duration_ms=elapsed,
+        # 组合式拦截时的攻击链图：与 TS 版同字段，调用方无需再查库。
         violation_graph=moss_result.get("violation_graph"),
-        # 能力降级/预警：透传给调用方，不要吞掉
+        # 能力降级/预警：**透传**给调用方（客户的 agent），不要吞掉
         degraded=moss_result.get("degraded") or [],
-        # L3 结局：透传 AgentMoss 的稳定枚举
+        # L3 结局：透传 AgentMoss 的稳定枚举，便于客户直接看「L3 有没有真判」
         l3_outcome=moss_result.get("l3_outcome") or "",
         collected_context=context,
         source="cache" if cached is not None else "agent_moss",
@@ -340,7 +369,8 @@ async def query_tool_calls(
 ):
     """Query tool call records with filters. Returns {total, data} for pagination.
 
-    ``limit`` 超过 500 时**静默截断**（不报 422）。
+    ``limit`` 超过 500 时**静默截断**（与 TS 侧一致）：此前是 422，但两端行为
+    不一致会让同一个客户端在不同实现上表现不同。
     """
     limit = min(limit, 500)
     # 逐 agent token：忽略调用方传的 agent_id，强制按凭证绑定的 agent_type
@@ -372,6 +402,21 @@ async def query_tool_calls(
         "total": total,
         "data": [dict(r) for r in records],
     }
+
+
+# ==================== 会话流（sessionlog）====================
+# 与 TS V1 的 /api/v1/sessionlog* 同路径（Python 侧原有 /dashboard/sessionlog*，
+# 保留为向后兼容别名，内部复用同一实现）。
+@router.get("/sessionlog")
+async def api_list_sessionlogs():
+    from .dashboard import list_sessionlogs
+    return await list_sessionlogs()
+
+
+@router.get("/sessionlog/{session_id}")
+async def api_sessionlog_detail(session_id: str, request: Request):
+    from .dashboard import get_sessionlog_flow
+    return await get_sessionlog_flow(session_id, request)
 
 
 @router.get("/agents")
