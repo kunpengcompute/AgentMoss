@@ -21,7 +21,7 @@ from ..types import ScriptChainAnalysisResult, ScriptNode
 from .backends.base import LanguageBackend
 from .backends.python_backend import PythonBackend
 from .backends.shell_backend import ShellBackend
-from .ir import ScriptIR
+from .ir import scan_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,8 @@ DEFAULT_MAX_FILE_SIZE = _max_file_size_from_env()
 #: 所有文件累计大小上限
 DEFAULT_MAX_TOTAL_SIZE = 8 * 1024 * 1024
 _MAX_LOG_PATH_CHARS = 256
+DIAGNOSTIC_NODE_LIMIT = 8
+DIAGNOSTIC_CHILD_LIMIT = 4
 
 
 def _resolve_path(p: str, base_dir: str) -> str:
@@ -105,6 +107,8 @@ class RecursiveTracker:
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         max_total_size: int = DEFAULT_MAX_TOTAL_SIZE,
         stop_on_critical: bool = True,
+        *,
+        diagnostics: dict | None = None,
     ):
         self._scanner = command_scanner
         self._stop_on_critical = stop_on_critical
@@ -115,6 +119,9 @@ class RecursiveTracker:
         self._result = ScriptChainAnalysisResult()
         self._visiting: set[str] = set()   # 当前 DFS 路径（循环检测）
         self._visited: set[str] = set()    # 已处理集合
+        self._diagnostics = diagnostics
+        self._diagnostic_nodes: list[dict] = []
+        self._budget_skips = {"depth": 0, "nodes": 0, "total_bytes": 0}
 
     def track(self, entry_path: str, entry_args: list[str] | None, cwd: str = "") -> ScriptChainAnalysisResult:
         """从入口脚本开始追踪调用链。"""
@@ -152,6 +159,21 @@ class RecursiveTracker:
                 len(nodes), max((node.depth for node in nodes), default=None), result.total_size,
                 result.max_depth_reached, result.max_nodes_reached, result.max_size_reached,
             )
+        if self._diagnostics is not None:
+            self._diagnostics.update(
+                nodes=self._diagnostic_nodes,
+                node_count=len(nodes),
+                omitted_nodes=len(nodes) - len(self._diagnostic_nodes),
+                max_visited_depth=max((node.depth for node in nodes), default=0),
+                total_bytes=result.total_size,
+                budget_skips=self._budget_skips,
+                limits={
+                    "depth": self._max_depth,
+                    "nodes": self._max_nodes,
+                    "file_bytes": self._max_file_size,
+                    "total_bytes": self._max_total_size,
+                },
+            )
         return result
 
     def _visit_script(
@@ -173,6 +195,8 @@ class RecursiveTracker:
 
         # 预算
         if depth > self._max_depth:
+            if self._diagnostics is not None:
+                self._budget_skips["depth"] += 1
             if not self._result.max_depth_reached:
                 self._result.max_depth_reached = True
                 # 长路径保留文件名；控制字符转义后再交给日志器，保持单行。
@@ -185,11 +209,15 @@ class RecursiveTracker:
                 )
             return
         if len(self._result.nodes) >= self._max_nodes:
+            if self._diagnostics is not None:
+                self._budget_skips["nodes"] += 1
             if not self._result.max_nodes_reached:
                 self._result.max_nodes_reached = True
                 logger.info("节点数触达上限: nodes=%d max_nodes=%d", len(self._result.nodes), self._max_nodes)
             return
         if self._result.total_size >= self._max_total_size:
+            if self._diagnostics is not None:
+                self._budget_skips["total_bytes"] += 1
             if not self._result.max_size_reached:
                 self._result.max_size_reached = True
                 logger.info(
@@ -200,6 +228,11 @@ class RecursiveTracker:
 
         self._visiting.add(path_str)
         self._visited.add(path_str)
+
+        details = None
+        if self._diagnostics is not None and len(self._diagnostic_nodes) < DIAGNOSTIC_NODE_LIMIT:
+            details = {"depth": depth}
+            self._diagnostic_nodes.append(details)
 
         content, lines, size, error = _read_script(path_str, self._max_file_size)
         if error:
@@ -214,6 +247,8 @@ class RecursiveTracker:
             node = ScriptNode(script_path=path_str, depth=depth, error=error, file_size=size,
                               line_count=lines, unanalyzable=_unanalyzable)
             self._result.nodes.append(node)
+            if details is not None:
+                details.update(read_status="file_size_limit" if _unanalyzable else "read_error", file_bytes=size)
             self._visiting.discard(path_str)
             return
 
@@ -221,7 +256,11 @@ class RecursiveTracker:
         self._result.total_lines += lines
 
         # 解析 IR（按语言分派 backend）
-        ir = _pick_backend(path_str).parse(content, args)
+        backend = _pick_backend(path_str)
+        if details is not None and type(backend) in (ShellBackend, PythonBackend):
+            ir = backend.parse(content, args, diagnostics=details)
+        else:
+            ir = backend.parse(content, args)
 
         node = ScriptNode(
             script_path=path_str,
@@ -234,9 +273,24 @@ class RecursiveTracker:
         self._result.nodes.append(node)
         self._result.total_nodes = len(self._result.nodes)
 
+        if details is not None:
+            scan_bytes, scan_sha256 = scan_fingerprint(ir.reachable_content)
+            details.update(
+                language=ir.language,
+                control_flow_resolved=ir.control_flow_resolved,
+                file_bytes=size,
+                scan_bytes=scan_bytes,
+                scan_sha256=scan_sha256,
+                child_count=len(ir.calls),
+                child_arg_counts=[len(call.args) for call in ir.calls[:DIAGNOSTIC_CHILD_LIMIT]],
+                inline_l1_scan=False,
+            )
+
         # Inline L1（内联扫描 reachable_content）
         if self._scanner is not None and ir.reachable_content:
             l1 = self._scanner.scan(ir.reachable_content)
+            if details is not None:
+                details.update(inline_l1_scan=True, inline_l1_hit=l1.hit)
             if l1.hit:
                 node.l1_hit = True
                 node.l1_risk_level = l1.risk_level

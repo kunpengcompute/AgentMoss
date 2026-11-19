@@ -12,14 +12,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import threading
 import time
+from pathlib import Path
+
+from loguru import logger
 
 from ..server import security as sp
 from .repository import Repository
-
-logger = logging.getLogger("agent_gate.maintenance")
 
 #: 同一时刻只允许一个维护任务在跑（VACUUM 期间重复触发会互相等锁）。
 _running = False
@@ -32,16 +32,24 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
     if _running:
         return {"archived": 0, "file": "", "skipped": "running"}
     _running = True
+    result = {"archived": 0, "file": "", "skipped": "error"}
+    threshold = keep = records_at_check = None
+    review = vacuum = "not-run"
+    vacuum_sqlite_errorcode = vacuum_sqlite_errorname = None
+    vacuum_error = ""
+    error = ""
     try:
         threshold = sp.archive_threshold_records()
         keep = sp.archive_keep_records()
         if threshold <= 0 or keep <= 0:
-            return {"archived": 0, "file": "", "skipped": "disabled"}
+            result["skipped"] = "disabled"
+            return result
 
         repo = Repository()
-        stats = repo.get_storage_stats()
-        if stats.get("toolCalls", 0) < threshold:
-            return {"archived": 0, "file": "", "skipped": "below-threshold"}
+        records_at_check = repo.get_storage_stats().get("toolCalls", 0)
+        if records_at_check < threshold:
+            result["skipped"] = "below-threshold"
+            return result
 
         db_path = str(repo._db._db_path)
 
@@ -49,28 +57,49 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
         try:
             from ..client.moss_client import MossClient
 
+            review = "attempted"
             asyncio.run(MossClient().review(agent_id=agent_id, db_path=db_path))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("归档前全量回顾失败（继续归档）: %s", exc)
+            review = type(exc).__name__
 
         # 2) 归档最老的，主库留 keep 条
         archived, file_path = repo.archive_old_records(keep)
         if archived <= 0:
-            return {"archived": 0, "file": "", "skipped": "nothing-to-archive"}
+            result["skipped"] = "nothing-to-archive"
+            return result
 
         # 3) 真正释放磁盘
         try:
             repo.vacuum()
+            vacuum = "completed"
         except Exception as exc:  # noqa: BLE001
-            logger.warning("VACUUM 失败: %s", exc)
+            vacuum = type(exc).__name__
+            vacuum_sqlite_errorcode = getattr(exc, "sqlite_errorcode", None)
+            vacuum_sqlite_errorname = getattr(exc, "sqlite_errorname", None)
+            if vacuum_sqlite_errorcode is None:
+                vacuum_error = str(exc)[:160]
 
-        logger.info("存储归档完成: %d 条 → %s（主库保留 %d 条）", archived, file_path, keep)
-        return {"archived": archived, "file": file_path, "skipped": ""}
+        result.update(archived=archived, file=file_path, skipped="")
+        return result
     except Exception as exc:  # noqa: BLE001
-        logger.warning("存储维护失败: %s", exc)
-        return {"archived": 0, "file": "", "skipped": "error"}
+        error = f"{type(exc).__name__}: {str(exc)[:160]}"
+        return result
     finally:
         _running = False
+        has_error = (
+            bool(error)
+            or review not in ("not-run", "attempted")
+            or vacuum not in ("not-run", "completed")
+        )
+        logger.log(
+            "WARNING" if has_error else "INFO",
+            "storage_maintenance outcome={} records_at_check={} threshold={} keep_target={} "
+            "archived={} archive_file={} review={} vacuum={} error={!r} "
+            "vacuum_sqlite_errorcode={} vacuum_sqlite_errorname={} vacuum_error={!r}",
+            result["skipped"] or "archived", records_at_check, threshold, keep,
+            result["archived"], Path(result["file"]).name or "-", review, vacuum, error,
+            vacuum_sqlite_errorcode, vacuum_sqlite_errorname, vacuum_error,
+        )
 
 
 def start_storage_maintenance(agent_id: str = "default", interval_sec: int = 6 * 3600) -> None:

@@ -90,6 +90,10 @@ class Database:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._write_lock = threading.Lock()
+        # 对同一个库共享，由写锁保护。Repository 实例可能随请求创建。
+        self._reported_storage_degraded = False
+        self._storage_last_report_at: dict[bool, float] = {}
+        self._storage_degraded_writes = 0
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get thread-local connection."""

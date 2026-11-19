@@ -7,11 +7,12 @@ import time
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from ..__version__ import __version__
 from ..engine.skill_engine import default_skills_dir
 from ..infra import security_policy as sp
+from ..infra.script_diagnostics import ScriptDiagnostics
 from .models import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -426,7 +427,7 @@ async def health(request: Request):
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(req: AnalyzeRequest, request: Request):
+async def analyze(req: AnalyzeRequest, request: Request, response: Response):
     try:
         from ..engine.analyzer import analyze as run_analysis
         from ..profiles import get_profile
@@ -588,6 +589,12 @@ async def analyze(req: AnalyzeRequest, request: Request):
             logger.info("已忽略请求携带的 metadata.llm_config（AGENT_MOSS_ALLOW_PER_REQUEST_LLM=0）")
             llm_config = None
         llm_log_path = req.metadata.get("llm_log_path") if req.metadata else None
+        diagnostics = None
+        if (
+            getattr(request.app.state, "script_diagnostics_enabled", False)
+            and a_next["action_type"].lower() == "bash"
+        ):
+            diagnostics = ScriptDiagnostics(session_id=session_id)
         # ⚠️ 必须用关键字参数调用 analyze：analyze 签名含 scenario_id（6abe6c6 在
         # llm_log_path 之前插入），此前按位置传参（14 实参对 15 形参）从第 12 位起
         # 全部右错一位——llm_log_path 被绑成 scenario_id（LLM_PROMPT 日志静默丢失，
@@ -658,6 +665,7 @@ async def analyze(req: AnalyzeRequest, request: Request):
                 session_history=session_history,  # 多 session 历史（L2.2 跨会话验证）
                 instance_id=instance_id,  # 来源实例（仅展示层脱敏）
                 _req_id=_req_id,   # 仅在 executor 线程里恢复 contextvars 用
+                script_diagnostics=diagnostics,
             ),
         )
         duration_ms = (time.monotonic() - start) * 1000
@@ -873,7 +881,7 @@ async def analyze(req: AnalyzeRequest, request: Request):
             except Exception as e:
                 logger.warning("stateful incremental 异常（不阻断响应）: %s", e)
 
-        return AnalyzeResponse(
+        analysis_response = AnalyzeResponse(
             decision=result["decision"],
             reason=result["reason"],
             risk_level=result.get("risk_level", "low"),
@@ -888,6 +896,9 @@ async def analyze(req: AnalyzeRequest, request: Request):
             degraded=_degraded,
             l3_outcome=str(result.get("l3_outcome", "") or ""),
         )
+        if diagnostics and await diagnostics.write_with_timeout(analysis_response.decision):
+            response.headers["X-AgentMoss-Diagnostic-Id"] = diagnostics.request_id
+        return analysis_response
     except HTTPException:
         raise  # 鉴权/越界等显式状态码不能被兜底 500 覆盖
     except Exception as e:

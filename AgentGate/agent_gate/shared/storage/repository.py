@@ -8,8 +8,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from loguru import logger
+
 from .db import Database, get_db
 from agent_gate.shared.instance_id import get_instance_id
+
+
+_STORAGE_STATUS_LOG_INTERVAL = 60.0
 
 
 class Repository:
@@ -99,7 +104,7 @@ class Repository:
 
         # reason 也来自 moss_result，必须先合入再截断（否则写库存的是原始长文本，
         # 单条上限/磁盘降级对它不生效）。
-        tool_call, _degraded = prepare_record_for_storage(
+        tool_call, degraded = prepare_record_for_storage(
             {**tool_call, "reason": moss_result.get("reason", "")}, self._db._db_path,
         )
         # 在同一个 write lock 内原子化生成 seq 并写入，避免并发请求拿到相同 seq
@@ -144,8 +149,37 @@ class Repository:
                 (session_id,),
             )
             conn.commit()
+            storage_status = self._storage_status_after_write(degraded)
+
+        if storage_status is not None:
+            state, degraded_writes = storage_status
+            logger.log(
+                "WARNING" if state == "degraded" else "INFO",
+                "storage_write_mode state={} tool_call_id={} degraded_writes={}",
+                state, tool_call_id, degraded_writes,
+            )
 
         return tool_call_id
+
+    def _storage_status_after_write(self, degraded: bool) -> tuple[str, int] | None:
+        """在写锁内汇总成功落库的降级记录，按状态限频。"""
+        db = self._db
+        if degraded:
+            db._storage_degraded_writes += 1
+        # 上一次降级可能因限频未记录，健康写入仍需补报累计条数。
+        elif not db._reported_storage_degraded and not db._storage_degraded_writes:
+            return None
+
+        now = time.monotonic()
+        last_report_at = db._storage_last_report_at.get(degraded)
+        if last_report_at is not None and now - last_report_at < _STORAGE_STATUS_LOG_INTERVAL:
+            return None
+
+        db._storage_last_report_at[degraded] = now
+        db._reported_storage_degraded = degraded
+        count = db._storage_degraded_writes
+        db._storage_degraded_writes = 0
+        return ("degraded" if degraded else "recovered"), count
 
     def get_action_history(self, session_id: str, limit: int = 100) -> list[dict]:
         # called_at 供 AgentMoss 的 P4 时间窗口（提权→外传）判定用；
