@@ -66,6 +66,7 @@ def _max_file_size_from_env() -> int:
 DEFAULT_MAX_FILE_SIZE = _max_file_size_from_env()
 #: 所有文件累计大小上限
 DEFAULT_MAX_TOTAL_SIZE = 8 * 1024 * 1024
+_MAX_LOG_PATH_CHARS = 256
 
 
 def _resolve_path(p: str, base_dir: str) -> str:
@@ -131,19 +132,27 @@ class RecursiveTracker:
         self._visit_script(resolved, depth=0, base_dir=str(Path(resolved).parent if _entry_exists else base_dir), args=entry_args)
 
         # 汇总
-        nodes = self._result.nodes
-        self._result.has_critical = any(
+        result = self._result
+        nodes = result.nodes
+        result.has_critical = any(
             n.l1_risk_level == "critical" or n.l2_risk_level == "critical" or n.keyword_risk_level == "critical"
             for n in nodes
-        ) or self._result.has_critical
-        self._result.has_high = any(
+        ) or result.has_critical
+        result.has_high = any(
             n.l1_risk_level in ("high", "critical") or n.l2_risk_level in ("high", "critical") or n.keyword_risk_level in ("high", "critical")
             for n in nodes
         )
-        self._result.first_hit_node = next(
+        result.first_hit_node = next(
             (n for n in nodes if n.l1_hit or n.l2_hit or n.is_suspicious), None
         )
-        return self._result
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "脚本递归追踪汇总: nodes=%d deepest_depth=%s total_size_bytes=%d "
+                "max_depth_reached=%s max_nodes_reached=%s max_size_reached=%s",
+                len(nodes), max((node.depth for node in nodes), default=None), result.total_size,
+                result.max_depth_reached, result.max_nodes_reached, result.max_size_reached,
+            )
+        return result
 
     def _visit_script(
         self,
@@ -164,16 +173,29 @@ class RecursiveTracker:
 
         # 预算
         if depth > self._max_depth:
-            self._result.max_depth_reached = True
-            logger.info("递归深度触达上限 (%d)，跳过: %s", self._max_depth, path_str)
+            if not self._result.max_depth_reached:
+                self._result.max_depth_reached = True
+                # 长路径保留文件名；控制字符转义后再交给日志器，保持单行。
+                log_path = path_str
+                if len(log_path) > _MAX_LOG_PATH_CHARS:
+                    log_path = "…" + log_path[-(_MAX_LOG_PATH_CHARS - 1):]
+                logger.info(
+                    "递归深度触达上限: depth=%d max_depth=%d skipped_path=%s",
+                    depth, self._max_depth, repr(log_path),
+                )
             return
         if len(self._result.nodes) >= self._max_nodes:
-            self._result.max_nodes_reached = True
-            logger.info("节点数触达上限 (%d)，停止追踪", self._max_nodes)
+            if not self._result.max_nodes_reached:
+                self._result.max_nodes_reached = True
+                logger.info("节点数触达上限: nodes=%d max_nodes=%d", len(self._result.nodes), self._max_nodes)
             return
         if self._result.total_size >= self._max_total_size:
-            self._result.max_size_reached = True
-            logger.info("累计大小触达上限，停止追踪")
+            if not self._result.max_size_reached:
+                self._result.max_size_reached = True
+                logger.info(
+                    "累计大小触达上限: total_size_bytes=%d max_total_size_bytes=%d",
+                    self._result.total_size, self._max_total_size,
+                )
             return
 
         self._visiting.add(path_str)

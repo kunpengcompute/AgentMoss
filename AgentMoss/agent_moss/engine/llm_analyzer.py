@@ -190,6 +190,15 @@ class LLMAnalyzer:
                     len(prompt_a_next["action_detail"]),
                 )
 
+        if logger.isEnabledFor(logging.DEBUG):
+            action_count = len(action_history or ())
+            logger.debug(
+                "L3 prompt_size actions_in=%d actions_kept=%d prompt_chars=%d "
+                "estimated_tokens=%d token_budget=%d",
+                action_count, min(action_count, max_items) if max_items > 0 else action_count,
+                len(judge_prompt), self._estimate_tokens(judge_prompt), max_prompt_tokens,
+            )
+
         # 4.5 打印 prompt 到日志文件（如果配置了 AGENT_MOSS_LOG_PATH）
         # 优先级：per-request 注入的 llm_log_path（来自调用方 env，bridge 子进程有
         # AGENT_MOSS_LOG_PATH 但服务进程不一定有，per-request 注入解决跨进程）>
@@ -542,6 +551,7 @@ class LLMAnalyzer:
             return "（未提供历史意图）"
 
         lines = []
+        longest_text_chars = 0
         for i, turn in enumerate(prompt_history, 1):
             if not isinstance(turn, dict):
                 continue
@@ -552,6 +562,7 @@ class LLMAnalyzer:
             if not text:
                 continue
             text = text[:max_text_chars]
+            longest_text_chars = max(longest_text_chars, len(text))
             line = f"  第{i}轮用户意图: {text}"
             actions = turn.get("actions")
             if actions and isinstance(actions, list):
@@ -566,6 +577,10 @@ class LLMAnalyzer:
                     line += f"  → 动作: {', '.join(action_types)}"
             lines.append(line)
 
+        logger.debug(
+            "L3 prompt_history turns_in=%d turns_kept=%d longest_text_chars=%d",
+            len(prompt_history), len(lines), longest_text_chars,
+        )
         if not lines:
             return "（未提供历史意图）"
         return "\n".join(lines)

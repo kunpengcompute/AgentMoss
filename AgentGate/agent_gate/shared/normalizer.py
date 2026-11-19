@@ -57,24 +57,32 @@ class Normalizer:
         # 开关默认开（AGENT_GATE_MULTI_SESSION，见 multi_session.py）；显式设 0
         # 时跳过，省掉跨会话查询开销。
         session_history: list[dict] = []
+        history_source = "unavailable"
+        db_limit = None
         # 调用方显式提供跨会话历史时优先使用（与 TS 版同契约；此前 Python
         # 模型没有 session_history 字段，调用方传了会被静默丢弃）。
         if input_data.session_history is not None:
             session_history = [dict(x) for x in input_data.session_history if isinstance(x, dict)]
-        elif multi_session_enabled() and self._repo and input_data.session_id:
+            history_source = "caller"
+        elif not multi_session_enabled():
+            history_source = "disabled"
+        elif self._repo and input_data.session_id:
             try:
                 # 注意：不按 agent 过滤（对齐 V3 保守方向）——跨会话组合链的检测
                 # 应覆盖全部历史 session，而非仅本 agent；agent_id 在 Repository
                 # 里是复合键（agent_type:hostname），与输入 agent_type 不相等。
+                db_limit = session_history_limit()
                 session_history = await self._run_sync(
                     self._repo.get_recent_session_histories,
                     None,  # agent_id 不过滤
                     input_data.session_id,
                     # 默认 5，保持现有性能；需要更大实时覆盖面时用
                     # AGENT_GATE_SESSION_HISTORY_LIMIT 调大（上限 50）
-                    session_history_limit(),
+                    db_limit,
                 )
+                history_source = "repository"
             except Exception as e:
+                history_source = "repository_error"
                 logger.warning(f"Failed to get session_history from DB: {e}")
 
         # Map tool_name to a standard action_type that AgentMoss understands.
@@ -210,6 +218,11 @@ class Normalizer:
             import platform
             os_type = platform.system().lower()
 
+        inject_incremental = stateful_incremental_enabled()
+        logger.debug(
+            "session_history source={} count={} db_limit={} stateful_incremental_injected={}",
+            history_source, len(session_history), db_limit, inject_incremental,
+        )
         return {
             "session_id": input_data.session_id,
             # 安装级实例 ID：展示层脱敏按它判断「同实例不隐藏」（与 TS normalizer.ts
@@ -230,7 +243,7 @@ class Normalizer:
                 # 的最后一步当场 Deny）。由 AGENT_GATE_MULTI_SESSION 门控。
                 # ⚠️ 双端对齐：TS `normalizer.ts` 一直是这么注入的，Python 侧此前
                 # 漏了 —— 导致同一份配置下 TS 链路走增量、Python 链路不走。
-                **({"stateful_incremental": True} if stateful_incremental_enabled() else {}),
+                **({"stateful_incremental": True} if inject_incremental else {}),
                 "agent_type": input_data.agent_type,
                 "agent_version": input_data.agent_version,
                 "hostname": hostname,
