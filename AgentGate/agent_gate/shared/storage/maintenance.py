@@ -1,11 +1,13 @@
 """存储维护（2026-10）—— 镜像 TS `ts/src/shared/storage/maintenance.ts`。
 
-触发条件：主库条数达到 ``AGENT_GATE_ARCHIVE_THRESHOLD``（默认 10 万）。
+触发条件：主库条数达到 ``AGENT_GATE_ARCHIVE_THRESHOLD``（默认 10 万），
+或主库字节数达到 ``AGENT_GATE_ARCHIVE_THRESHOLD_MB``（默认 512MB）。
 顺序（**不能颠倒**）：
 
-1. 先让 AgentMoss 做一次全量回顾 —— 老数据要先进组合链时间线；
-2. 再把最老的记录归档进本地压缩文件（JSONL + gzip，仍可 zcat 查）；
-3. 最后 VACUUM 真正释放磁盘（DELETE 不会让文件变小）。
+1. 先把最老的记录归档进本地压缩文件（JSONL + gzip，仍可 zcat 查）；
+2. VACUUM 真正释放磁盘（DELETE 不会让文件变小）；
+3. 用当前保留窗口刷新 AgentMoss 派生状态；
+4. 清理老的归档文件（默认按总大小，按时间删除可选）。
 
 放在后台线程里跑（启动时 + 每 6 小时），不碰 analyze 热路径。
 """
@@ -40,35 +42,31 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
     error = ""
     try:
         threshold = sp.archive_threshold_records()
+        threshold_bytes = sp.archive_threshold_bytes()
         keep = sp.archive_keep_records()
-        if threshold <= 0 or keep <= 0:
+        keep_bytes = sp.archive_keep_bytes()
+        if threshold <= 0 and threshold_bytes <= 0:
             result["skipped"] = "disabled"
             return result
 
         repo = Repository()
-        records_at_check = repo.get_storage_stats().get("toolCalls", 0)
-        if records_at_check < threshold:
+        stats = repo.get_storage_stats()
+        records_at_check = stats.get("toolCalls", 0)
+        total_bytes = stats.get("dbBytes", 0) + stats.get("jsonBytes", 0)
+        count_hit = threshold > 0 and records_at_check >= threshold
+        bytes_hit = threshold_bytes > 0 and total_bytes >= threshold_bytes
+        if not count_hit and not bytes_hit:
             result["skipped"] = "below-threshold"
             return result
 
-        db_path = str(repo._db._db_path)
-
-        # 1) 归档前先全量回顾：老数据进了时间线，组合链才不会因为归档断掉
-        try:
-            from ..client.moss_client import MossClient
-
-            review = "attempted"
-            asyncio.run(MossClient().review(agent_id=agent_id, db_path=db_path))
-        except Exception as exc:  # noqa: BLE001
-            review = type(exc).__name__
-
-        # 2) 归档最老的，主库留 keep 条
-        archived, file_path = repo.archive_old_records(keep)
+        # 1) 先归档最老的记录。AgentMoss 只应看 AgentGate 当前保留窗口，
+        #    不能在归档前把老数据 review 进去（否则旧数据仍留在链状态里）。
+        archived, file_path = repo.archive_old_records(keep, keep_bytes)
         if archived <= 0:
             result["skipped"] = "nothing-to-archive"
             return result
 
-        # 3) 真正释放磁盘
+        # 2) 真正释放磁盘
         try:
             repo.vacuum()
             vacuum = "completed"
@@ -79,7 +77,28 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
             if vacuum_sqlite_errorcode is None:
                 vacuum_error = str(exc)[:160]
 
-        result.update(archived=archived, file=file_path, skipped="")
+        # 3) 归档后，只用当前保留窗口刷新 AgentMoss 派生状态
+        try:
+            from ..client.moss_client import MossClient
+
+            review = "attempted"
+            asyncio.run(
+                MossClient().review(agent_id=agent_id, db_path=str(repo._db._db_path))
+            )
+        except Exception as exc:  # noqa: BLE001
+            review = type(exc).__name__
+
+        # 4) 清理老的归档文件（默认只按总大小；按时间删除默认关闭）
+        try:
+            cleanup = repo.cleanup_archives(
+                sp.archive_max_bytes(), sp.archive_max_age_days()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("归档清理失败: {}", exc)
+            cleanup = {"deleted": 0}
+
+        result.update(archived=archived, file=file_path, skipped="",
+                      archive_cleanup=cleanup)
         return result
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {str(exc)[:160]}"

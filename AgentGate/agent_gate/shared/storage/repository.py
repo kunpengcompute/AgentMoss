@@ -6,6 +6,7 @@ All methods use the thread-safe Database singleton for SQLite access.
 import json
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from loguru import logger
@@ -443,12 +444,28 @@ class Repository:
                     db_bytes += sidecar.stat().st_size
         except OSError:
             pass
+        archive_files = 0
+        archive_bytes = 0
+        try:
+            archive_dir = self.archive_dir()
+            if archive_dir.exists():
+                for f in archive_dir.glob("*.jsonl.gz"):
+                    archive_files += 1
+                    archive_bytes += f.stat().st_size
+        except OSError:
+            pass
         return {
             "dbBytes": db_bytes,
             "toolCalls": row["total"] if row else 0,
             "jsonFiles": 0,
             "jsonBytes": 0,
+            "archiveFiles": archive_files,
+            "archiveBytes": archive_bytes,
         }
+
+    def archive_dir(self) -> Path:
+        """归档文件目录（与主库同实例目录，权限由创建方收紧）。"""
+        return self._db._db_path.parent / "archive"
 
     def clear_tool_calls(self) -> int:
         """删除全部 tool_call 并把会话计数归零（与 TS 的 clearToolCalls 一致）。
@@ -567,8 +584,11 @@ class Repository:
         total += cursor.rowcount
         return total
 
-    def archive_old_records(self, keep: int) -> tuple[int, str]:
-        """把最老的记录归档到本地压缩文件，主库只保留最近 ``keep`` 条。
+    def archive_old_records(self, keep: int, keep_bytes: int = 0) -> tuple[int, str]:
+        """把最老的记录归档到本地压缩文件，主库保留最近 ``keep`` 条且尽量不超过 ``keep_bytes``。
+
+        大内容 tool call 不能只按条数控制：如果主库字节仍超过 ``keep_bytes``，
+        按平均记录大小下调保留条数，避免归档后马上就再次触发。
 
         归档文件是 **JSONL + gzip**（一行一条记录），放在 ``<数据库目录>/archive/``
         下，需要翻旧账时 ``zcat archive/xxx.jsonl.gz | grep ...`` 即可 —— 数据不丢，
@@ -585,6 +605,11 @@ class Repository:
         conn = self._db._get_connection()
         with self._db._write_lock:
             total = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
+            if keep_bytes > 0 and total > 0:
+                db_bytes = self.get_storage_stats().get("dbBytes", 0)
+                if db_bytes > keep_bytes:
+                    avg = max(1, db_bytes // total)
+                    keep = min(keep, max(1, keep_bytes // avg))
             if total <= keep:
                 return 0, ""
             row = conn.execute(
@@ -623,6 +648,45 @@ class Repository:
             )
             conn.commit()
             return deleted, str(file_path)
+
+    def cleanup_archives(self, max_bytes: int = 0, max_age_days: int = 0) -> dict:
+        """清理归档：先按年龄，再按总大小删最老文件；返回删除统计。"""
+        archive_dir = self.archive_dir()
+        if not archive_dir.exists():
+            return {"deleted": 0, "files": 0, "bytes": 0}
+        files = sorted(
+            (p for p in archive_dir.glob("*.jsonl.gz") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+        )
+        now = time.time()
+        removed = 0
+        if max_age_days > 0:
+            cutoff = now - max_age_days * 86400
+            for p in list(files):
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink()
+                        removed += 1
+                        files.remove(p)
+                except OSError:
+                    continue
+        total = sum(p.stat().st_size for p in files if p.exists())
+        if max_bytes > 0:
+            for p in files:
+                if total <= max_bytes:
+                    break
+                try:
+                    size = p.stat().st_size
+                    p.unlink()
+                    total -= size
+                    removed += 1
+                except OSError:
+                    continue
+        return {
+            "deleted": removed,
+            "files": len([p for p in files if p.exists()]),
+            "bytes": max(0, total),
+        }
 
     def vacuum(self) -> None:
         """真正释放磁盘空间：DELETE 后必须 VACUUM，否则文件不会变小。"""

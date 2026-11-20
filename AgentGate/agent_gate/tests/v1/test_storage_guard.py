@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_gate.v1.storage.db import Database
-from agent_gate.v1.storage.record_guard import (
+from agent_gate.shared.storage.db import Database
+from agent_gate.shared.storage.record_guard import (
     clip_text,
     degrade_record,
     disk_free_percent,
     prepare_record_for_storage,
 )
-from agent_gate.v1.storage.repository import Repository
+from agent_gate.shared.storage.repository import Repository
 
 
 def _record(**overrides):
@@ -146,7 +146,7 @@ def test_degraded_unicode_fields_follow_byte_limits():
 
 @pytest.mark.parametrize("degraded", [False, True])
 def test_repository_guards_moss_reason_before_persisting(monkeypatch, tmp_path, degraded):
-    from agent_gate.v1.storage import record_guard
+    from agent_gate.shared.storage import record_guard
     import json
 
     monkeypatch.setattr(record_guard, "should_degrade_writes", lambda _: degraded)
@@ -170,4 +170,45 @@ def test_repository_guards_moss_reason_before_persisting(monkeypatch, tmp_path, 
         assert row["description"] == "diagnostic context"
     # The original structured result remains available for auditing.
     assert json.loads(row["moss_response"])["reason"] == reason
+    db.close()
+
+
+def test_archive_keep_bytes_reduces_keep_count(tmp_path):
+    """大内容场景：字节超限时保留条数要低于 keep。"""
+    db = Database(str(tmp_path / "bytes.db"))
+    db.init_schema()
+    repo = Repository(db)
+    agent_id = repo.get_or_create_agent("opendesk", "host", "0.1.0")
+    repo.get_or_create_session("s1", agent_id)
+    for i in range(20):
+        repo.insert_tool_call("s1", _record(command=("x" * 2000) + f"-{i}"), _moss())
+
+    archived, _ = repo.archive_old_records(keep=6, keep_bytes=1)
+    assert archived > 0
+    assert repo.get_storage_stats()["toolCalls"] < 6
+    db.close()
+
+
+def test_cleanup_archives_by_size_and_age_disabled(tmp_path):
+    """默认只按大小清理；max_age_days=0 不按时间删除。"""
+    db = Database(str(tmp_path / "cleanup.db"))
+    db.init_schema()
+    repo = Repository(db)
+    archive_dir = repo.archive_dir()
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "old.jsonl.gz").write_bytes(b"x" * 1024)
+    (archive_dir / "new.jsonl.gz").write_bytes(b"y" * 1024)
+
+    # 不按时间删：即使文件很老也保留
+    old = archive_dir / "old.jsonl.gz"
+    os.utime(old, (1, 1))
+    cleanup = repo.cleanup_archives(max_bytes=1_000_000, max_age_days=0)
+    assert cleanup["deleted"] == 0
+    assert old.exists()
+
+    # 按大小删：只留不超过 max_bytes 的最新文件
+    cleanup = repo.cleanup_archives(max_bytes=1024, max_age_days=0)
+    assert cleanup["deleted"] == 1
+    assert cleanup["files"] == 1
+    assert cleanup["bytes"] <= 1024
     db.close()

@@ -197,15 +197,17 @@ def auth_token_path() -> Path:
     return root / "agentgate" / "auth_token"
 
 
-def ensure_private_dir(path: Path, mode: int = 0o700) -> None:
+def ensure_private_dir(path: Path, mode: int = 0o700) -> bool:
     """目录不存在就建（0700）；已存在且属于自己但不是 0700 时收紧。"""
     try:
         path.mkdir(parents=True, exist_ok=True)
         st = path.stat()
         if st.st_uid == os.getuid() and (st.st_mode & 0o777) != mode:
             os.chmod(path, mode)
+        return True
     except OSError as e:
-        logger.debug("收紧目录权限失败 %s: %s", path, e)
+        logger.debug("创建/收紧目录权限失败 %s: %s", path, e)
+        return False
 
 
 def harden_permissions(path: Path, mode: int) -> None:
@@ -259,24 +261,50 @@ def _read_fd_token() -> str:
     return tok
 
 
-def _read_explicit_token() -> str:
+def _read_explicit_token_result() -> tuple[str, str]:
+    """读取显式 token，返回 ``(token, error)``。
+
+    ``AGENT_GATE_AUTH_TOKEN_FILE`` 配了却读不到，不能静默回退到自动 token：
+    那会把「配置写错」伪装成「鉴权已开启」，最坏情况下自动 token 也失败，
+    服务就以无鉴权状态跑起来。显式配置错误必须由启动门禁拒绝。
+    """
     tok = _env("AGENT_GATE_AUTH_TOKEN")
     if tok:
-        return tok
+        return tok, ""
     tok = _read_fd_token()
     if tok:
-        return tok
+        return tok, ""
     path = _env("AGENT_GATE_AUTH_TOKEN_FILE")
     if path:
         try:
-            return Path(path).read_text(encoding="utf-8").strip()
-        except OSError:
-            return ""
-    return ""
+            tok = Path(path).read_text(encoding="utf-8").strip()
+        except OSError as e:
+            return "", (
+                f"AGENT_GATE_AUTH_TOKEN_FILE 已设置但无法读取 {path}: {e}。"
+                "请确认文件存在、运行用户可读；或改用 AGENT_GATE_AUTH_TOKEN / "
+                "AGENT_GATE_AUTH_TOKEN_FD；不需要鉴权则显式设 "
+                "AGENT_GATE_AUTH_MODE=off"
+            )
+        if not tok:
+            return "", (
+                f"AGENT_GATE_AUTH_TOKEN_FILE 指向的文件为空: {path}。"
+                "请写入 token，或显式设 AGENT_GATE_AUTH_MODE=off"
+            )
+        return tok, ""
+    return "", ""
+
+
+def _read_explicit_token() -> str:
+    return _read_explicit_token_result()[0]
 
 
 def _ensure_auto_token() -> str:
-    """首次启动生成 token（0600）；已存在则读取。失败返回空串（不阻断启动）。"""
+    """首次启动生成 token（0600）；已存在则读取。
+
+    失败必须抛出异常，由 ``_resolve_auth`` 记入 ``auth_config_error``，最终由
+    ``fail_fast_on_auth_error`` 拒绝启动。**不能返回空串继续运行** —— 那会
+    静默退化成无鉴权服务。
+    """
     path = auth_token_path()
     try:
         if path.is_file() and not path.is_symlink():
@@ -285,7 +313,8 @@ def _ensure_auto_token() -> str:
                 harden_permissions(path, stat.S_IRUSR | stat.S_IWUSR)
                 return tok
         tok = secrets.token_urlsafe(32)
-        ensure_private_dir(path.parent)
+        if not ensure_private_dir(path.parent):
+            raise RuntimeError(f"无法创建/收紧 token 目录（权限或属主异常）: {path.parent}")
         # 原子创建（O_EXCL）：多 worker 同时启动时只有一个能创建成功，其余读同一份 ——
         # 否则每个 worker 各生成一个，客户端只能猜中一个。
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -298,7 +327,10 @@ def _ensure_auto_token() -> str:
             finally:
                 os.close(fd)
         except FileExistsError:
-            return path.read_text(encoding="utf-8").strip()
+            tok = path.read_text(encoding="utf-8").strip()
+            if not tok:
+                raise RuntimeError(f"自动 token 文件已存在但为空: {path}")
+            return tok
         logger.warning(
             "已生成访问 token 并写入 %s（0600）。客户端需带 "
             "`Authorization: Bearer <token>`；查看：cat %s；"
@@ -307,8 +339,7 @@ def _ensure_auto_token() -> str:
         )
         return tok
     except Exception as e:  # noqa: BLE001
-        logger.error("生成访问 token 失败（本次运行将不鉴权）: %s", e)
-        return ""
+        raise RuntimeError(f"自动访问 token 生成/读取失败（{path}）：{e}") from e
 
 
 def _parse_agent_tokens(raw: str) -> dict[str, str]:
@@ -342,13 +373,17 @@ def _resolve_auth() -> tuple[str, dict[str, str], str]:
         return _TOKEN_CACHE[1], _TOKEN_CACHE[2], _TOKEN_CACHE[3]
 
     error = ""
-    token = _read_explicit_token()
+    if auth_mode() == AUTH_MODE_OFF:
+        # off 是显式关闭鉴权：token 配置即使坏了也不影响启动/请求。
+        token = ""
+    else:
+        token, error = _read_explicit_token_result()
 
     # 显式指定了 fd 却读不到 —— **绝不静默降级**去磁盘生成 token。
     # 降级的后果是双输：调用方拿着自己的 token 全部 401（服务等于挂了），
     # 同时磁盘上多出一份同用户任何进程都能读的凭证（安全目标也丢了）。
     # 正确做法是明确报错、拒绝启动（见 fail_fast_on_auth_error）。
-    if not token and _env("AGENT_GATE_AUTH_TOKEN_FD") and auth_mode() != AUTH_MODE_OFF:
+    if not token and not error and _env("AGENT_GATE_AUTH_TOKEN_FD") and auth_mode() != AUTH_MODE_OFF:
         error = (
             "AGENT_GATE_AUTH_TOKEN_FD 已设置，但没能从该文件描述符读到 token。"
             "拒绝降级到磁盘 token（那会在本机留下一份同用户可读的凭证）。"
@@ -356,7 +391,14 @@ def _resolve_auth() -> tuple[str, dict[str, str], str]:
         logger.error(error)
 
     if not token and not error and auth_mode() != AUTH_MODE_OFF:
-        token = _ensure_auto_token()
+        try:
+            token = _ensure_auto_token()
+        except Exception as e:  # noqa: BLE001
+            error = (
+                f"{e}。请确认数据目录可写、权限正确、磁盘未满；"
+                "不需要鉴权请显式设 AGENT_GATE_AUTH_MODE=off"
+            )
+            logger.error("鉴权配置错误，拒绝启动: %s", error)
 
     agents = _parse_agent_tokens(raw_agents)
     _TOKEN_CACHE = (key, token, agents, error)
@@ -374,7 +416,7 @@ def agent_tokens() -> dict[str, str]:
 
 
 def auth_config_error() -> str:
-    """鉴权配置是否坏了（目前只有 fd 读取失败这一种）。空串 = 正常。"""
+    """鉴权配置是否坏了（fd / 显式 token 文件 / 自动 token 生成失败）。空串 = 正常。"""
     return _resolve_auth()[2]
 
 
@@ -393,8 +435,10 @@ def fail_fast_on_auth_error() -> None:
 def auth_enabled() -> bool:
     if auth_mode() == AUTH_MODE_OFF:
         return False
-    tok, agents, _err = _resolve_auth()
-    return bool(tok or agents)
+    tok, agents, err = _resolve_auth()
+    # 配置错误也属于「鉴权开启」：启动会被 fail_fast 拒绝，运行期请求也会
+    # fail-closed；不能因为 token 为空就误判成「无需鉴权」。
+    return bool(err) or bool(tok or agents)
 
 
 def _bearer(headers) -> str:
@@ -553,6 +597,26 @@ def archive_threshold_records() -> int:
 def archive_keep_records() -> int:
     """归档后主库保留的条数（热数据）。"""
     return _env_int("AGENT_GATE_ARCHIVE_KEEP", 50000)
+
+
+def archive_threshold_bytes() -> int:
+    """主库达到多少字节开始归档（默认 512MB）。0 = 不按大小触发。"""
+    return max(0, _env_int("AGENT_GATE_ARCHIVE_THRESHOLD_MB", 512)) * 1024 * 1024
+
+
+def archive_keep_bytes() -> int:
+    """归档后主库尽量不超过多少字节（默认 256MB）。0 = 不按大小保留。"""
+    return max(0, _env_int("AGENT_GATE_ARCHIVE_KEEP_MB", 256)) * 1024 * 1024
+
+
+def archive_max_bytes() -> int:
+    """归档目录总大小上限（默认 512MB）。超过后删最老的归档。0 = 不按大小删。"""
+    return max(0, _env_int("AGENT_GATE_ARCHIVE_MAX_MB", 512)) * 1024 * 1024
+
+
+def archive_max_age_days() -> int:
+    """归档文件最长保留天数（默认 0 = 不按时间删）。"""
+    return max(0, _env_int("AGENT_GATE_ARCHIVE_MAX_AGE_DAYS", 0))
 
 
 def disk_warn_percent() -> int:

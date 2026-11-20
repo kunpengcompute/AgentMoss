@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-gate-sec"
-version = "0.9.18"
+version = "0.9.19"
 description = "AgentGate V1 - AI Agent 数据采集与安全分析中间层服务"
 readme = "README.md"
 license = { text = "MIT" }
