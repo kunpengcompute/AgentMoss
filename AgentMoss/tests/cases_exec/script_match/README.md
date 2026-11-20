@@ -1,6 +1,6 @@
 # script_match —— 脚本内容扫描匹配基准（供 CPU 级匹配提速验证）
 
-本目录用于验证正则匹配加速：**`scripts/` 下每个脚本文件，都用 `rules.txt` 里的全部正则做匹配**。
+本目录提供给做正则匹配加速的同事：**`scripts/` 下每个脚本文件，都用 `rules.txt` 里的全部正则做匹配**。
 规则集与脚本都无第三方依赖，读取方式见下。
 
 ## 目录结构
@@ -13,10 +13,10 @@ script_match/
 │   ├── deploy_shift.sh      10 行   原有：shift + case
 │   ├── deploy-large.sh      39 行   5 分支 case，嵌套调用 build-script/ 子模块
 │   ├── build-large.py       35 行   subprocess.run + os.system 调子脚本
-│   ├── deploy-xlarge.sh    732 行   大型部署脚本
+│   ├── deploy-xlarge.sh    732 行   **2026-09 新增**：真实感大型部署脚本
 │   │                                 多环境/多组件/回滚，clean 分支含 rm -rf ~/.ssh/id_rsa
 │   │                                 与 chmod 777；危险操作埋在 700 行之后
-│   ├── build-xlarge.py    1990 行   大型构建脚本
+│   ├── build-xlarge.py    1990 行   **2026-09 新增**：真实感大型构建脚本
 │   │                                 dataclass/多阶段/缓存/校验，clean 分支含
 │   │                                 os.system("rm -rf ~/.ssh/id_rsa")
 │   └── build-script/                被 deploy-large.sh / build-large.py 嵌套调用
@@ -31,7 +31,7 @@ script_match/
 └── README.md
 ```
 
-### 大型脚本的用途
+### 为什么要加大脚本（2026-09 补）
 
 原来样本最长只有 39 行，**压不出真实匹配负载**：2~39 行的文本，
 正则引擎大多在首屏就命中/短路，测出来的加速比不代表生产脚本。
@@ -92,7 +92,8 @@ base64\s+(-d|--decode)\s*\|
 
 1. **喂给规则的是脚本文件原始全文**，不做切片。
 2. **引擎侧另有一步文本预处理**：先做可达分支裁剪，再做路径归一化（`//`→`/`、`/./` 折叠）
-   和 echo/printf 引号字面量剥离。使用原文匹配与引擎匹配时，需要分别考虑这些预处理步骤。
+   和 echo/printf 引号字面量剥离。当前 9 个脚本实测**两种口径的命中矩阵完全一致**
+   （脚本里没有 `//`、`/./` 混淆，echo 内容也不含任何规则关键词），所以基准结果有效。
    **扩脚本时要注意**：含 `cat /etc//shadow` 这类混淆的脚本，原文直接匹配会漏、引擎能命中。
 3. **本目录是引擎实际扫描量的超集**：引擎按分支裁剪后只扫可达分支，且关键词语义扫描
    （`SUSPICIOUS_PATTERNS`）只对 L1/L2 均未命中的脚本节点执行；本目录对所有脚本无条件跑全部规则。
@@ -102,15 +103,26 @@ base64\s+(-d|--decode)\s*\|
 
 `_check_dangerous_patterns` 的「通配符 + 删除」检查：`*`/`?` 与删除关键词的子串组合，
 且带「文本含 /tmp/ 等临时目录则跳过」的守卫，不是单条正则可等价表达。
+实测该检查在当前 9 个脚本上均未命中（含 `*` 的脚本都同时含 `/tmp/`）。
 
-## 使用
+## 当前 9 个脚本的命中情况（可用于自查加速结果是否跑偏）
+
+| 规则 | 命中脚本 |
+|---|---|
+| `(?i)\.ssh/id_rsa(?!\.pub)` | deploy.sh、deploy_shift.sh、deploy.py、deploy-large.sh、build-large.py、build-script/deploy.sh |
+| `(?i)\bid_rsa\b`（大小写敏感） | 同上 6 个 |
+| `(?i)(?:^\|[\s/\\'"])\.ssh/id_rsa\b` | 同上 6 个 |
+| `(?i)(?:^\|[\s/\\'"])\.ssh(?:/\|[\s'"\\]\|$)` | 同上 6 个 |
+| `(?i)chmod\s+(?:(?:-[a-zA-Z]*\|--)\s+)*[0-7]{0,3}7\b` | build-script/deploy.sh |
+
+其余 130 条对这 9 个脚本均不命中（install.sh / prepare.sh / cleanup.sh 三个脚本零命中）。
+
+## 复现
 
 ```bash
 # 从引擎重新提取规则（引擎规则改动后重跑，本脚本从引擎动态读取，不再手写规则）
-# 在仓库根目录设置组件路径，再进入测试目录
-export AGENT_MOSS_ROOT="$PWD/AgentMoss"
-cd AgentMoss/tests/cases_exec/script_match
-python3 extract_rules.py
+python3 extract_rules.py                              # 默认引擎在 ~/gitcode/AgentMoss
+AGENT_MOSS_ROOT=/path/to/AgentMoss python3 extract_rules.py
 
 # 匹配基准：对 scripts/ 每个文件 × rules.txt 所有正则
 # （同事在此实现加速版本后替换）
