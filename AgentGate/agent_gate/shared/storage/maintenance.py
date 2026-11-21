@@ -34,13 +34,36 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
     if _running:
         return {"archived": 0, "file": "", "skipped": "running"}
     _running = True
-    result = {"archived": 0, "file": "", "skipped": "error"}
+    result = {"archived": 0, "file": "", "skipped": "error",
+              "proxy_archived": 0, "proxy_file": "", "proxy_cleanup": {}}
     threshold = keep = records_at_check = None
     review = vacuum = "not-run"
     vacuum_sqlite_errorcode = vacuum_sqlite_errorname = None
     vacuum_error = ""
+    proxy_error = ""
     error = ""
     try:
+        # 0) 共享归档入口里先处理 v3_proxy_events（gateway/proxy 拦截的原始事件）。
+        #    独立阈值开关：tool_calls 归档禁用不影响它，反之亦然。
+        #    表不存在（v1-only 部署）时内部直接跳过。
+        try:
+            if sp.proxy_archive_threshold() > 0:
+                from .archive import archive_proxy_events
+
+                pa, pf = archive_proxy_events(sp.proxy_archive_keep())
+                result["proxy_archived"], result["proxy_file"] = pa, pf
+                if pa > 0:
+                    # 立即释放 proxy 删除的空间（tool_calls 流程若也归档会再 vacuum 一次；
+                    # 两表同时超阈值属罕见场景，重复一次可接受）
+                    try:
+                        Repository().vacuum()
+                        vacuum = "completed"
+                    except Exception as exc:  # noqa: BLE001
+                        vacuum = type(exc).__name__
+                        vacuum_error = str(exc)[:160]
+        except Exception as exc:  # noqa: BLE001
+            proxy_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+
         threshold = sp.archive_threshold_records()
         threshold_bytes = sp.archive_threshold_bytes()
         keep = sp.archive_keep_records()
@@ -61,7 +84,9 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
 
         # 1) 先归档最老的记录。AgentMoss 只应看 AgentGate 当前保留窗口，
         #    不能在归档前把老数据 review 进去（否则旧数据仍留在链状态里）。
-        archived, file_path = repo.archive_old_records(keep, keep_bytes)
+        from .archive import archive_tool_calls
+
+        archived, file_path = archive_tool_calls(keep, keep_bytes)
         if archived <= 0:
             result["skipped"] = "nothing-to-archive"
             return result
@@ -88,17 +113,21 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
         except Exception as exc:  # noqa: BLE001
             review = type(exc).__name__
 
-        # 4) 清理老的归档文件（默认只按总大小；按时间删除默认关闭）
+        # 4) 清理老的归档文件（tool_calls-* 与 proxy_events-* 各按自己的大小/天数配置）
         try:
-            cleanup = repo.cleanup_archives(
-                sp.archive_max_bytes(), sp.archive_max_age_days()
+            from .archive import cleanup_archives
+
+            cleanup = cleanup_archives(
+                sp.archive_max_bytes(), sp.archive_max_age_days(),
+                sp.proxy_archive_max_bytes(), sp.proxy_archive_max_age_days(),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("归档清理失败: {}", exc)
-            cleanup = {"deleted": 0}
+            cleanup = {"deleted": 0, "tool": {}, "proxy": {}}
 
         result.update(archived=archived, file=file_path, skipped="",
-                      archive_cleanup=cleanup)
+                      archive_cleanup=cleanup.get("tool", cleanup),
+                      proxy_cleanup=cleanup.get("proxy", {}))
         return result
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {str(exc)[:160]}"
@@ -107,6 +136,7 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
         _running = False
         has_error = (
             bool(error)
+            or bool(proxy_error)
             or review not in ("not-run", "attempted")
             or vacuum not in ("not-run", "completed")
         )
@@ -114,10 +144,13 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
             "WARNING" if has_error else "INFO",
             "storage_maintenance outcome={} records_at_check={} threshold={} keep_target={} "
             "archived={} archive_file={} review={} vacuum={} error={!r} "
-            "vacuum_sqlite_errorcode={} vacuum_sqlite_errorname={} vacuum_error={!r}",
+            "vacuum_sqlite_errorcode={} vacuum_sqlite_errorname={} vacuum_error={!r} "
+            "proxy_archived={} proxy_archive_file={} proxy_cleanup={} proxy_error={!r}",
             result["skipped"] or "archived", records_at_check, threshold, keep,
             result["archived"], Path(result["file"]).name or "-", review, vacuum, error,
             vacuum_sqlite_errorcode, vacuum_sqlite_errorname, vacuum_error,
+            result["proxy_archived"], Path(result["proxy_file"]).name or "-",
+            result["proxy_cleanup"], proxy_error,
         )
 
 

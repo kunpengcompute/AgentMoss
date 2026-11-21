@@ -18,6 +18,7 @@ from agent_gate.shared.multi_session import (
 from agent_gate.shared.server.models import AgentGateInput, SystemContext
 from agent_gate.shared.storage.repository import Repository
 from agent_gate.shared.instance_id import get_instance_id
+from agent_gate.shared.tool_map import resolve_action_type
 
 
 class Normalizer:
@@ -85,47 +86,12 @@ class Normalizer:
                 history_source = "repository_error"
                 logger.warning(f"Failed to get session_history from DB: {e}")
 
-        # Map tool_name to a standard action_type that AgentMoss understands.
-        # AgentMoss expects "bash" not "executeBash", "write" not "file_write", etc.
-        _TOOL_TO_ACTION: dict[str, str] = {
-            "executeBash": "bash",
-            "executeZsh": "bash",
-            "executePowerShell": "bash",
-            "bash": "bash",
-            "write_to_file": "write",
-            "file_write": "write",
-            "write": "write",
-            "file_edit": "edit",
-            "edit": "edit",
-            "file_read": "read",
-            "read_file": "read",
-            "read": "read",
-            "search_content": "grep",
-            "search_file": "grep",
-            "grep": "grep",
-            "list_dir": "list_dir",
-            "list_files": "list_dir",
-            "glob": "glob",
-            "web_fetch": "web_fetch",
-            "web_search": "web_search",
-            # QwenPaw（2026-09 对接）：工具名见 qwenpaw/agents/tools/*。
-            # 缺这些映射时 action_type 保持 "execute_shell_command" 之类的原名，
-            # AgentMoss 的 bash 类判定（action_type in ("bash", "executebash",
-            # "terminal-executebash")）不成立 → read_before_write 等依赖 shell
-            # 语义的 L2 规则整条失效。
-            "execute_shell_command": "bash",
-            "write_file": "write",
-            "append_file": "write",
-            "edit_file": "edit",
-            "glob_search": "glob",
-            "grep_search": "grep",
-            "ast_search": "grep",
-            "browser": "web_fetch",
-        }
+        # 工具名 → action_type 归一化：显式配置 > 内置表 > 名称启发式 > 未知。
+        # 详见 shared/tool_map.py（双端对称：TS ts/src/shared/tool-map.ts）。
         # 与 TS 版对齐：tool_name 缺省时取 a_next.action_type（只发 a_next 的
         # 调用方此前在 Python 侧会得到空 action_type，bash 类规则整条失效）。
         _raw_tool = input_data.tool_name or str((input_data.a_next or {}).get("action_type") or "unknown")
-        action_type = _TOOL_TO_ACTION.get(_raw_tool, _raw_tool)
+        action_type, _tool_recognized = resolve_action_type(_raw_tool)
 
         # Prefer Agent-provided history, fallback to DB
         action_history = (
@@ -133,7 +99,17 @@ class Normalizer:
             if input_data.action_history is not None
             else db_history
         )
-        # Convert to dicts — and map the action_type through the SAME table as
+
+        def _mapped_history_type(entry) -> str:
+            """历史动作存的是原始 agent 工具名，过同一套归一化（配置/内置/启发式）。"""
+            raw = (
+                entry.action_type if hasattr(entry, "action_type")
+                else str(entry.get("action_type", ""))
+            )
+            mapped, _ = resolve_action_type(raw)
+            return mapped
+
+        # Convert to dicts — and map the action_type through the SAME rules as
         # the current action. History entries store the raw agent tool name
         # (routes.py writes `input_data.tool_name`), so without this an agent's
         # shell history arrives as "execute_shell_command" and AgentMoss does
@@ -141,12 +117,7 @@ class Normalizer:
         # command at all and its history-dependent verdicts silently degrade.
         action_history_list = [
             {
-                "action_type": _TOOL_TO_ACTION.get(
-                    h.action_type if hasattr(h, "action_type")
-                    else str(h.get("action_type", "")),
-                    h.action_type if hasattr(h, "action_type")
-                    else str(h.get("action_type", "")),
-                ),
+                "action_type": _mapped_history_type(h),
                 "action_detail": (
                     h.action_detail if hasattr(h, "action_detail")
                     else str(h.get("action_detail", ""))
@@ -188,13 +159,15 @@ class Normalizer:
             or datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
 
-        # Convert prompt_history turns to dicts (interleaved prompt + actions)
+        # Convert prompt_history turns to dicts (interleaved prompt + actions)。
+        # 历史动作统一过归一化（与当前动作同一套：配置 > 内置 > 启发式），
+        # 否则不同命名风格的历史动作会让 L2 的读写/组合链降级。
         prompt_history_list = [
             {
                 "text": t.text,
                 "actions": [
                     {
-                        "action_type": a.action_type,
+                        "action_type": _mapped_history_type(a),
                         "action_detail": a.action_detail,
                         "output": getattr(a, "output", "") or "",
                         "called_at": getattr(a, "called_at", "") or "",
@@ -203,6 +176,22 @@ class Normalizer:
                 ],
             }
             for t in input_data.prompt_history
+        ]
+
+        # 跨会话历史的动作类型同样归一化（DB/调用方存的都是原始 agent 工具名）
+        session_history = [
+            {
+                **s,
+                "action_history": [
+                    {**h, "action_type": _mapped_history_type(h)}
+                    if isinstance(h, dict)
+                    else h
+                    for h in (s.get("action_history") or [])
+                ],
+            }
+            if isinstance(s, dict)
+            else s
+            for s in session_history
         ]
 
         hostname = context.os.hostname if context.os else socket.gethostname()
@@ -244,6 +233,10 @@ class Normalizer:
                 # ⚠️ 双端对齐：TS `normalizer.ts` 一直是这么注入的，Python 侧此前
                 # 漏了 —— 导致同一份配置下 TS 链路走增量、Python 链路不走。
                 **({"stateful_incremental": True} if inject_incremental else {}),
+                # 未知工具名上报：AgentMoss 据此在响应 degraded 中提示
+                # "动作类 L2 规则可能降级"，提醒补充 AGENT_GATE_TOOL_NAME_MAP。
+                # 未知动作**不享受任何安全豁免**（不被当作安全动作放行）。
+                **({"unmapped_tool": _raw_tool} if not _tool_recognized else {}),
                 "agent_type": input_data.agent_type,
                 "agent_version": input_data.agent_version,
                 "hostname": hostname,

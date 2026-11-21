@@ -619,6 +619,31 @@ def archive_max_age_days() -> int:
     return max(0, _env_int("AGENT_GATE_ARCHIVE_MAX_AGE_DAYS", 0))
 
 
+# ── v3_proxy_events（gateway/proxy 拦截的原始事件）归档 ──
+# 与 tool_calls 同库不同表；事件体积大（arguments/prompt/response 原文），
+# 长期运行会无限膨胀，因此单独一套阈值与保留窗口。
+
+
+def proxy_archive_threshold() -> int:
+    """v3_proxy_events 归档触发条数（默认 10 万）。0 = 不归档。"""
+    return max(0, _env_int("AGENT_GATE_PROXY_ARCHIVE_THRESHOLD", 100000))
+
+
+def proxy_archive_keep() -> int:
+    """归档后 v3_proxy_events 保留条数（默认 5 万）。"""
+    return max(0, _env_int("AGENT_GATE_PROXY_ARCHIVE_KEEP", 50000))
+
+
+def proxy_archive_max_bytes() -> int:
+    """proxy 归档目录总大小上限（默认 512MB）。超过后删最老的归档。0 = 不按大小删。"""
+    return max(0, _env_int("AGENT_GATE_PROXY_ARCHIVE_MAX_MB", 512)) * 1024 * 1024
+
+
+def proxy_archive_max_age_days() -> int:
+    """proxy 归档文件最长保留天数（默认 0 = 不按时间删）。"""
+    return max(0, _env_int("AGENT_GATE_PROXY_ARCHIVE_MAX_AGE_DAYS", 0))
+
+
 def disk_warn_percent() -> int:
     """磁盘剩余空间告警水位（%）。"""
     return _env_int("AGENT_GATE_DISK_WARN_PERCENT", 5)
