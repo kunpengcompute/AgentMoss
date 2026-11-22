@@ -1,86 +1,30 @@
-# AgentGate 和 AgentMoss 服务部署
+# 为 Deep Agents 配置 AgentGate 和 AgentMoss
 
-AgentGate 接收工具调用和上下文，交给 AgentMoss 分析，再把安全判定返回给插件。
-两个服务分别启动，DeepAgents 应用通过 HTTP 访问 AgentGate。
+Deep Agents 应用只需连接 AgentGate。AgentGate 使用另一份令牌连接 AgentMoss。三个进程可以运行在不同机器上。
 
-## 安装
+## 同一机器、同一用户
 
-需要 Python 3.10 或更新版本，并安装 uv。先获取[项目源码](../../../../README.md#快速开始)，
-以下命令均从仓库根目录执行，使用 Python 3.12：
+从[项目快速开始](../../../../README.md#快速开始)安装并启动 AgentMoss 和 AgentGate，确认健康状态和第一次分析请求。默认情况下，两个服务都可通过本机地址访问。Deep Agents 应用使用独立的 Python 环境，按[插件安装说明](../README.md#安装)安装并连接 Gate。
 
-```bash
-uv venv --python 3.12 ./AgentMoss/.venv
-uv pip install --python ./AgentMoss/.venv/bin/python -e ./AgentMoss
-uv venv --python 3.12 ./AgentGate/.venv
-uv pip install --python ./AgentGate/.venv/bin/python -e ./AgentGate
-```
+| 发起请求的进程 | 默认目标 | 所需凭据 |
+| --- | --- | --- |
+| Deep Agents 应用 | AgentGate，`http://127.0.0.1:9100` | Gate 令牌，在应用上设置 `DEEPAGENTS_GATE_API_TOKEN_FILE` |
+| AgentGate | AgentMoss，`http://127.0.0.1:9090` | Moss 令牌，可在 Gate 上设置 `AGENT_MOSS_AUTH_TOKEN_FILE` |
 
-命令直接使用各自环境的程序，无需激活。以上路径适用于 Linux/macOS；Windows 的入口位于
-`Scripts/`，程序名带 `.exe`。AgentGate 服务与 DeepAgents 应用使用独立虚拟环境，避免依赖版本冲突。
-AgentGate 的更多配置见[组件说明](../../../../AgentGate/README.md)。
+Linux 默认部署首次启动后，Gate 令牌位于 `~/.config/agentgate/auth_token`，Moss 令牌位于 `~/.config/agentmoss/auth_token`。这里的 `~` 各自对应启动该服务的用户。显式指定了令牌或数据目录时，以实际配置为准。
 
-## 配置访问令牌
+## 不同机器或不同用户
 
-首次部署时，为两个服务分别生成令牌，保存到仓库外的用户配置目录：
+1. **AgentMoss 主机。** 启动服务时将 `--host` 设为 Gate 能访问的内网地址。两台机器通信时使用受保护的网络或配置 HTTPS 的反向代理，限制访问来源。
+2. **AgentGate 主机。** 将 Moss 令牌提供给运行 Gate 的用户，设置 `AGENT_MOSS_AUTH_TOKEN_FILE` 指向该用户可读的文件。启动 Gate 时用 `--security-url` 指向实际的 Moss 地址，用 `--host` 绑定 Deep Agents 应用可访问的地址。
+3. **应用主机。** 将 Gate 令牌提供给应用用户，设置 `DEEPAGENTS_GATE_URL` 为实际 Gate 地址，设置 `DEEPAGENTS_GATE_API_TOKEN_FILE` 为应用用户可读的 Gate 令牌文件。令牌文件应只对使用它的账户开放读权限。只跨用户、未跨主机时，两个服务仍可监听 `127.0.0.1`。
 
-```bash
-mkdir -p "$HOME/.config/agentmoss-deployment"
-chmod 700 "$HOME/.config/agentmoss-deployment"
-(umask 077; openssl rand -hex 32 > "$HOME/.config/agentmoss-deployment/moss.token")
-(umask 077; openssl rand -hex 32 > "$HOME/.config/agentmoss-deployment/gate.token")
-```
+## 判断连接是否正常
 
-已有部署请使用现有令牌文件，重复生成会更换凭据。AgentGate 使用 Moss 令牌调用 AgentMoss；
-DeepAgents 插件使用 Gate 令牌调用 AgentGate。不同用户或机器部署时，为对应服务配置可读的文件路径。
-
-## 启动服务
-
-在第一个终端，从仓库根目录启动 AgentMoss：
+在应用主机上运行以下命令。先按[插件说明](../README.md#连接-agentgate)设置 Gate 地址和令牌文件。
 
 ```bash
-export AGENT_MOSS_RULES_MODE=builtin
-export AGENT_MOSS_AUTH_TOKEN_FILE="$HOME/.config/agentmoss-deployment/moss.token"
-AGENT_MOSS_DISABLE_LLM=1 ./AgentMoss/.venv/bin/agent-moss server --host 127.0.0.1 --port 9090
+curl -fsS "${DEEPAGENTS_GATE_URL}/api/v1/health"
 ```
 
-上例启用 L1/L2 静态检测。使用 L3 模型分析时去掉 `AGENT_MOSS_DISABLE_LLM=1`，并按
-[模型配置说明](../../../README.md#配置)设置接口、模型名称和凭据。
-
-在第二个终端，从仓库根目录启动 AgentGate：
-
-```bash
-export AGENT_GATE_AUTH_TOKEN_FILE="$HOME/.config/agentmoss-deployment/gate.token"
-export AGENT_MOSS_AUTH_TOKEN_FILE="$HOME/.config/agentmoss-deployment/moss.token"
-./AgentGate/.venv/bin/agent-gate server --host 127.0.0.1 --port 9100 \
-  --security-url http://127.0.0.1:9090
-```
-
-AgentMoss 在端口被占用时会选择后续可用端口，以启动日志为准，相应调整 `--security-url`。
-如果 Agent 应用在另一台机器上，将 AgentGate 的监听地址改为应用可访问的地址，并按部署需要设置网络访问范围。
-
-## 检查服务和分析链路
-
-```bash
-curl -sS http://127.0.0.1:9090/api/v1/health
-curl -sS http://127.0.0.1:9100/api/v1/health
-```
-
-AgentGate 响应的 `status` 和 `moss_status` 均应为 `healthy`。如果 AgentGate 正常而 AgentMoss
-不健康，检查 Moss 的实际监听地址和令牌。继续发起一次分析，确认请求能到达检测引擎：
-
-```bash
-GATE_TOKEN=$(cat "$HOME/.config/agentmoss-deployment/gate.token")
-curl -sS http://127.0.0.1:9100/api/v1/analyze \
-  -H "Authorization: Bearer $GATE_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"agent_type":"deployment-check","session_id":"check-001","tool_name":"bash","command":"ls -la","user_prompt":"列出当前目录文件","action_history":[]}'
-```
-
-响应应包含有效的 `decision`、`reason` 和 `risk_type`。`risk_type=service_unavailable` 表示服务
-连接或鉴权故障；即使 HTTP 状态为 200，也需要修正配置后重新检查。
-
-## 连接 Agent
-
-DeepAgents 的安装与代码接入见[插件说明](../README.md)。将 AgentGate 地址及 Gate 令牌配置到
-Agent 应用，例如设置 `DEEPAGENTS_GATE_API_TOKEN_FILE` 指向上述 `gate.token` 文件。
-CubeSandbox 的连接及沙箱内部检查见[AIO 接入说明](cubesandbox.md)。
+`status` 和 `moss_status` 都应为 `healthy`。若 `moss_status` 为 `unreachable`，检查 Gate 使用的 Moss 地址和网络。健康端点不检查分析请求的令牌。再用[项目快速开始](../../../../README.md#快速开始)中的分析请求确认鉴权，或从应用中实际调用一次工具。应用收到 HTTP 401 时先检查 Gate 令牌。Gate 返回 `risk_type=service_unavailable` 时，检查 Gate 到 Moss 的地址、凭据和服务日志。

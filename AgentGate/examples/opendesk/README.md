@@ -1,107 +1,50 @@
-# AgentGate V1 × OpenDesk 集成示例
+# OpenDesk 工具接入 AgentGate
 
-## 1. 先决条件
+在 OpenDesk 调用工具的位置加入一次网关检查。OpenDesk 将原始工具名、命令和用户请求发给 AgentGate，收到 `Allow` 后再执行工具。同一会话的主代理和子代理都应经过这个入口。
 
-先按[项目快速开始](../../../README.md#快速开始)安装两个组件。
-以下命令在 `AgentGate/` 组件目录执行，使用 `.venv/bin/agent-gate`，或先激活虚拟环境。
+先按[项目快速开始](../../../README.md#快速开始)安装并启动 AgentMoss 和 AgentGate，确认一次分析请求能得到 `Allow`。以下示例假定 OpenDesk 可以访问 `http://127.0.0.1:9100`。跨主机运行时，填写 OpenDesk 所在主机可访问的网关地址。
 
-- AgentMoss 服务已启动（默认 `http://127.0.0.1:9090`）；
-- AgentGate V1 服务已启动：
+## Python 接入
 
-```bash
-.venv/bin/agent-gate server --mode http --host 127.0.0.1 --port 9100 \
-  --security-url http://127.0.0.1:9090 \
-  --db-path /tmp/agent_gate_opendesk_test.db
+在 OpenDesk 的 Python 环境中可以使用 AgentGate 包提供的 `GateClient`。也可将 [gate_client.py](../../sdk/python/gate_client.py) 复制到已有 `httpx` 的应用中，将导入改为 `from gate_client import GateClient`。为 OpenDesk 进程设置 `AGENT_GATE_AUTH_TOKEN`，使用绑定 `opendesk` 的令牌或网关全局令牌。[网关鉴权说明](../../README.md#鉴权)
+
+以下示例在 Linux 上查看工作目录。网关分析 `pwd`，通过后才在本机运行它。实际接入时，将 `client.analyze` 放在现有工具函数之前，传入本次会话和待执行的真实参数。
+
+```python
+import os
+import subprocess
+from uuid import uuid4
+
+from agent_gate.shared.sdk import GateClient
+
+with GateClient(base_url="http://127.0.0.1:9100") as client:
+    result = client.analyze(
+        agent_type="opendesk",
+        session_id=str(uuid4()),  # 接入时使用 OpenDesk 的会话 ID
+        tool_name="executeBash",
+        command="pwd",
+        cwd=os.getcwd(),
+        user_prompt="查看当前工作目录",
+    )
+    if result.get("decision") != "Allow":
+        raise PermissionError(result.get("reason") or "未获得执行许可")
+    subprocess.run(["pwd"], check=True)
 ```
 
-## 2. 验证 AgentGate 接口
+连接失败、超时或鉴权失败时，SDK 会抛出异常。将异常反馈给调用方，并结束这次工具调用。对于 `executeZsh`、`executePowerShell` 等其他工具，提交它们各自的工具名和原始命令。
 
-另开终端，读取 AgentGate 的访问令牌并提交一个只读命令。这里只分析命令，不会执行它：
+## HTTP 接入
 
-```bash
-GATE_TOKEN=$(cat ~/.config/agentgate/auth_token)
-curl -sS http://127.0.0.1:9100/api/v1/analyze \
-  -H "Authorization: Bearer $GATE_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"agent_type":"opendesk","session_id":"opendesk-check","tool_name":"executeBash","command":"ls -la","user_prompt":"查看项目文件"}'
-```
-
-响应应为 `decision: Allow`。如果返回 `Deny` 且 `risk_type` 为
-`service_unavailable` 或 `analysis_timeout`，先检查 AgentMoss 服务地址、令牌与状态。
-更多检查方法见[测试指南](TESTING.md)。
-
-## 3. 接入方式
-
-Agent 本体只需要在**每次工具调用前**调用：
-
-```
-POST /api/v1/analyze
-Authorization: Bearer <token>
-Content-Type: application/json
-```
-
-请求字段（最小集）：`agent_type`、`session_id`、`tool_name`、`command`。
+其他语言可以直接发送 `POST /api/v1/analyze`，带上 `Authorization: Bearer <网关令牌>` 和 `Content-Type: application/json`。请求举例如下。
 
 ```json
 {
   "agent_type": "opendesk",
-  "agent_version": "0.3.10",
-  "session_id": "sess-001",
+  "session_id": "opendesk-session-001",
   "tool_name": "executeBash",
-  "command": "ls -la",
-  "cwd": "/home/user/project",
-  "description": "list files",
-  "user_prompt": "show me the project files"
+  "command": "pwd",
+  "user_prompt": "查看当前工作目录"
 }
 ```
 
-Agent 不需要自己维护 `action_history`，AgentGate 会按 `session_id` 自动补齐。
-
-### Python 接入
-
-```python
-from agent_gate.v1.sdk import GateClient
-
-client = GateClient(base_url="http://127.0.0.1:9100", api_token="<token>")
-
-result = client.analyze(
-    agent_type="opendesk",
-    session_id="sess-001",
-    tool_name="executeBash",
-    command="ls -la",
-    cwd="/home/user/project",
-    description="list files",
-    user_prompt="show me the project files",
-)
-
-if result["decision"] == "Deny":
-    raise RuntimeError(result["reason"])
-```
-
-### 其他语言接入
-
-按上面的 HTTP 契约实现即可。判定流程：
-
-```
-工具调用 → POST /api/v1/analyze
-  → AgentGate 采集上下文 + 自动补 action_history
-  → AgentMoss 判定
-← Allow / Deny + reason
-```
-
-Deny 时阻止执行；Allow 时正常执行。
-
-## 4. 拦截哪些工具
-
-由 Agent 侧决定把哪些工具调用送到 AgentGate，例如：
-
-| 工具名 | 说明 |
-|---|---|
-| `executeBash` | Bash 命令执行 |
-| `executeZsh` | Zsh 命令执行 |
-| `executePowerShell` | Windows PowerShell |
-| 其他工具名 | 按实际工具名传入 `tool_name` |
-
-工具包装器应检查 HTTP 请求是否成功以及响应中的 `decision`，只有明确返回
-`Allow` 时才执行原工具。连接失败、超时、鉴权失败或返回 `Deny` 时停止执行，
-并把原因提供给调用方。
+同一会话复用 `session_id`，省略 `action_history` 时 AgentGate 会补入已有的调用历史。在看板中可以按会话查看工具名和判定原因。查询接口及错误响应见 [AgentGate HTTP API](../../README.md#http-api)。

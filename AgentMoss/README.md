@@ -1,411 +1,133 @@
-# AgentMoss
+# AgentMoss 安全分析引擎
 
-多层级 AI Agent 安全分析引擎。输入「下一步动作 + 上下文」，输出 `Allow` / `Deny`、
-风险级别与原因。可直接作为 Python 库嵌入，也可以启动 HTTP 服务由 AgentGate 调用。
+AgentMoss 接收 Agent 准备执行的动作、用户请求和调用历史，返回 `Allow` 或 `Deny` 及原因。既可以将它作为服务供 AgentGate 调用，也可以在本地用 CLI 分析一条命令，或在 Python 应用中直接调用。
 
-AgentMoss 使用 Python 实现，支持规则检测、脚本分析、行为验证和可选的模型语义分析。
-可以按 Agent 类型和部署场景扩展规则，通过控制台查看和调整运行配置。
-项目整体架构和两个服务的快速部署见[项目说明](../README.md)。
-
-## 三层防御
-
-| 层 | 内容 |
-|---|---|
-| L1.1 | 特征匹配：危险命令、注入检测、用户敏感规则 |
-| L1.2 | 脚本内容预扫描：递归追踪脚本调用链 |
-| L2.1 | 逻辑规则：read-before-write、意图一致性、敏感路径、危险模式 |
-| L2.2 | 形式化验证：行为图 + 性质验证，含跨会话组合链 |
-| L2.3 | 脚本内容 L2 扫描 |
-| L3.1 | LLM + Skill 深度语义分析（可用 `AGENT_MOSS_DISABLE_LLM=1` 关闭） |
+| 检测层 | 检查内容 |
+| --- | --- |
+| L1 特征检测 | 匹配命令和注入特征，检查脚本内容 |
+| L2 行为检测 | 结合敏感路径、用户意图和历史动作检查风险，可识别跨会话的动作组合 |
+| L3 模型分析 | 使用模型结合安全规则分析语义，需要配置模型接口和凭据 |
 
 ## 安装
 
-需要 Python 3.10 或更新版本，并安装 uv。下面使用 Python 3.12，从源码安装：
+接入 Agent 或部署 HTTP 服务，请从[项目快速开始](../README.md#快速开始)安装并启动 AgentMoss 和 AgentGate。只使用 CLI 或 Python 库时，仅需 Git、uv 和 Python 3.10 及以上版本。在仓库根目录执行以下命令。
 
 ```bash
-git clone https://gitcode.com/boostkit/AgentMoss.git
-cd AgentMoss
 uv venv --python 3.12 ./AgentMoss/.venv
 uv pip install --python ./AgentMoss/.venv/bin/python -e ./AgentMoss
 . ./AgentMoss/.venv/bin/activate
 ```
 
-如果已下载项目，从仓库根目录执行 `uv venv` 及后续命令即可。`-e` 直接使用本地源码，
-修改代码后无需重新安装。激活环境后可使用 `agent-moss` 命令。
-以上命令适用于 Linux/macOS；Windows 的虚拟环境入口位于 `Scripts/`。
+## 分析一条命令
 
-### 在 DeepAgents 中启用安全检查
-
-如果你的 Agent 使用 DeepAgents 开发，可以接入本插件，在执行工具前检查操作是否安全。
-插件把工具名称和参数发给 AgentGate，由 AgentGate 调用 Moss 分析。
-返回 `Allow` 时继续执行，返回 `Deny` 时拒绝这次工具调用。
-
-接入分为三步：
-
-1. **启动 Gate 和 Moss 服务。** Gate 接收插件的检查请求，Moss 给出安全判定。部署方法见[部署说明](integrations/deepagents-plugin/docs/deployment.md)。
-2. **把插件装到运行 DeepAgents 的独立 Python 环境中。** 需要 Python 3.11 或更新版本，下面在仓库根目录创建 Python 3.12 环境：
-
-   ```bash
-   uv venv --python 3.12 .venv-deepagents
-   uv pip install --python .venv-deepagents/bin/python -e './AgentMoss[deepagents-aio]'
-   ```
-
-   已有 DeepAgents 应用时，将 `--python` 指向该应用的虚拟环境，并使用 `AgentMoss/` 组件目录的实际路径。AgentGate 服务与 DeepAgents 应用使用独立环境，通过 HTTP 通信。
-
-3. **在 DeepAgents 应用代码中接入插件。** 配置 Gate 地址和访问令牌，并修改创建 Agent 的代码，为主代理和每个子代理添加插件的检查组件。完整代码见[插件接入说明](integrations/deepagents-plugin/README.md)。
-
-## 快速开始
-
-### CLI
+下面的命令使用 L1、L2 规则，分析 `pwd` 是否可以执行。默认规则返回 `Allow`。传入 `--json` 可查看原因、风险级别和命中的检测层。
 
 ```bash
-# 生成输入模板
+export AGENT_MOSS_DISABLE_LLM=1
+agent-moss analyze 'pwd' --json
+```
+
+要带上用户请求、工作目录或会话历史，可以先生成示例文件，编辑其中的 `a_next` 等字段，再提交整份文件。生成模板会写入指定路径，请使用新文件名。
+
+```bash
 agent-moss init -o input.json
-
-# 分析输入文件
-agent-moss analyze input.json
-
-# 或直接分析一条命令
-agent-moss analyze "cat ~/.ssh/id_rsa" --json
-
-# 启动 HTTP 服务（本机访问）
-AGENT_MOSS_DISABLE_LLM=1 agent-moss server --host 127.0.0.1 --port 9090
-
-# 服务状态
-agent-moss status
-
-# 安装 / 卸载 systemd 服务
-agent-moss install --enable
-
-# 规则目录自查与模板生成
-agent-moss rules status
-agent-moss rules init --dir ./rules
+agent-moss analyze input.json --no-file
 ```
 
-常用环境变量：
+CLI 的退出码 `0` 表示允许，`1` 表示拒绝。`--no-file` 让文件模式只输出结果。省略这一选项时，CLI 还会把策略或拒绝原因写到当前目录。
 
-```bash
-AGENT_MOSS_DISABLE_LLM=1      # 只跑 L1/L2，不调用 LLM
-AGENT_MOSS_LLM_BASE_URL=...   # OpenAI 兼容接口
-AGENT_MOSS_LLM_API_KEY=...
-AGENT_MOSS_LLM_MODEL=...
-AGENT_MOSS_CONFIG_PATH=...    # 指定配置文件
-AGENT_MOSS_DATA_DIR=...       # 指定数据目录
-```
+## 在 Python 中使用
 
-### Python import
+在上述虚拟环境中运行。把检查放在工具函数之前，并传入工具实际使用的工作目录。
 
 ```python
-from agent_moss.engine.analyzer import judge_security, analyze
-from agent_moss.infra.config import get_default_config
+from pathlib import Path
 
-config = get_default_config()
+from agent_moss.engine.analyzer import analyze
 
-# 只做安全判定
-judgment = judge_security(
-    prompt_session="list files in the project",
-    action_history=[],
-    a_next={"action_type": "bash", "action_detail": "ls -la"},
-    reason="list files",
-    config=config,
-)
-print(judgment.allowed, judgment.reason, judgment.risk_level)
-
-# 判定 + 允许时生成最小 policy
 result = analyze(
-    session_id="sess-001",
-    prompt_session="list files in the project",
+    session_id="my-session-001",
+    prompt_session="查看当前工作目录",
     action_history=[],
-    a_next={"action_type": "bash", "action_detail": "ls -la"},
-    reason="list files",
-    config=config,
+    a_next={"action_type": "bash", "action_detail": "pwd"},
+    reason="显示工作目录",
+    cwd=str(Path.cwd()),
 )
-print(result["decision"], result["reason"])
+if result["decision"] != "Allow":
+    raise PermissionError(result["reason"])
+print(result["decision"])
 ```
 
-也可以直接拿到 FastAPI 应用：
+只需要判定时也可以使用 `agent_moss.engine.analyzer.judge_security`，传入 `get_default_config()` 返回的配置，读取结果的 `allowed`、`risk_level` 和 `reason`。嵌入 FastAPI 时可使用 `agent_moss.server.app.create_app()`。
 
-```python
-from agent_moss.server.app import create_app
+## HTTP API
 
-app = create_app()
-```
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/v1/health` | 查看状态、版本和实际监听端口。`degraded` 列出降级原因 |
+| POST | `/api/v1/analyze` | 分析待执行的动作 |
+| POST | `/api/v1/review` | 回顾多个会话，检查动作组合 |
+| GET | `/metrics` | 获取 Prometheus 指标 |
+| GET | `/console` | 在浏览器查看规则和运行配置 |
 
-### HTTP API
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/v1/health` | 健康检查 |
-| POST | `/api/v1/analyze` | 安全分析 |
-| POST | `/api/v1/review` | 低频全量回顾（供 AgentGate 触发） |
-| GET | `/console` | 运行时控制台 |
-
-#### POST /api/v1/analyze
-
-请求示例：
-
-```json
-{
-  "session_id": "sess-001",
-  "prompt_session": "list files",
-  "prompt_history": [
-    {
-      "text": "list files",
-      "actions": [
-        {"action_type": "bash", "action_detail": "ls -la"}
-      ]
-    }
-  ],
-  "action_history": [
-    {
-      "action_type": "bash",
-      "action_detail": "pwd",
-      "called_at": "2026-11-10T10:00:00"
-    }
-  ],
-  "session_history": [
-    {
-      "session_id": "other-session",
-      "action_history": [
-        {"action_type": "bash", "action_detail": "cat /tmp/report.txt"}
-      ]
-    }
-  ],
-  "a_next": {
-    "action_type": "bash",
-    "action_detail": "ls -la",
-    "called_at": "2026-11-10T10:00:01"
-  },
-  "reason": "list files",
-  "agent_id": "",
-  "instance_id": "",
-  "os_type": "linux",
-  "cwd": "/home/user/project",
-  "metadata": {"stateful_incremental": false}
-}
-```
-
-请求字段：
-
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| `session_id` | string | 是 | 会话唯一标识 |
-| `prompt_session` | string | 否 | 最近一条用户提示 |
-| `prompt_history` | array | 否 | 交错 prompt 历史：`[{text, actions: [{action_type, action_detail}]}]` |
-| `action_history` | array | 否 | 历史动作：`[{action_type, action_detail, called_at?, output?}]`。`ask_user_question` 动作应带 `output`（用户回答），否则改密/删用户授权会被判未授权 |
-| `session_history` | array | 否 | 多 session 历史：`[{session_id, action_history: [{action_type, action_detail}]}]`，供 L2.2 跨会话验证 |
-| `a_next` | object | 是 | 下一步动作：`{action_type, action_detail, called_at?}` |
-| `reason` | string | 否 | 执行理由 |
-| `os_type` | string | 否 | `linux` / `windows` / 空=自动检测 |
-| `cwd` | string | 否 | 当前工作目录 |
-| `agent_id` | string | 否 | 调用方 agent 标识（如 `xiaoo` / `opendesk`），空=通用模式 |
-| `instance_id` | string | 否 | agent 安装实例标识，仅用于展示层脱敏 |
-| `metadata` | object | 否 | 扩展字段；支持 `llm_config`、`llm_log_path`、`stateful_incremental`、`is_error` 等 |
-
-> `action_type` / `action_detail` 在 `a_next` 和 `action_history` 项中均必填；`called_at` 为 ISO 8601 时间，供 L2 授权时效窗和 P4 提权外传窗口使用。
-
-响应字段：
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `decision` | string | `Allow` / `Deny` |
-| `reason` | string | 决策原因 |
-| `risk_level` | string | `low` / `medium` / `high` / `critical` |
-| `risk_type` | string | 风险类别，如 `file_access`、`script_execution`、`data_exfiltration`、`formal_verification` |
-| `violated_layers` | array | 命中层，如 `["L1.1", "L2.2"]` |
-| `policy` | string | Allow 时生成的最小策略（TOML） |
-| `violated_policy` | string | Deny 时违反的策略条款 |
-| `confidence` | int | 置信度 0–100 |
-| `analysis_duration_ms` | float | 分析耗时（毫秒） |
-| `violation_chain` | array | 组合链反例路径（按引擎返回的步骤数组） |
-| `violation_graph` | object/null | 结构化攻击链图：`{nodes, edges}`，供前端可视化 |
-
-#### POST /api/v1/review
-
-请求字段：
-
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| `agent_id` | string | 否 | 目标 agent（决定状态库分桶） |
-| `db_path` | string | 否 | AgentGate SQLite 文件或 tool_calls JSON 目录；为空则用 `sessions` |
-| `sessions` | array | 否 | 多 session 历史，结构同 `session_history` |
-| `a_next` | object | 否 | 可选，连同当前动作一起判定 |
-| `is_error` | bool | 否 | 当前动作是否执行失败（生命周期判定） |
-| `output_pending` | bool | 否 | 返回待攻击前序链清单 |
-
-响应字段：
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `agent_id` | string | 目标 agent |
-| `seeded_nodes` | int | 写入状态库的节点数 |
-| `verified` | bool | 全量形式化验证是否通过 |
-| `violations` | array | 全量验证发现的违规 |
-| `pending_prefixes` | array | 待补全的攻击前序链 |
-| `state_nodes` | int | 状态库累计节点数 |
-| `discovered_patterns` | array | 数据驱动发现的跨 session 危险组合 |
-
-#### GET /api/v1/health
-
-响应字段：`status`（服务状态）、`version`（版本）、`instance`（实例归属标识，未配置为空串）。
-
-#### 鉴权
-
-默认 `AGENT_MOSS_AUTH_MODE=auto`：首次启动生成 token，写入
-`$AGENT_MOSS_DATA_DIR/auth_token`（未设置时默认 `~/.config/agentmoss/auth_token`，权限 0600）。
-`/api/v1/health` 公开，其余接口需要：
-
-```text
-Authorization: Bearer <token>
-```
-
-> **root/systemd 注意**：root（sudo/systemd/直接运行）下数据目录固定为
-> `/root/.config/agentmoss`，**不再**按 `SUDO_USER` / `LOGNAME` / 首个普通用户
-> 猜测真实用户目录；token 固定在 `/root/.config/agentmoss/auth_token`。
-> 非 root 用户要访问 root 服务的数据（含 token）时，显式设置
-> `AGENT_MOSS_DATA_DIR`，或传 `AGENT_MOSS_AUTH_TOKEN` / `AGENT_MOSS_AUTH_TOKEN_FILE`。
->
-> 启动日志会打印实际路径：`安全策略: ... auth=on(/path/to/auth_token)`；
-> 若显示 `auth=off` 说明显式关闭了鉴权，`auth=on(explicit)` 说明用了
-> `AGENT_MOSS_AUTH_TOKEN*` 环境变量，`auth=on(no-token!)` 说明 token 生成失败
-> （通常是数据目录不可写），此时服务会以无鉴权方式继续运行，需要立即检查。
-
-读取 token 并直连 `/api/v1/analyze`：
+直连引擎时，请使用 AgentMoss 令牌。默认首次启动会生成 `~/.config/agentmoss/auth_token`，设置了 `AGENT_MOSS_DATA_DIR` 时则位于该目录。以下示例使用同机端口和默认鉴权。
 
 ```bash
-MOSS_TOKEN=$(cat ~/.config/agentmoss/auth_token)
-
-curl -sS -X POST http://127.0.0.1:9090/api/v1/analyze \
+MOSS_TOKEN=$(cat "${AGENT_MOSS_DATA_DIR:-$HOME/.config/agentmoss}/auth_token")
+curl -fsS http://127.0.0.1:9090/api/v1/analyze \
   -H "Authorization: Bearer $MOSS_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{
-    "session_id": "moss-direct-1",
-    "prompt_session": "",
-    "action_history": [],
-    "a_next": {"action_type": "bash", "action_detail": "ls -la /tmp"},
-    "reason": "direct curl test"
-  }'
+  -d '{"session_id":"list-dir-1","prompt_session":"查看当前工作目录","a_next":{"action_type":"bash","action_detail":"pwd"}}'
 ```
 
-相关环境变量：
+### 分析请求与响应
 
-| 变量 | 作用 |
-|---|---|
-| `AGENT_MOSS_AUTH_MODE` | `auto`（默认，自动生成/读取 token）/ `off`（关闭鉴权） |
-| `AGENT_MOSS_AUTH_TOKEN` | 显式指定全局 token |
-| `AGENT_MOSS_AUTH_TOKEN_FILE` | 从文件读取全局 token |
-| `AGENT_MOSS_AGENT_TOKENS` | 逐 agent token，如 `opendesk=tok-a,qwenpaw=tok-b` |
+`session_id` 和 `a_next` 必填。`a_next.action_type` 填动作类型，如 `bash`，`a_next.action_detail` 填工具即将执行的内容。根据应用掌握的上下文还可以提供以下字段。
 
-AgentGate 调用 AgentMoss 时也必须携带这个 token，配置方法见 AgentGate README 的“AgentGate 调 AgentMoss 的鉴权”。若 AgentGate 返回 `Deny` 且 reason 包含 `AgentMoss HTTP 401`，说明 Gate 自己鉴权通过，但 Gate→Moss 的 token 没配对。
+| 字段 | 说明 |
+| --- | --- |
+| `prompt_session`、`reason`、`cwd` | 最近一条用户请求、执行理由、工具工作目录 |
+| `agent_id`、`instance_id`、`os_type` | Agent 类型、安装实例、工具所在的操作系统 |
+| `action_history` | 已发生的动作，每项含 `action_type`、`action_detail`，可附 ISO 8601 时间 `called_at` 和工具输出 `output` |
+| `prompt_history` | 之前各轮的用户请求 `text` 和对应动作列表 `actions` |
+| `session_history` | 其他会话的 `session_id` 和 `action_history` |
+| `metadata` | 可选扩展，如本次请求的模型配置 |
 
-## 规则与扩展
+响应中的 `decision` 决定是否放行。`reason` 是判定依据，`risk_level`、`risk_type` 和 `violated_layers` 分别给出风险级别、类别和命中的检测层。`l3_outcome` 表示本次模型分析结果，受限的检测能力会列在 `degraded` 中。组合风险还可附带 `violation_chain` 和 `violation_graph`。完整字段见[接口模型](agent_moss/server/models.py)。
 
-| 路径 | 内容 |
-|---|---|
-| `agent_moss/rules/*.json` | L1 / L2 内置规则 |
-| `agent_moss/skills/*.md` | L3 Skill 规则（注入 LLM prompt） |
-| `agent_moss/agents/<agent>/rules.json` | agent 专属扩展（如 `xiaoo`、`opendesk`） |
-| `agent_moss/scenarios/<id>/rules.json` | 场景定制规则（如 `bank` 沙箱） |
-| `agent_moss/profiles/` | linux / windows / macos 平台特征 |
-| `agent_moss/data/` | 运行时数据模板与规则模板 |
+`POST /api/v1/review` 可以直接接收 `sessions`，格式与 `session_history` 相同，也支持通过 `db_path` 读取服务端允许访问的 AgentGate SQLite 文件或记录目录。响应中的 `verified` 表示验证结果，`violations` 列出发现的问题。
 
-规则目录支持 `extra.json` / `override.json`：
-
-```bash
-export AGENT_MOSS_EXTRA_RULES_DIR=/path/to/rules
-agent-moss rules status
-```
-
-也可以用 `AGENT_MOSS_CUSTOM_RULES` 直接传 JSON 规则数组。
+默认的控制台地址为 `http://127.0.0.1:9090/console/`。页面提示鉴权时，输入运行该服务的 AgentMoss 令牌。
 
 ## 配置
 
-配置加载优先级（从高到低）：
+服务配置示例见 [agent_moss.yaml](config/agent_moss.yaml)。通过 `AGENT_MOSS_CONFIG_PATH` 指定 JSON 或 YAML 文件。默认配置位于数据目录下，模型地址、名称和密钥可通过进程环境变量设置。
 
-1. 环境变量；
-2. `AGENT_MOSS_CONFIG_PATH` 指定的文件；
-3. 用户配置 `~/.config/agentmoss/config.json`；
-4. 包内默认配置。
+| 环境变量 | 用途 |
+| --- | --- |
+| `AGENT_MOSS_DATA_DIR` | 运行账户可读写的数据目录，默认为 `~/.config/agentmoss` |
+| `AGENT_MOSS_AUTH_TOKEN`、`AGENT_MOSS_AUTH_TOKEN_FILE` | 显式指定服务令牌或令牌文件，供直接调用方和 AgentGate 使用 |
+| `AGENT_MOSS_AGENT_TOKENS` | 按 Agent 分配令牌，格式为 `agentA=令牌A,agentB=令牌B` |
+| `AGENT_MOSS_DISABLE_LLM` | 设为 `1` 时只用本地规则 |
+| `AGENT_MOSS_LLM_BASE_URL`、`AGENT_MOSS_LLM_MODEL`、`AGENT_MOSS_LLM_API_KEY` | 模型服务的 OpenAI 兼容 API 地址、模型名和密钥 |
+| `AGENT_MOSS_LLM_FAIL_MODE` | L3 调用失败时，默认 `fail_open` 会放行通过前两层的动作，设为 `fail_closed` 则拒绝这次调用 |
+| `AGENT_MOSS_SCENARIO` | 为部署选择一组场景规则 |
+| `AGENT_MOSS_RULES_MODE` | `hot`（默认）支持控制台调整，`cold` 在启动时读取规则，`builtin` 只使用内置规则 |
 
-运行时开关（Console 写入）位于 `~/.config/agentmoss/agent_moss_runtime.json`，
-会覆盖源码内置规则。L3 是否真正执行由环境变量 / 配置文件 + LLM 连通性探测共同决定。
+启用 L3 时，在启动 AgentMoss 的环境中设置模型地址、名称和密钥，取消 `AGENT_MOSS_DISABLE_LLM=1` 并重启进程。在客户端或另一个终端修改环境变量不会改变运行中的服务。鉴权文件不可读或自动令牌创建失败时，服务会报告错误并拒绝启动，请检查运行账户和数据目录权限。
 
-更多环境变量：
+## 扩展规则
 
-| 环境变量 | 说明 |
-|---|---|
-| `AGENT_MOSS_DISABLE_HEURISTIC` | 关闭 L1 特征匹配 |
-| `AGENT_MOSS_DISABLE_LOGIC_RULES` | 关闭 L2 逻辑规则 |
-| `AGENT_MOSS_DISABLE_LLM` | 关闭 L3 LLM |
-| `AGENT_MOSS_LLM_TIMEOUT` | LLM 超时（秒） |
-| `AGENT_MOSS_LLM_HISTORY_MAX_ITEMS` | L3 prompt 最多注入历史动作条数（0 = 不限） |
-| `AGENT_MOSS_LLM_ACTION_DETAIL_MAX_CHARS` | L3 prompt 单条历史动作详情最大字符数（0 = 不截断） |
-| `AGENT_MOSS_LLM_MAX_PROMPT_TOKENS` | L3 输入 prompt 的 token 预算（0 = 不限） |
-| `AGENT_MOSS_SCENARIO` | 部署级默认场景 ID |
-| `AGENT_MOSS_DATA_DIR` | 数据目录 |
-| `AGENT_MOSS_LOG_PATH` | LLM prompt 日志路径 |
-| `AGENT_MOSS_ACCEL` | 命令规则预筛加速开关，默认 `0`（关闭），设置为 `1` 后启用 |
-| `AGENT_MOSS_ACCEL_DB` | 加速包专用目录；自动生成需要可写的真实目录 |
-| `AGENT_MOSS_ACCEL_AUTO_BUILD` | 自动生成与更新加速包，默认 `1`；设为 `0` 时只加载手动生成的包 |
-| `AGENT_MOSS_ACCEL_LIB` | Hyperscan / Ultrascan 原生库路径；关闭加速时不需要安装 |
-| `AGENT_MOSS_ACCEL_BACKEND` | 原生库类型：`hyperscan` 或 `ultrascan` |
-
-开启加速后，后台自动生成加速包并跟随生效规则更新，也支持手动生成。参见 [使用说明](docs/预筛加速使用说明.md)、[设计说明](docs/预筛加速设计.md) 和 [测试说明](docs/预筛加速测试说明.md)。
-
-## 开发与测试
-
-以下命令在仓库根目录执行。完整验证需要 Python 3.11 或更新版本；
-使用独立的测试环境，安装组件源码、DeepAgents 可选依赖和测试工具：
+在已激活的环境中执行以下命令，生成模板并查看当前目录的规则。将 `AGENT_MOSS_EXTRA_RULES_DIR` 同样设置在启动检测服务的环境中。
 
 ```bash
-uv venv --python 3.12 .venv-moss-test
-uv pip install --python .venv-moss-test/bin/python -e './AgentMoss[deepagents-aio]' pytest pytest-asyncio
+export AGENT_MOSS_EXTRA_RULES_DIR="$PWD/moss-rules"
+agent-moss rules init --dir "$AGENT_MOSS_EXTRA_RULES_DIR"
+agent-moss rules status
 ```
 
-引擎测试：
+在 `extra.json` 中追加规则，在 `override.json` 中替换指定类别。字段及示例见[规则模板](agent_moss/data/rules_template/README.md)。大量命令规则可以启用[预筛加速](docs/预筛加速使用说明.md)。
 
-```bash
-cd AgentMoss
-AGENT_MOSS_ROOT="$PWD" AGENT_MOSS_DISABLE_LLM=1 ../.venv-moss-test/bin/python -m pytest -q
-```
+## 许可证
 
-继续在 `AgentMoss/` 组件目录单独运行 DeepAgents 插件测试。组件的 `pytest.ini`
-只收集 `tests/`，插件需要显式加载自身配置来启用异步测试：
-
-```bash
-../.venv-moss-test/bin/python -m pytest -c integrations/deepagents-plugin/pyproject.toml integrations/deepagents-plugin/tests -q
-```
-
-真实 AIO 测试需要单独配置服务地址，未配置时跳过；配置方式见[插件测试说明](integrations/deepagents-plugin/README.md#测试)。
-
-测试用例位于 `tests/cases/`，固定输入和预期结果位于 `tests/parity/`。
-测试会检查安全判定、风险等级和风险分类是否符合预期。
-
-## 目录结构
-
-```
-agent_moss/
-├── cli.py              # agent-moss init / analyze / server / status / install / rules
-├── engine/             # L1 / L2 / L3 检测与协调器
-│   ├── coordinator.py
-│   ├── heuristic.py
-│   ├── logic_rules.py
-│   ├── llm_analyzer.py
-│   ├── skill_engine.py
-│   └── formal_engine/
-├── infra/              # 配置、LLM 客户端、日志、运行时配置
-├── profiles/           # 平台特征（linux / windows / macos）
-├── rules/              # 内置规则 JSON
-├── skills/             # L3 Skill Markdown
-├── agents/             # agent 专属扩展
-├── scenarios/          # 场景定制扩展
-├── server/             # FastAPI 服务与路由
-└── console/            # 运行时控制台
-tests/                  # 回归测试与用例
-config/                 # 示例配置
-integrations/           # 集成示例（QwenPaw、DeepAgents 插件）
-```
-
-## License
-
-MIT
+[MIT](LICENSE) · [Deep Agents 插件第三方声明](integrations/deepagents-plugin/THIRD_PARTY_NOTICES.md)

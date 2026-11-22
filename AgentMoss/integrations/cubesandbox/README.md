@@ -1,184 +1,113 @@
-# CubeSandbox 接入
+# 在 CubeSandbox 中使用 AgentMoss
 
-本目录帮助你把 AgentMoss 接到 CubeSandbox，让 DeepAgents 在沙箱里执行任务时，先检查工具调用，再执行命令。除了命令本身，沙箱中的脚本文件也可以交给 AgentMoss 检查。
+AIO 是沙箱中提供命令执行和文件读写的服务。将 AgentMoss 装入 AIO 镜像后，应用通过 AIO shell 接口提交的命令及其引用的脚本会在沙箱内接受检查。检查通过后，AIO 才会调用 Bash。沙箱内使用内置规则，无需模型账号或单独的 AgentGate 服务。
 
-这里提供镜像构建配置、应用示例和检查脚本。客户端使用项目已有的 [DeepAgents 插件](../deepagents-plugin/README.md)，无需另写一套沙箱客户端。
+如果还需要根据用户请求和调用历史检查 Deep Agents 的工具调用，先按本文创建沙箱，再[连接 Deep Agents](../deepagents-plugin/docs/cubesandbox.md)。
 
-## 各个组件做什么
+## 构建镜像和模板
 
-AIO 是沙箱里提供命令执行、文件读写等接口的服务。CubeProxy 负责把请求送到正确的沙箱。
+准备一台装有 Docker 的 Linux ARM64 构建机，以及一个可用的 CubeSandbox 集群。本文使用 AIO 1.11.0、Python 3.12 和 CubeSandbox 0.7.3 的管理命令。首次安装集群可参考 [CubeSandbox 快速入门](https://docs.cubesandbox.com/zh/guide/quickstart)。
 
-外部 AgentMoss 能看到工具调用和会话上下文，但不能直接读取另一台机器上沙箱里的脚本。因此，外部检查和沙箱内部检查需要分别部署。沙箱内部直接调用 AgentMoss 的 Python 接口，不需要再启动一套 AgentGate 服务。
-
-### Moss 拦截如何生效
-
-要让下面两处检查都生效，DeepAgents 主代理和子代理需要注册安全检查插件，外部 Gate/Moss 服务需要可用，沙箱也需要从本目录构建的新镜像创建。构建镜像时，脚本会修改 AIO 的 `shell.py`，使它在执行命令前调用 `moss_guard.py`。
-
-![AgentMoss 在 CubeSandbox 中检查和拦截命令的流程](docs/moss-interception.png)
-
-[查看流程图源文件](docs/moss-interception.mmd)
-
-**只有外部检查和沙箱内部检查都允许，本次命令才会交给 Bash 执行。** 图中沿用示例的 `fail_closed: true` 配置：外部检查服务故障时也停止提交。内部检查拒绝或出错时，`moss_guard.py` 不会调用命令执行器。
-
-图中展示的是本接入方案的命令执行流程；文件、代码执行及其他入口的覆盖范围见下方“使用时需要注意什么”。
-
-| 文件 | 用途 |
-| --- | --- |
-| [image/Dockerfile](image/Dockerfile) | 从当前项目源码构建带 AgentMoss 检查的 AIO 镜像 |
-| [config.example.json](config.example.json) | 应用连接 Gate 和沙箱所需的配置 |
-| [examples/deepagents_aio.py](examples/deepagents_aio.py) | 在已有 DeepAgents 应用中接入，使用应用自己的模型 |
-| [verify.py](verify.py) | 检查普通命令、外部拦截、沙箱内脚本拦截和会话清理 |
-
-## 1. 准备环境
-
-先获取[项目源码](../../../README.md#快速开始)。除特别说明外，下面的命令都在仓库根目录执行。
-
-- 客户端需要 Python 3.12 或更新版本，并安装 `uv`。
-- 构建镜像需要 Docker。本目录固定的基础镜像是 **AIO 1.11.0、Linux ARM64、Python 3.12**，请在 ARM64 构建机上执行镜像构建。
-- 需要可用的 CubeSandbox 服务，以及创建模板和沙箱实例的权限。
-- DeepAgents 应用所在机器需要能访问 AgentGate 和 CubeProxy；AgentGate 需要能访问外部 AgentMoss。
-
-构建时需要下载基础镜像和 Python 依赖。基础镜像的内容摘要已固定在 Dockerfile 中。构建脚本还会核对 AIO 的命令执行入口；如果入口与已适配版本不同，构建会停止。换用其他 AIO 版本时，需要先核对入口并重新测试。
-
-## 2. 启动外部 AgentMoss 和 AgentGate
-
-按[服务部署说明](../deepagents-plugin/docs/deployment.md)安装两个服务、生成各自的访问令牌并启动。下面使用这组地址举例：
-
-| 服务 | 示例地址 | 谁连接它 |
-| --- | --- | --- |
-| AgentMoss | `http://127.0.0.1:9090` | AgentGate |
-| AgentGate | `http://127.0.0.1:9100` | DeepAgents 应用 |
-
-服务部署在其他机器时，将 `127.0.0.1` 换成调用方能访问的地址。
-
-先检查 AgentGate：
+在构建机的 AgentMoss 仓库根目录运行以下命令。将 `IMAGE` 换为构建机可推送、CubeMaster 可拉取的镜像地址，为每次发布指定新标签。
 
 ```bash
-curl -sS http://127.0.0.1:9100/api/v1/health
+IMAGE=registry.example.com/agents/aio-agentmoss:1.11.0-r1
+docker build -f AgentMoss/integrations/cubesandbox/image/Dockerfile -t "$IMAGE" .
+docker push "$IMAGE"
 ```
 
-响应中的 `status` 和 `moss_status` 都应为 `healthy`。只有 Gate 正常、Moss 不正常时，风险调用也可能被拒绝，但那是服务连接失败，不能算安全规则检查通过。
+[Dockerfile](image/Dockerfile) 固定了基础镜像的摘要。Docker 需要能拉取该镜像，或已在本机缓存同一摘要。构建环境需要访问 Python 包索引。使用内部镜像源时，在 `docker build` 中加入 `--build-arg PIP_INDEX_URL=https://pypi.example.com/simple`，将地址换为构建容器可访问的索引。若提示 shell 入口不匹配，先核对基础镜像版本。
 
-初次验证建议按部署说明关闭模型分析，使用本地规则检查。本文的检查脚本不调用任何外部模型接口。
-
-## 3. 构建沙箱镜像
-
-在 ARM64 构建机上，从仓库根目录执行：
+在 CubeSandbox 控制节点使用同一个镜像地址运行以下命令。它会开放 AIO 端口 8080 和管理进程 envd 的端口 49983，并等待模板构建结束。
 
 ```bash
-docker build \
-  -f AgentMoss/integrations/cubesandbox/image/Dockerfile \
-  -t aio-agentmoss:1.11.0 .
+IMAGE=registry.example.com/agents/aio-agentmoss:1.11.0-r1
+cubemastercli tpl create-from-image \
+  --image "$IMAGE" --writable-layer-size 8G \
+  --expose-port 8080 --expose-port 49983 \
+  --probe 8080 --probe-path /v1/sandbox --cpu 4000 --memory 4096
 ```
 
-构建会把当前 `AgentMoss/` 源码安装到 AIO 使用的 Python 环境，并在命令执行入口接入检查。镜像内使用项目内置规则，不调用外部模型服务。
+记录状态为 `READY` 的 `template_id`。多节点集群可用 `cubemastercli tpl info 模板ID` 查看各节点的副本状态，至少一个可调度的 ARM64 计算节点需要具备模板所需资源并能访问其根文件系统。管理命令可以在控制节点运行，由 CubeMaster 选择计算节点。镜像更新后，用新模板创建实例。[CubeSandbox 模板说明](https://docs.cubesandbox.com/zh/guide/tutorials/template-from-image)
 
-命令被拒绝时，AIO 返回 `403`；检查本身出错时返回 `503`。这两种情况下均不提交命令。如果同一个 shell 会话已有命令在运行，会返回 `409`，需要先确认旧命令的状态。
+## 创建沙箱
 
-## 4. 用新镜像创建沙箱
+下面在 CubeSandbox 控制节点从模板的根文件系统冷启动一个私有实例。需要 `cubemastercli`、`curl`、`jq` 和创建实例的权限。若平台已为你创建好实例，可直接向管理员取得 CubeProxy 地址、实例 ID、路由主机名和流量令牌，跳到下一节。
 
-将上一步镜像放到你的 CubeSandbox 部署能够使用的位置。如果构建机和运行节点不同，先按现有部署方式上传到镜像仓库。然后通过你正在使用的 CubeSandbox 管理工具完成这几步：
-
-1. 用该镜像创建 AIO 沙箱模板，等待模板就绪。
-2. 从新模板创建一个沙箱实例，等待实例启动完成。已运行的旧沙箱不会自动换成新镜像。
-3. 确认实例内的 AIO 服务监听 `8080`，并确认工作目录存在且可写，示例使用 `/home/gem`。
-4. 记下 CubeProxy 地址、沙箱 ID；若开启了流量鉴权，还要准备该沙箱的流量令牌文件。
-
-模板发布和实例创建由 CubeSandbox 的部署工具负责，本目录的客户端只连接已经创建的实例。不同部署的管理工具和镜像发布方式可能不同，不要把 AIO 服务地址当成创建沙箱的管理地址。
-
-| 配置项 | 应填写的内容 |
-| --- | --- |
-| `proxy_url` | 客户端能访问的 CubeProxy 基础地址，例如 `http://cubeproxy.example:8080` |
-| `sandbox_id` | 新创建实例的 ID，不是模板 ID |
-| `working_dir` | 沙箱里的工作目录，例如 `/home/gem` |
-| `traffic_token_file` | 可选，CubeSandbox 流量令牌文件的路径 |
-| `route_host` | 可选，自定义路由时使用；默认是 `8080-<sandbox_id>.cube.app` |
-
-默认路由通过请求的 `Host` 头指定沙箱。`proxy_url` 不需要拼上沙箱 ID，也不要把令牌写进 URL。Gate 令牌与 CubeSandbox 流量令牌用途不同，需要分别配置。
-
-## 5. 安装客户端并检查接入
-
-为 DeepAgents 应用单独准备一个 Python 环境：
+将 `CUBE_TEMPLATE_ID` 替换为本次构建的模板 ID。示例在单节点部署的控制节点执行。运维人员通过 CubeMaster 管理接口（`8089`）创建和释放实例，应用通过 CubeProxy（`8080`）访问沙箱内的 AIO。集群使用其他地址或路由域名时，替换相应变量。
 
 ```bash
-uv venv --python 3.12 .venv-deepagents
-uv pip install --python .venv-deepagents/bin/python -e './AgentMoss[deepagents-aio]'
+CUBE_TEMPLATE_ID=your-template-id
+CUBE_MASTER_URL=http://127.0.0.1:8089
+CUBE_DOMAIN=cube.app
+export MOSS_AIO_URL=http://127.0.0.1:8080
+CUBE_STATE=$(mktemp -d)
+
+cubemastercli tpl info "$CUBE_TEMPLATE_ID" --include-request --json |
+  jq --arg id "$(cat /proc/sys/kernel/random/uuid)" '
+    .create_request
+    | .requestID = $id
+    | .timeout = 1800
+    | .exposed_ports = [8080, 49983]
+    | .cube_network_config.allowPublicTraffic = false
+    | .annotations |= with_entries(select(.key | startswith("cube.master.appsnapshot.") | not))
+    | .containers[0].probe.timeout_ms = 120000
+    | .containers[0].probe.failure_threshold = 240
+  ' |
+  curl -fsS -H 'Content-Type: application/json' --data-binary @- \
+    "$CUBE_MASTER_URL/cube/sandbox" -o "$CUBE_STATE/instance.json"
+
+MOSS_SANDBOX_ID=$(jq -er 'if .ret.ret_code == 200 then .sandbox_id else error(.ret.ret_msg) end' "$CUBE_STATE/instance.json")
+MOSS_AIO_ROUTE_HOST="8080-${MOSS_SANDBOX_ID}.${CUBE_DOMAIN}"
+MOSS_AIO_TRAFFIC_TOKEN_FILE="$CUBE_STATE/traffic.token"
+jq -er '.traffic_access_token | select(length > 0)' "$CUBE_STATE/instance.json" > "$MOSS_AIO_TRAFFIC_TOKEN_FILE"
+export MOSS_SANDBOX_ID MOSS_AIO_ROUTE_HOST MOSS_AIO_TRAFFIC_TOKEN_FILE
 ```
 
-AgentGate 服务与 DeepAgents 应用使用不同环境，避免依赖版本冲突。检查脚本直接访问 Gate 的 HTTP 接口，客户端环境不需要安装 AgentGate。
+这次请求复用模板的镜像和资源配置，并去掉恢复内存快照的标记。CubeMaster 启动新实例后，最多等待 120 秒确认 AIO 的 `/v1/sandbox` 可用。实例连续空闲 30 分钟后到期。响应包含实例 ID 和该实例的流量令牌，请保存在仅当前用户可读的目录下。管理请求返回错误时，查看响应中的 `ret.ret_msg`。后续访问使用 `MOSS_SANDBOX_ID`（本次实例 ID），模板 ID 只在创建实例时使用。
 
-根据实际部署设置地址和令牌文件：
+## 执行命令
+
+如果实例由管理员提供，在应用机器上执行以下命令，将地址、实例 ID、路由主机名和令牌文件路径换成管理员提供的值。已按上一节创建实例的用户可直接使用当前终端，跳过这个配置块。
 
 ```bash
-export MOSS_GATE_URL=http://127.0.0.1:9100
-export MOSS_GATE_TOKEN_FILE="$HOME/.config/agentmoss-deployment/gate.token"
-export MOSS_AIO_URL=http://cubeproxy.example:8080
+export MOSS_AIO_URL=https://cubeproxy.example.com
 export MOSS_SANDBOX_ID=your-sandbox-id
-export MOSS_WORKING_DIR=/home/gem
-
-# 仅在 CubeSandbox 开启流量鉴权时设置。
-# export MOSS_AIO_TRAFFIC_TOKEN_FILE=/path/to/cube-traffic-token
-# 仅在使用自定义路由时设置。
-# export MOSS_AIO_ROUTE_HOST=your-route-host
-
-.venv-deepagents/bin/python AgentMoss/integrations/cubesandbox/verify.py
+export MOSS_AIO_ROUTE_HOST="8080-${MOSS_SANDBOX_ID}.cube.app"
+export MOSS_AIO_TRAFFIC_TOKEN_FILE=/path/to/traffic.token
+CUBE_STATE=$(mktemp -d)
 ```
 
-脚本会依次检查并打印五项 `PASS`：
+先用流量令牌访问 AIO 的健康接口，预期为 `healthy`。然后执行 `pwd`，响应应显示 `/home/gem` 和退出码 `0`。如果应用位于另一台机器，通过受保护的连接向它提供 CubeProxy 地址、路由和流量令牌文件，令牌路径填写应用机器上的路径。
 
-1. 外部 AgentGate 和 AgentMoss 服务正常。
-2. 普通命令经过检查后，在沙箱中成功执行。
-3. 外部检查拒绝风险命令。
-4. 外部只看到脚本路径并放行，沙箱内部读到脚本内容后拒绝执行。
-5. 临时检查文件和本次 shell 会话已清理。
+```bash
+{
+  printf 'Host: %s\n' "$MOSS_AIO_ROUTE_HOST"
+  printf 'e2b-traffic-access-token: %s\n' "$(cat "$MOSS_AIO_TRAFFIC_TOKEN_FILE")"
+} > "$CUBE_STATE/aio.headers"
 
-测试使用预先写好的工具调用，不需要模型账号。测试命令中的敏感文件访问放在不会执行的条件内，即使内部检查没有生效，也不会读取敏感文件。测试会通过文件接口写入一个临时脚本，结束时删除它，并查询 AIO 会话列表确认本次会话已移除；整个沙箱实例仍由你管理。
+curl -fsS -H "@$CUBE_STATE/aio.headers" "$MOSS_AIO_URL/health" | jq -r .status
+curl -fsS -H "@$CUBE_STATE/aio.headers" -H 'Content-Type: application/json' \
+  -d '{"command":"pwd","exec_dir":"/home/gem","strict":true}' \
+  "$MOSS_AIO_URL/v1/shell/exec" -o "$CUBE_STATE/result.json"
+jq '.data | {output, exit_code}' "$CUBE_STATE/result.json"
 
-## 6. 接到自己的 DeepAgents 应用
-
-复制 [config.example.json](config.example.json)，填写 Gate 地址、Gate 令牌文件、CubeProxy 地址和沙箱 ID。有流量令牌时，在 `aio` 中补上 `traffic_token_file`。保留 `fail_closed: true`，检查服务不可用时就会停止执行。
-
-[应用示例](examples/deepagents_aio.py)提供 `run_once()`，接收应用现有的模型、会话保存器和连接配置。例如，在已有应用代码中调用：
-
-```python
-import json
-import sys
-from pathlib import Path
-
-sys.path.insert(0, "AgentMoss/integrations/cubesandbox/examples")
-from deepagents_aio import run_once
-
-async def handle_task(model, checkpointer, config_path, session_id, user_text):
-    config = json.loads(Path(config_path).read_text())
-    return await run_once(
-        model, checkpointer, session_id, user_text, config=config,
-    )
+AIO_SESSION_ID=$(jq -er '.data.session_id' "$CUBE_STATE/result.json")
+curl -fsS -X DELETE -H "@$CUBE_STATE/aio.headers" \
+  "$MOSS_AIO_URL/v1/shell/sessions/$AIO_SESSION_ID"
 ```
 
-`model` 使用应用已经配置好的模型；`checkpointer` 是应用已有的会话保存器，不需要保存会话时可以传 `None`。示例为主代理和通用子代理都添加了安全检查。
+镜像内的检查覆盖 `/v1/shell/exec` 及兼容命令入口 `/v1/shell/write`。文件 API、代码执行、交互终端和 CubeSandbox SDK 的 `commands.run()` 使用各自的执行路径。对这些入口有访问限制要求时，请通过沙箱权限和网络访问策略控制。
 
-示例每次运行后关闭 shell 会话。长期运行的服务可以在启动时创建并复用集成实例，停止接收任务并等待已有任务结束后，再调用 `integration.aclose()`。同一个实例串行使用一个 shell 会话；需要并行处理独立任务时，使用不同的集成实例。沙箱实例的创建和销毁仍由应用负责。
-
-## 使用时需要注意什么
-
-- **检查覆盖的入口有限。** 镜像检查覆盖 AIO 的 `/v1/shell/exec` 和兼容命令入口 `/v1/shell/write`。文件接口、代码执行接口、WebSocket 终端、MCP 的 `sandbox_execute_bash`，以及 CubeSandbox SDK 的 `commands.run()` 不经过这两个入口。不能把本目录的接入理解为对沙箱内所有操作的统一拦截。
-- **文件工具依靠客户端检查。** 通过已注册中间件的 DeepAgents 文件工具调用会先交给 Gate；直接调用底层文件接口不会经过该中间件。写文件还需要 AIO 的 Python 代码执行接口可用。
-- **使用完整的沙箱路径。** 推荐传 `/home/gem/file.txt` 这样的绝对路径。单独执行 `cd` 不会改变下一条命令的起始目录；在同一条命令中使用 `cd subdir && ...` 才有效。工作目录也不等于文件访问权限边界。
-- **区分两处拒绝。** 外部拒绝时，命令不会送到 AIO。外部允许、内部拒绝时，工具返回执行错误和 `AGENTMOSS_DENIED`；退出码 `126` 是客户端用于表示 AIO 拒绝的值，不是 Bash 实际执行后的结果。
-- **超时后先查旧命令。** 网络断开或超时不能说明命令没有执行。客户端会停止继续使用状态不明的会话，不自动重试或转到本地执行。先确认并处理旧会话，再重新连接；新建会话不会停止旧命令。
-- **内外文件系统互不共享。** 外部 Moss 如果恰好存在同名脚本，可能额外检查外部那份文件。`integration.status()` 也不能证明镜像内的检查已经启用，应运行上面的接入检查。
-- **静态检查存在已知限制。** 对部分 `python -c` 命令，写在错误处理函数中的敏感文件读取可能未被当前引擎拦截。部署时仍需配置沙箱自身的文件访问权限；本接入不能替代这些权限限制。
-
-## 常见问题
-
-| 现象 | 处理方法 |
+| 响应 | 如何处理 |
 | --- | --- |
-| `moss_status` 不是 `healthy` | 检查外部 Moss 的实际监听端口、Gate 的 `security-url` 和 Moss 令牌 |
-| 普通命令被拒绝，来源是 `fail_closed` | 检查 Gate 地址、令牌和响应时间；示例将 Gate 等待时间设为 30 秒 |
-| 普通命令成功，脚本检查失败 | 确认实例来自新镜像，并且调用走的是 AIO shell 接口 |
-| `AGENTMOSS_UNAVAILABLE` | 查看 AIO 服务日志，检查镜像内 AgentMoss 初始化和规则加载情况；此时不会提交命令 |
-| `AGENTMOSS_SESSION_BUSY` 或 `409` | 先查看并处理同一个 shell 会话里尚未结束的命令 |
-| 创建实例返回 `no more resource` | 检查 CubeSandbox 节点与模板的调度状态；这发生在 AIO 接入之前 |
-| 构建提示 AIO 执行入口不匹配 | 核对基础镜像版本；不要跳过校验，需针对新入口重新适配 |
+| HTTP 403，`AGENTMOSS_DENIED` | 命令已被镜像内规则拒绝。查看响应的 `reason`。 |
+| HTTP 403，未返回上述错误码 | 核对实例 ID、路由域名以及该实例的流量令牌。 |
+| HTTP 409，`AGENTMOSS_SESSION_BUSY` | 等待该 shell 会话的前一条命令结束。 |
+| HTTP 503，`AGENTMOSS_UNAVAILABLE` | 检查 AIO 服务日志和镜像内的规则加载情况。 |
 
-更详细的客户端参数和故障处理见 [DeepAgents 插件说明](../deepagents-plugin/README.md)。
+如需让 Deep Agents 使用这个实例，请继续阅读[连接 Deep Agents](../deepagents-plugin/docs/cubesandbox.md)。自行创建的实例在使用完毕、数据已保存后，由有权限的运维人员在控制节点释放。此操作会结束实例内的所有会话。平台提供的实例按平台约定释放或交还管理员。
+
+```bash
+cubemastercli cubebox destroy "$MOSS_SANDBOX_ID"
+```

@@ -1,432 +1,168 @@
 # AgentGate V1
 
-AgentGate 是 AI Agent 数据采集与安全分析中间层。Agent 在每次工具调用前把动作发给
-AgentGate，AgentGate 采集系统上下文并转发给 AgentMoss 判定，返回 `Allow` / `Deny`。
+AgentGate 在工具执行前接收 Agent 的请求，采集网关所在主机的系统信息，并将工具名、参数和会话历史发给 AgentMoss。网关记录判定结果，原工具由 Agent 在收到 `Allow` 后执行。
 
-本组件使用 Python 实现，提供 V1 HTTP API、Python SDK 和可视化看板。
-接入方在执行工具前主动提交动作，并根据返回的判定执行或拒绝该动作。
+## 安装与启动
 
-## 架构
+按[项目快速开始](../README.md#快速开始)安装并启动 AgentMoss 和 AgentGate，提交第一条请求。默认地址是 `http://127.0.0.1:9100`（AgentGate）和 `http://127.0.0.1:9090`（AgentMoss）。如果端口已占用，请按启动日志中的实际地址配置客户端和网关。
 
-```
-┌──────────────┐   POST /api/v1/analyze   ┌──────────────┐   POST /api/v1/analyze   ┌──────────────┐
-│  Agent / SDK │ ───────────────────────▶ │  AgentGate   │ ───────────────────────▶ │  AgentMoss   │
-│              │ ◀─────────────────────── │     V1       │ ◀─────────────────────── │              │
-└──────────────┘   Allow / Deny + reason  └──────────────┘   Allow / Deny + reason  └──────────────┘
-```
+## Python 客户端
 
-AgentGate 负责：
-
-- 采集系统 / 进程 / 网络 / 用户 / 环境上下文；
-- 按 `session_id` 从 SQLite 自动补齐最近 100 条 `action_history`，保持调用顺序；
-- 把请求转发给 AgentMoss，并把判定结果落库；
-- 提供看板、查询接口和存储治理。
-
-## 安装
-
-要求 Python >= 3.10，推荐 Python 3.12。完整双服务安装流程见[项目快速开始](../README.md#快速开始)。以下命令在仓库根目录执行，先准备 AgentGate 的独立环境：
+在安装了 AgentGate 的 Python 环境运行下面的示例。同一用户按默认配置启动网关时，先在客户端终端读取网关令牌。其他环境使用服务管理员分配的令牌。
 
 ```bash
-uv venv --python 3.12 ./AgentGate/.venv
-uv pip install --python ./AgentGate/.venv/bin/python -e ./AgentGate
+export AGENT_GATE_AUTH_TOKEN="$(cat "${XDG_CONFIG_HOME:-$HOME/.config}/agentgate/auth_token")"
 ```
-
-安装后使用 `./AgentGate/.venv/bin/agent-gate` 启动网关。也可以只拷贝
-`sdk/python/gate_client.py` 作为独立客户端使用，不依赖本包；默认鉴权开启时
-需传 `api_token=` 或设置 `AGENT_GATE_AUTH_TOKEN`。
-
-**前置依赖：AgentMoss 必须单独安装并启动。** AgentGate 只负责采集上下文和转发，
-真实的 Allow/Deny 判定由 AgentMoss 完成：
-
-```bash
-uv venv --python 3.12 ./AgentMoss/.venv
-uv pip install --python ./AgentMoss/.venv/bin/python -e ./AgentMoss
-```
-
-AgentMoss 默认开启鉴权（`AGENT_MOSS_AUTH_MODE=auto`），首次启动会在
-`~/.config/agentmoss/auth_token` 生成 token。AgentGate 必须能读到该 token，
-否则会返回 `Deny` + `AgentMoss HTTP 401`（见下文「AgentGate 调 AgentMoss 的鉴权」）。
-
-> 如果只启动 AgentGate、没有安装/启动 AgentMoss：AgentGate 本身可以启动，
-> `/api/v1/health` 仍返回 200，但 `moss_status` 为 `unreachable`、`moss_version`
-> 为 `N/A`；`/api/v1/analyze` 会按 **fail-closed** 返回 `Deny`（HTTP 200，
-> `risk_type=service_unavailable`，`source` 仍为 `agent_moss`，reason 类似
-> `AgentMoss security service unavailable: ...`），这不是正常的安全判定结果，
-> 不能用于验收。
-
-## 快速开始
-
-以下步骤均从仓库根目录执行。
-
-1. 启动 AgentMoss，使用不需要模型凭据的 L1/L2 检测：
-
-```bash
-AGENT_MOSS_DISABLE_LLM=1 ./AgentMoss/.venv/bin/agent-moss \
-  server --host 127.0.0.1 --port 9090
-```
-
-另开终端：
-
-```bash
-until curl -sf http://127.0.0.1:9090/api/v1/health >/dev/null; do
-  sleep 0.2
-done
-
-export MOSS_TOKEN=$(cat ~/.config/agentmoss/auth_token)
-```
-
-2. 启动 AgentGate，**显式告诉它 AgentMoss token**：
-
-```bash
-MOSS_URL=http://127.0.0.1:9090 \
-AGENT_GATE_MOSS_TOKEN="$MOSS_TOKEN" \
-./AgentGate/.venv/bin/agent-gate server --host 127.0.0.1 --port 9100
-```
-
-3. 等待并检查 AgentGate 健康：
-
-```bash
-until curl -sf http://127.0.0.1:9100/api/v1/health >/dev/null; do
-  sleep 0.2
-done
-curl http://127.0.0.1:9100/api/v1/health
-```
-
-4. 读取 AgentGate 自己的 token，发起一次分析：
-
-```bash
-GATE_TOKEN=$(cat ~/.config/agentgate/auth_token)
-
-curl -X POST http://127.0.0.1:9100/api/v1/analyze \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $GATE_TOKEN" \
-  -d '{
-    "agent_type": "my-agent",
-    "agent_version": "0.1.0",
-    "session_id": "sess-001",
-    "tool_name": "bash",
-    "command": "ls -la",
-    "cwd": "/home/user/project",
-    "description": "list files",
-    "user_prompt": "show me the files"
-  }'
-```
-
-`Authorization` 头在默认鉴权模式下必填，见下文「鉴权」。若 AgentGate 已在 systemd/service 用户下运行，`AGENT_GATE_MOSS_TOKEN` 的配置见「AgentGate 调 AgentMoss 的鉴权」。
-
-## CLI
-
-以下命令在 `AgentGate/` 组件目录执行，并先激活其虚拟环境：
-
-```bash
-. .venv/bin/activate
-agent-gate --version
-agent-gate server --host 0.0.0.0 --port 9100 [--config config/agent_gate.yaml] [--db-path /path/to.db]
-agent-gate clean --retention-days 30 [--config config/agent_gate.yaml]
-```
-
-`server` 支持两种模式：
-
-- `--mode http`（默认）：TCP 监听；
-- `--mode socket --socket /path/to.sock`：Unix Domain Socket。
-
-HTTP 端口被占用时，AgentGate 会在同一监听地址上向后查找可用端口，最多尝试
-100 个端口。以启动日志中的实际地址访问服务，并同步更新客户端配置；全部占用时
-启动失败。
-
-AgentMoss 地址解析优先级：
-
-```
---security-url / --moss-url
-  > AGENT_MOSS_URL
-  > MOSS_URL
-  > config/agent_gate.yaml 的 agent_moss.url
-  > http://127.0.0.1:9090
-```
-
-## Python import
 
 ```python
-from agent_gate.v1.sdk import GateClient
+from agent_gate.shared.sdk import GateClient
 
-client = GateClient(
-    base_url="http://127.0.0.1:9100",
-    api_token="<token>",  # 也可用环境变量 AGENT_GATE_AUTH_TOKEN
-)
+with GateClient(base_url="http://127.0.0.1:9100") as client:
+    result = client.analyze(
+        agent_type="my-agent",
+        session_id="my-session-001",
+        tool_name="bash",
+        command="pwd",
+        user_prompt="查看当前工作目录",
+    )
 
-result = client.analyze(
-    agent_type="my-agent",
-    session_id="sess-001",
-    tool_name="bash",
-    command="cat ~/.ssh/id_rsa",
-    cwd="/home/user/project",
-    user_prompt="read the key file",
-)
-
-if result["decision"] == "Deny":
-    raise RuntimeError(result["reason"])
+if result.get("decision") != "Allow":
+    raise PermissionError(result.get("reason") or "未获得执行许可")
+print(result["decision"])
 ```
 
-服务端也可以作为 FastAPI app 直接嵌入：
+SDK 从 `AGENT_GATE_AUTH_TOKEN` 读取令牌，也可通过 `GateClient(api_token=...)` 显式传入。连接异常、超时或 HTTP 错误会抛出异常。将检查放在工具入口，收到 `Allow` 后再调用原工具。OpenDesk 的包装方式见[接入示例](examples/opendesk/README.md)。
 
-```python
-from agent_gate.v1.server.app import create_app
-
-app = create_app()
-```
+只需客户端的 Python 应用也可复制 [gate_client.py](sdk/python/gate_client.py)，在有 `httpx` 的环境中使用 `from gate_client import GateClient`。嵌入 FastAPI 服务时可使用 `from agent_gate.shared.server.app import create_app` 创建应用。
 
 ## HTTP API
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/v1/health` | 健康检查（公开） |
-| POST | `/api/v1/analyze` | 分析一次工具调用 |
-| GET | `/api/v1/sessions/{session_id}/traces` | 某会话的完整调用轨迹 |
-| GET | `/api/v1/tool_calls` | 查询调用记录（`limit` 上限 500，超出静默截断） |
-| DELETE | `/api/v1/tool_calls` | 清空调用记录；传 `{"ids": [...]}` 可只删指定记录 |
-| GET | `/api/v1/agents` | agent 列表与调用统计 |
-| GET | `/api/v1/timeline` | 最近 N 分钟的 Allow / Deny 时间线 |
-| GET | `/api/v1/storage_stats` | 存储用量与条数 |
-| GET | `/dashboard/` | 内置看板 |
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/v1/health` | 公开的健康状态，`port` 是网关实际端口，`moss_status` 和 `moss_version` 来自 AgentMoss |
+| POST | `/api/v1/analyze` | 提交一次待执行的工具调用，返回判定 |
+| GET | `/api/v1/sessions/{session_id}/traces` | 查看会话轨迹，`tool_calls` 按 `seq` 递增排列，兼容字段 `traces` 返回同一列表 |
+| GET | `/api/v1/tool_calls` | 按 `session_id`、`decision` 或 `risk_level` 等条件查询记录，`offset`、`limit` 用于分页，每页最多 500 条 |
+| GET | `/api/v1/agents` | 查看 Agent 列表及调用统计 |
+| GET | `/api/v1/timeline` | 按分钟汇总允许和拒绝次数，需要全局令牌 |
+| GET | `/api/v1/storage_stats` | 查看存储占用，需要全局令牌 |
+| DELETE | `/api/v1/tool_calls` | 删除调用记录，需要全局令牌。传入 `{"ids": [1, 2]}` 只删指定记录，传入 `{"ids": []}` 保留全部记录，省略请求体将清空全部记录 |
+| GET | `/dashboard/` | 在浏览器查看调用记录和判定原因 |
 
-#### POST /api/v1/analyze
+### 提交分析请求
 
-必填字段：`agent_type`、`session_id`，以及 `tool_name` + `command` **或** `a_next`（二选一；`a_next` 存在时从 `action_type`/`action_detail` 兜底）。
+`POST /api/v1/analyze` 使用 JSON 请求体。提供 `agent_type` 和 `session_id` 标识来源，同一次会话使用相同的 `session_id`，不同会话使用不同的值。工具调用用 `tool_name` 和 `command` 描述，也可以只用 `a_next.action_type` 和 `a_next.action_detail` 描述当前动作。
 
-可选字段：`agent_version`、`cwd`、`description`、`user_prompt`、`instance_id`、
-`a_next`、`prompt_history`、`action_history`、`session_history`、`metadata`。
+| 可选字段 | 用途 |
+| --- | --- |
+| `user_prompt`、`description`、`cwd` | 当前用户请求、工具用途和工具实际工作目录 |
+| `agent_version`、`instance_id` | 客户端版本和安装实例标识 |
+| `action_history` | 已发生的动作列表。每项可含 `action_type`、`action_detail`、`output` 和 ISO 8601 格式的 `called_at`。交互工具可在 `output` 中传入用户回答 |
+| `prompt_history` | 按时间排列的轮次，每项包含用户原文 `text` 和该轮的 `actions` 列表 |
+| `session_history` | 其他会话的上下文，每项包含 `session_id` 和 `action_history` |
+| `metadata` | 可用 `hostname` 和 `os_type` 指明运行 Agent 的主机和系统 |
 
-嵌套字段：
+省略 `action_history` 或传 `null` 时，网关从 SQLite 补入该会话最近 100 条动作。显式传入 `[]` 表示本次使用空历史。
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `a_next` | object | `{action_type, action_detail, called_at?}`；只发这个字段时 `tool_name`/`command` 从它兜底 |
-| `action_history[]` | array | `[{action_type, action_detail, output, called_at}]`。`output` 是工具返回内容；对 `ask_user_question` 是用户回答，供 L2 授权规则判断。`called_at` 是动作时间（ISO 8601），供授权 300s 时效窗使用 |
-| `prompt_history[]` | array | `[{text, actions: [ActionHistoryItem]}]`，按“提示词 → 该提示触发的动作”组织；`actions[]` 字段同 `action_history[]` |
-| `session_history[]` | array | `[{session_id, action_history: [...]}]`；调用方显式提供时优先使用，否则从本地 SQLite 组装 |
-| `metadata` | object | 可选扩展；`hostname` 用于生成 agent 标识，`os_type` 用于覆盖 Agent 侧平台检测 |
+### 读取判定
 
-`action_history` **未提供（不传或 null）** 时，AgentGate 会根据 `session_id` 从本地 SQLite 自动补齐；显式传 `[]` 表示使用空历史，不会自动补齐。
+| 响应字段 | 用途 |
+| --- | --- |
+| `decision`、`reason` | `Allow` 或 `Deny` 及其原因 |
+| `risk_level`、`risk_type` | 风险级别（`low`、`medium`、`high`、`critical`）及类别 |
+| `violated_layers`、`violation_graph` | 命中的检测层，组合风险可附带包含 `nodes` 和 `edges` 的关系图 |
+| `degraded`、`l3_outcome` | 本次检测的降级提示及模型分析阶段的结果 |
+| `policy`、`confidence` | 策略描述、置信度（0 至 100） |
+| `analysis_duration_ms`、`collected_context` | 分析耗时（毫秒）和网关采集的系统信息 |
+| `source` | `agent_moss` 或 `cache`。命中缓存的调用也会单独记录 |
 
-响应字段：
+客户端收到 HTTP 401 时，检查它发给 AgentGate 的令牌。若 HTTP 200 但 `decision` 为 `Deny`、`risk_type` 为 `service_unavailable`，请检查网关访问 AgentMoss 的地址和令牌。`reason` 含 `AgentMoss HTTP 401` 表示 AgentMoss 拒绝了网关凭据。`analysis_timeout` 表示分析超时。
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `decision` | string | `Allow` / `Deny` |
-| `reason` | string | 决策原因 |
-| `risk_level` | string | `low` / `medium` / `high` / `critical` |
-| `risk_type` | string | 风险类别 |
-| `violated_layers` | array | 命中层，如 `["L1.1", "L2.2"]` |
-| `policy` | string | Allow 时生成的最小策略 |
-| `confidence` | int | 置信度 0–100 |
-| `analysis_duration_ms` | float | 本次分析耗时（毫秒） |
-| `violation_graph` | object/null | 组合式拦截时的结构化攻击链图 `{nodes, edges}` |
-| `collected_context` | object/null | AgentGate 采集的系统上下文 |
-| `source` | string | 结果来源：`agent_moss` / `cache`。AgentMoss 不可用时的 fail-closed Deny 也标为 `agent_moss`，用 `risk_type=service_unavailable` / `analysis_timeout` 区分 |
+## 鉴权
 
-`GET /api/v1/sessions/{session_id}/traces` 使用 `tool_calls` 字段返回调用轨迹，
-同时提供内容相同的 `traces` 兼容字段，均按会话内的 `seq` 递增排序。
-命中判定缓存的调用也会保存独立的调用记录和系统快照，并计入会话调用次数。
+**Agent 调 AgentGate** 时，请求头使用 `Authorization: Bearer <网关令牌>`。默认 `AGENT_GATE_AUTH_MODE=auto`，首次启动时自动生成全局令牌，写入 `${XDG_CONFIG_HOME:-$HOME/.config}/agentgate/auth_token`，权限为 `0600`。在本机浏览器打开 `http://127.0.0.1:9100/dashboard/?token=<网关全局令牌>`，将占位符换为实际令牌。登录后可直接访问 `/dashboard/`。交互终端启动时也会显示登录地址，重定向到文件或 systemd 日志的地址会隐藏令牌。
 
-#### GET /api/v1/health
+| 网关环境变量 | 用途 |
+| --- | --- |
+| `AGENT_GATE_AUTH_TOKEN` | 指定全局令牌 |
+| `AGENT_GATE_AUTH_TOKEN_FILE`、`AGENT_GATE_AUTH_TOKEN_FD` | 从文件或继承的文件描述符读取全局令牌 |
+| `AGENT_GATE_AGENT_TOKENS` | 为不同 Agent 分配令牌，格式为 `opendesk=令牌A,qwenpaw=令牌B`。请求中的 `agent_type` 须与令牌匹配 |
+| `AGENT_GATE_AUTH_MODE` | `auto` 启用鉴权，`off` 关闭鉴权 |
 
-公开端点，无需鉴权。响应字段：`status`（`healthy`）、`version`、`timestamp`、`instance`、`moss_version`、`moss_status`。
+**AgentGate 调 AgentMoss** 使用另一枚令牌。默认同机、同用户下，网关会读取 `~/.config/agentmoss/auth_token`。跨用户或跨主机部署时，将 AgentMoss 令牌保存在网关账户可读的文件，并为网关设置 `AGENT_MOSS_AUTH_TOKEN_FILE`。网关按以下顺序取第一个可用值。
 
-#### DELETE /api/v1/tool_calls
+1. `AGENT_GATE_MOSS_TOKEN`
+2. `AGENT_MOSS_AUTH_TOKEN`
+3. `AGENT_MOSS_AUTH_TOKEN_FILE` 指向的文件
+4. `AGENT_MOSS_DATA_DIR/auth_token`（设置了数据目录时），或 `~/.config/agentmoss/auth_token`
 
-破坏性操作，只接受**全局 token**（逐 agent token 返回 403）。请求体可省略：
+## 配置与存储
 
-| 请求体 | 行为 |
-|---|---|
-| 不传 body | 清空全部调用记录（`tool_calls` + `system_snapshots`，session 计数归零） |
-| `{"ids": [1, 2]}` | 只删除指定记录 |
-| `{"ids": []}` | 不删除任何记录 |
+配置示例见 [agent_gate.yaml](config/agent_gate.yaml)。启动网关时用 `--config` 指定 YAML 文件，用 `--host`、`--port` 指定监听地址。AgentMoss 地址按 `--security-url`（别名 `--moss-url`）、`AGENT_MOSS_URL`、`MOSS_URL`、YAML 中的 `agent_moss.url` 的顺序取值。
 
-响应：`{"deleted": N}`。
+| 参数或环境变量 | 用途 |
+| --- | --- |
+| `--mode http` | 用 TCP 提供 HTTP 服务（默认）。同机部署可指定 `--host 127.0.0.1` |
+| `--mode socket --socket /path/to/agentgate.sock` | 通过 Unix socket 提供服务，将路径换为网关账户可写的位置 |
+| `--db-path`、`AGENT_GATE_STORAGE_DB_PATH` | 指定 SQLite 文件路径。默认路径为 `${XDG_DATA_HOME:-$HOME/.local/share}/agent_gate/agent_gate.db` |
+| `AGENT_GATE_CORS_ORIGINS`、`AGENT_GATE_ORIGIN_CHECK` | 配置浏览器跨域来源、来源校验 |
+| `AGENT_GATE_RATE_LIMIT_QPS`、`AGENT_GATE_POOL_BIZ`、`AGENT_GATE_MAX_BODY_BYTES` | 调整请求速率、业务并发数、请求体字节数上限 |
+| `AGENT_GATE_MAX_RECORD_BYTES` | 限制单条 `command`、`action_detail` 字段的留存长度。超限内容保留头部及截断标记 |
+| `AGENT_GATE_DISK_DEGRADE_PERCENT` | 剩余磁盘空间低于指定百分比时，进一步缩短命令和原因字段，省略描述 |
+| `AGENT_GATE_ARCHIVE_THRESHOLD`、`AGENT_GATE_ARCHIVE_KEEP` | 触发归档的记录数及主库保留条数。维护线程在启动时和运行期间每 6 小时检查一次 |
 
-看板上的 **Delete Records** 多选模式调用同一接口：可删除所选或全部，删除前弹确认框；浏览器通过 `?token=` 换过 Cookie 后，同源 `fetch` 无需再带 Bearer 头。
-
-## 鉴权与安全加固
-
-### 鉴权
-
-默认 `AGENT_GATE_AUTH_MODE=auto`：首次启动自动生成 token，写入
-`~/.config/agentgate/auth_token`（`XDG_CONFIG_HOME` 设置时为
-`$XDG_CONFIG_HOME/agentgate/auth_token`，权限 0600），除 `/api/v1/health` 外的请求都要带
-`Authorization: Bearer <token>`。
-
-| 环境变量 | 说明 |
-|---|---|
-| `AGENT_GATE_AUTH_MODE` | `auto`（默认）/ `off` |
-| `AGENT_GATE_AUTH_TOKEN` | 显式指定全局 token |
-| `AGENT_GATE_AUTH_TOKEN_FILE` | 从文件读取 token |
-| `AGENT_GATE_AUTH_TOKEN_FD` | 从文件描述符读取 token |
-| `AGENT_GATE_AGENT_TOKENS` | 逐 agent token，如 `opendesk=tok-a,qwenpaw=tok-b` |
-
-看板的浏览器导航无法带 Bearer 头，因此支持 `?token=<token>`
-（服务端换取 Cookie）。跨源访问通过 `AGENT_GATE_CORS_ORIGINS` 控制。
-
-#### AgentGate 调 AgentMoss 的鉴权（AgentMoss 401）
-
-AgentGate 和 AgentMoss **各自有独立的 token**，不能混用：
-
-- curl → AgentGate：`AGENT_GATE_*` / `~/.config/agentgate/auth_token`
-- AgentGate → AgentMoss：`AGENT_MOSS_*` / `~/.config/agentmoss/auth_token`
-
-AgentGate 读取 AgentMoss token 的优先级：
-
-```text
-AGENT_GATE_MOSS_TOKEN
-> AGENT_MOSS_AUTH_TOKEN
-> AGENT_MOSS_AUTH_TOKEN_FILE
-> $AGENT_MOSS_DATA_DIR/auth_token
-> ~/.config/agentmoss/auth_token
-```
-
-> **root/systemd 注意**：AgentMoss（sudo/systemd/直接运行）和 AgentGate 在 root
-> 下默认使用 `/root/.config/agentmoss`，两边默认查找路径一致。若 AgentGate 以**非 root** 用户运行，则读不到 root 家目录
-> 下 0600 的 token，必须显式配置 `AGENT_GATE_MOSS_TOKEN` /
-> `AGENT_MOSS_AUTH_TOKEN_FILE`，或给两边设置同一个可读的 `AGENT_MOSS_DATA_DIR`。
-
-若 AgentGate 与 AgentMoss 由不同系统用户启动（例如 systemd 的
-`User=agent_gate`），AgentGate 读不到 AgentMoss 用户目录下的 0600 token，
-必须显式传入：
-
-```bash
-MOSS_TOKEN=$(cat /path/to/agentmoss/auth_token)
-
-MOSS_URL=http://127.0.0.1:9090 \
-AGENT_GATE_MOSS_TOKEN="$MOSS_TOKEN" \
-agent-gate server --host 0.0.0.0 --port 9100
-```
-
-systemd 部署可在 `/etc/systemd/system/agentgate.service.d/override.conf` 中设置：
-
-```ini
-[Service]
-Environment=MOSS_URL=http://127.0.0.1:9090
-Environment=AGENT_GATE_MOSS_TOKEN=<AgentMoss token>
-```
-
-然后执行 `systemctl daemon-reload && systemctl restart agentgate`。
-
-**401 的典型表现**：curl 到 AgentGate 返回 HTTP 200，但 body 是
-`decision=Deny`，reason 包含 `AgentMoss HTTP 401`。这表示 Gate 自己的鉴权已通过，
-失败发生在 Gate→Moss 这一段（AgentGate 对 Moss 不可用采用 fail-closed）。
-先直连 Moss 验证 token：
-
-```bash
-MOSS_TOKEN=$(cat ~/.config/agentmoss/auth_token)
-curl -sS -X POST http://127.0.0.1:9090/api/v1/analyze \
-  -H "Authorization: Bearer $MOSS_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"direct-1","prompt_session":"","action_history":[],"a_next":{"action_type":"bash","action_detail":"ls -la /tmp"},"reason":"direct test"}'
-```
-
-直连也返回 401 时，检查 AgentMoss 实际 token 路径（`AGENT_MOSS_DATA_DIR` 是否设置）：
-
-```bash
-journalctl -u agent-moss -n 100 --no-pager | grep -i token
-sudo find /home /root -path '*/.config/agentmoss/auth_token' 2>/dev/null
-```
-
-AgentMoss 使用 `AGENT_MOSS_AGENT_TOKENS`（逐 agent token）时，Gate 必须使用对应
-agent 的 token，并保证请求的 `agent_type` 与 token 绑定关系一致。
-
-### 其他加固
-
-- **来源校验**：`AGENT_GATE_ORIGIN_CHECK` 控制浏览器请求的 Origin/Host 校验；
-- **限流与并发池**：`AGENT_GATE_MAX_INFLIGHT`、`AGENT_GATE_POOL_BIZ`、
-  `AGENT_GATE_RATE_LIMIT_QPS`、`AGENT_GATE_MAX_BODY_BYTES` 等；
-- **逐 agent 数据隔离**：`/api/v1/sessions/{id}/traces` 按 token 绑定的
-  agent 过滤，并带跨会话批量访问检测（`AGENT_GATE_SESSION_SWEEP_*`）；
-- **看板 XSS 防护**：所有不可信字段渲染前转义；HTML 页面带 CSP 与安全响应头；
-- **存储治理**：
-  - `command` / `action_detail` 超过 `AGENT_GATE_MAX_RECORD_BYTES` 时按 UTF-8 字节保留头部并附长度/校验值；
-  - 磁盘剩余低于 `AGENT_GATE_DISK_DEGRADE_PERCENT` 时，新记录的命令头部保留 512 字节、`reason` 保留 256 字节、`description` 清空；
-  - 条数达到 `AGENT_GATE_ARCHIVE_THRESHOLD` 时归档旧记录（保留
-    `AGENT_GATE_ARCHIVE_KEEP` 条）并 VACUUM；
-  - 后台维护线程启动时执行一次，之后每 6 小时执行一次；
-- **日志脱敏**：访问日志中的 token 参数打码。
-
-常态下 `reason` / `description` 最多保留 4096 字节头部，截断标记另占少量空间。
-`moss_response` 仍保存完整分析响应，以上字段限制不代表整条数据库记录的大小上限。
-
-## 配置
-
-默认配置见 `config/agent_gate.yaml`。支持用 YAML 文件或环境变量覆盖：
-
-```bash
-# AGENT_GATE_<SECTION>_<KEY>
-export AGENT_GATE_SERVER_PORT=9100
-export AGENT_GATE_STORAGE_DB_PATH=/var/lib/agent_gate/agent_gate.db
-```
-
-`storage.db_path` 默认是哨兵值 `auto`，解析到：
-
-```
-$XDG_DATA_HOME/agent_gate/agent_gate.db
-（默认 ~/.local/share/agent_gate/agent_gate.db）
-```
+需要清理指定记录时，用上面的 `DELETE /api/v1/tool_calls` 接口传入记录 ID。当前版本的 `agent-gate clean` 会使用当前时间作为清理截止点，`--retention-days` 参数无法保留最近若干天的历史。
 
 ## 部署
 
-Linux 环境可使用 systemd 托管网关。在 `AgentGate/` 组件目录执行安装脚本：
+在支持 systemd 用户服务的 Linux 上，可用同一账户托管两个服务。先运行 `systemctl --user status` 确认能连接当前用户的服务管理器。若出现 `Failed to connect to bus`，可以使用快速开始中的前台启动方式，或请管理员配置服务托管。
+
+先完成[项目快速开始](../README.md#快速开始)，记下仓库的绝对路径。如果要沿用快速开始的端口，先在两个前台服务的终端中按 `Ctrl+C`。
+
+创建目录 `~/.config/systemd/user/`，将下面两份文件保存到该目录。两处 `/path/to/AgentMoss` 都要替换为仓库的绝对路径。示例使用内置的 L1、L2 检测和默认令牌。
+
+**agent-moss.service**
+
+```ini
+[Unit]
+Description=AgentMoss
+
+[Service]
+Environment=AGENT_MOSS_DISABLE_LLM=1
+ExecStart="/path/to/AgentMoss/AgentMoss/.venv/bin/agent-moss" server --host 127.0.0.1 --port 9090
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+**agentgate.service**
+
+```ini
+[Unit]
+Description=AgentGate
+Wants=agent-moss.service
+After=agent-moss.service
+
+[Service]
+ExecStart="/path/to/AgentMoss/AgentGate/.venv/bin/agent-gate" server --host 127.0.0.1 --port 9100 --security-url http://127.0.0.1:9090
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+以该用户加载并启动服务。`enable --now` 会立即启动服务，下次启动该用户的 systemd 管理器时也会自动加载。
 
 ```bash
-bash scripts/install-systemd-py.sh
+systemctl --user daemon-reload
+systemctl --user enable --now agent-moss.service agentgate.service
+systemctl --user status agent-moss.service agentgate.service
+journalctl --user -u agent-moss.service -u agentgate.service -n 30
 ```
 
-脚本会检查并按需创建 `AgentGate/venv/`，使用这个环境中的 `agent-gate`，
-然后询问是否安装、启动 `agentgate.service`。该环境与快速开始中的 `.venv/`
-路径不同。安装前应先完成双服务健康检查与真实分析验证，并按上面的鉴权说明
-配置网关访问 AgentMoss 的地址和令牌。
+根据日志中的监听地址再次[提交工具调用](../README.md#提交第一次工具调用)。需要停用时执行 `systemctl --user disable --now agentgate.service agent-moss.service`。分别在不同主机上部署时，在每台主机上只托管对应的服务，移除网关单元中的 `Wants` 和 `After`，并按[跨机部署说明](../AgentMoss/integrations/deepagents-plugin/docs/deployment.md)配置地址和令牌。
 
-查看状态：
+## 许可证
 
-```bash
-bash scripts/status-agentgate-py.sh
-```
-
-需要卸载服务时执行：
-
-```bash
-bash scripts/uninstall-systemd-py.sh
-```
-
-模板见 `deploy/agentgate.service.template`，默认执行：
-
-```
-agent-gate server --host 0.0.0.0 --port 9100
-```
-
-## 开发与测试
-
-在 `AgentGate/` 组件目录执行：
-
-```bash
-uv pip install --python .venv/bin/python -e '.[dev]'
-.venv/bin/python -m pytest agent_gate/tests -q
-```
-
-## 目录结构
-
-```
-agent_gate/
-├── v1/
-│   ├── cli.py              # agent-gate server / clean
-│   ├── config.py           # YAML + 环境变量配置
-│   ├── multi_session.py    # 跨会话分析开关
-│   ├── normalizer.py        # 请求归一化 + action_history/session_history 组装
-│   ├── sdk.py              # Python SDK
-│   ├── collector/          # 系统/进程/网络/用户/环境采集
-│   ├── server/             # FastAPI 应用、路由、看板、安全策略
-│   ├── storage/            # SQLite、Repository、记录守卫、归档维护
-│   └── client/             # AgentMoss 客户端、决策缓存
-└── tests/v1/               # V1 回归测试
-sdk/python/gate_client.py   # 可独立拷贝的客户端
-```
-
-## License
-
-MIT
+[MIT](LICENSE)

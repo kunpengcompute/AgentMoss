@@ -1,120 +1,83 @@
-# DeepAgents 外部插件与 CubeSandbox AIO 接入
+# 连接 Deep Agents 与 CubeSandbox
 
-本插件通过 `agent-sandbox` SDK 连接 CubeSandbox AIO。Gate 和 Moss 服务的启动方法见[部署说明](deployment.md)。
+Deep Agents 把工具调用、用户请求和会话历史发给 AgentGate，由外部 AgentMoss 判定。允许执行的 shell 命令经 CubeProxy 到达 AIO。沙箱镜像内的 AgentMoss 可以读取沙箱文件，在启动 Bash 前检查命令及其引用的脚本。
 
-首次部署请从 [CubeSandbox 接入目录](../../cubesandbox/README.md)开始，其中提供镜像构建配置、应用示例和可直接运行的检查脚本。本文补充客户端接口与行为说明。
+![Deep Agents 到 CubeSandbox 的命令执行路径](../../cubesandbox/docs/moss-interception.png)
 
-## 两层检查分别部署
+## 准备应用环境
 
-外部 Agent 侧始终先通过插件调用 Gate → Moss Server。选择 aio 只改变执行后端，不取消这一层。
+先按[服务部署说明](deployment.md)启动 AgentGate 和 AgentMoss，再按[沙箱部署说明](../../cubesandbox/README.md)从带 AgentMoss 的镜像创建实例。应用所在主机需要能访问 AgentGate 和 CubeProxy，并能读取 Gate 令牌及该沙箱的流量令牌。
 
-```text
-DeepAgents 主代理 / 子代理
-    → AgentMossMiddleware
-    → 外部 AgentGate → 外部 Moss Server
-    → 外部放行后调用 AIOSandboxBackend
-    → agent-sandbox SDK → CubeProxy → CubeSandbox AIO
-    → 镜像内 shell.py 调用 Moss SDK（独立的内部检查）
-    → 内部放行后执行 Bash
-```
-
-外部插件把工具调用发送到 Gate，由 Moss Server 给出判定。沙箱内部的检查直接调用 Moss SDK，检查沙箱中的脚本内容。
-
-外部服务不能仅凭沙箱路径读取脚本，插件也不传输脚本内容。沙箱脚本的内容扫描由已接入 Moss 的 AIO 镜像承担。客户端健康检查和 `integration.status()` 展示外部服务及 backend 状态；镜像内部的检查需要单独配置。
-
-## 安装与连接前提
-
-在 DeepAgents 应用环境中，从本项目的 `AgentMoss/` 组件目录安装插件及可选依赖，命令见[插件安装说明](../README.md#安装)。
-
-应用提前准备已启动的外部 Gate/Moss、已创建的 CubeSandbox 沙箱及可访问的 CubeProxy 地址。Gate token 与 CubeSandbox 流量 token 不同；AIO 端口/路由域名使用默认值时，插件发送 Host: 8080-<sandbox_id>.cube.app。
-
-## 沙箱中的脚本检查
-
-在构建 AIO 镜像时，将 `AgentMoss/` 组件源码复制到镜像中，安装到运行 `shell.py` 的 Python 环境。下面的 `/opt/aio-venv/bin/python` 和源码目录需替换为镜像内的实际路径，构建环境需提供 uv：
+如已按[本地接入说明](../README.md#安装)安装 `deepagents-aio`，可直接使用同一个应用环境。首次安装时，在应用机器的仓库根目录执行以下命令。
 
 ```bash
-uv pip install --python /opt/aio-venv/bin/python /opt/agentmoss-source/AgentMoss
+uv venv --python 3.12 .venv-deepagents
+uv pip install --python .venv-deepagents/bin/python './AgentMoss[deepagents-aio]'
 ```
 
-上例将组件安装到镜像环境中。源码获取方法见[AgentMoss 安装说明](../../../README.md#安装)。
+## 配置连接
 
-安装后，在 `/v1/shell/exec` 的执行入口调用 `judge_security()`：允许后执行 Bash，拒绝时返回 HTTP 403，检查故障时返回 503。
+复制[配置示例](../../cubesandbox/config.example.json)到应用自己的配置目录，设好以下字段。
 
-本项目提供了 [AIO 1.11.0 ARM64 镜像接入配置](../../cubesandbox/image/Dockerfile)，可从当前源码构建并接入上述入口。其他 AIO 版本需要镜像维护者核对入口后适配，并验证拒绝、故障处理和脚本读取行为。单独安装 AgentMoss 不会自动改写执行入口。用已完成接入的镜像创建沙箱；实例的创建和销毁由应用负责。
+| 字段 | 填写内容 |
+| --- | --- |
+| `backend` | `"aio"` |
+| `gate.gate_url`、`gate.api_token_file` | 应用可访问的 AgentGate 地址和 Gate 令牌文件的绝对路径。保留 `fail_closed: true`，服务异常时停止执行。 |
+| `aio.proxy_url`、`aio.sandbox_id` | CubeProxy 基础地址和实例 ID，对应创建沙箱时的 `MOSS_AIO_URL` 和 `MOSS_SANDBOX_ID`。 |
+| `aio.traffic_token_file` | 对于启用流量鉴权的实例，在 `aio` 中添加此字段，填写应用机器上沙箱流量令牌文件的绝对路径。 |
+| `aio.route_host` | 默认 `8080-<sandbox_id>.cube.app`。集群使用自定义域名时，填写创建沙箱时得到的完整路由主机名。 |
+| `aio.working_dir` | 沙箱中已存在、可写的绝对路径。示例使用 `/home/gem`。 |
 
-文件 API、用于独占创建文件的 `/v1/code/execute` 和 CubeSandbox `commands.run()` 不经过这个 shell 入口。DeepAgents 的文件工具调用仍由客户端插件发送到 Gate 检查。`write_file` 要求 AIO 的 Python 代码执行接口可用，并显式使用 `stateful=false`；不创建持久 Python 会话。
+## 在应用中调用
 
-## 完整的异步调用示例
+[deepagents_aio.py](../../cubesandbox/examples/deepagents_aio.py) 提供 `run_once()`。已有应用可以将这个文件放到自己的 Python 模块目录，从异步入口调用 `await run_once(model, checkpointer, session_id, user_text, config=config)`。其中 `model` 是支持工具调用的聊天模型，`checkpointer` 用于保存对话状态，无需跨请求恢复时可传 `None`。
 
-model、existing_checkpointer 和真实配置由应用提供。应用应先等待初始化完成，再接受任务；退出前停止并等待图调用，最后关闭集成实例。
+首次运行可使用 Deep Agents 自带的 Anthropic 适配器。在应用机器的仓库根目录，将 `MOSS_APP_CONFIG` 换为前面填写的 JSON 文件，再输入账户可用的模型 ID 和 API Key。
 
-```python
+```bash
+export MOSS_APP_CONFIG=/path/to/aio-config.json
+read -r -p 'Anthropic 模型 ID：' ANTHROPIC_MODEL
+read -r -s -p 'Anthropic API Key：' ANTHROPIC_API_KEY && echo
+export ANTHROPIC_MODEL ANTHROPIC_API_KEY
+
+PYTHONPATH=AgentMoss/integrations/cubesandbox/examples .venv-deepagents/bin/python - <<'PY'
 import asyncio
-from deepagents import create_deep_agent
-from agentmoss_deepagents import DeepAgentsIntegration
+import json
+import os
+from pathlib import Path
+from uuid import uuid4
 
-async def run_once(model, existing_checkpointer, session_id, user_text):
-    integration = await asyncio.to_thread(DeepAgentsIntegration.load, {
-        "backend": "aio",
-        "gate": {
-            "gate_url": "http://127.0.0.1:9100",
-            "api_token_file": "/run/secrets/gate-token",
-            "fail_closed": True,
-        },
-        "aio": {
-            "proxy_url": "http://cubeproxy.example:8080",
-            "sandbox_id": "your-existing-sandbox-id",
-            "working_dir": "/home/gem",
-            "default_timeout": 30,
-            "hard_timeout": 30,
-            # 沙箱未开启流量鉴权时删除此项。
-            "traffic_token_file": "/run/secrets/cube-traffic-token",
-        },
-    })
-    try:
-        agent = create_deep_agent(
-            model=model,
-            backend=integration.backend,
-            context_schema=dict,
-            middleware=[integration.middleware],
-            checkpointer=existing_checkpointer,
-            subagents=[{
-                "name": "general-purpose",
-                "description": "通用子代理",
-                "middleware": [integration.middleware],
-            }],
-        )
-        return await agent.ainvoke(
-            {"messages": [("user", user_text)]},
-            {"configurable": {"thread_id": session_id}},
-            context={"moss_info": {
-                "session_id": session_id,
-                "user_prompt": user_text,
-            }},
-        )
-    finally:
-        await integration.aclose()
+from deepagents_aio import run_once
+from langchain_anthropic import ChatAnthropic
+
+config = json.loads(Path(os.environ["MOSS_APP_CONFIG"]).read_text(encoding="utf-8"))
+result = asyncio.run(run_once(
+    ChatAnthropic(model=os.environ["ANTHROPIC_MODEL"]), None, uuid4().hex,
+    "请使用 execute 执行 pwd，告诉我沙箱中的工作目录。", config=config,
+))
+print(result["messages"][-1].content)
+PY
 ```
 
-服务应用应在启动时创建并复用集成实例和 agent；上面的单次函数用于展示完整的创建、送检和关闭关系。每个隔离子代理都要添加本插件中间件；DeepAgents 给声明式子代理配置同一 backend，自定义编译图则由应用负责。
+模型调用 `execute` 后，工具应返回配置中的沙箱目录，如 `/home/gem`。同一个插件也支持在应用主机上执行命令，见[本地接入示例](../README.md#在应用中接入)。
 
-本插件通过 `agent-sandbox` SDK 调用 AIO。CubeSandbox SDK 的 `commands.run()` 走 envd，不经过 AIO 的 `shell.py`，不能替代这里的执行路径。
+示例为主代理和通用子代理都注册了检查中间件，并在每次调用结束时关闭 shell 会话。添加其他子代理时，也需要为它们配置中间件。沙箱实例由创建它的应用管理。长期复用集成时，每个实例串行使用一个 shell 会话，应用退出前应等待任务结束并调用 `await integration.aclose()`。
 
-## 配置和路径
+## 检查连接与拦截
 
-- gate 块复用 GateConfig。显式 mapping 不合并环境变量；省略整个 gate 块才读取 DEEPAGENTS_GATE_*。fail_closed 默认 True，Gate 故障或历史截断时拒绝执行；示例保留显式设置。
-- aio.proxy_url 是 CubeProxy 基础地址，不含内嵌凭据、查询参数或片段。其他域名/端口路由通过 aio.route_host 指定。
-- aio.traffic_token 与 aio.traffic_token_file 二选一；不需要流量鉴权时都省略。文件令牌在初始化时读取，不自动热更新。
-- 每条 shell 命令显式在 working_dir 执行。单独 cd 不改变下一条命令的起始目录，cd subdir && ... 在同一条命令内有效。
-- 文件工具建议传完整沙箱绝对路径。DeepAgents 会把显式 foo.txt 规范化成 /foo.txt，送检与执行均遵循它；直接调用低层 backend 时，相对路径才基于 working_dir。省略 glob/grep 的 path 使用 working_dir，显式 / 表示沙箱根目录。
-- 同一实例串行使用一个 shell 会话。要并行执行独立任务，创建不同集成实例及会话。thread_id/session_id 是 Agent 逻辑会话，不等于 sandbox_id 或 shell_session_id。
+需要确认两层检查是否生效时，在创建实例的终端运行下面的命令。如果应用位于其他机器，先在应用机器设置相同的沙箱连接变量，并将令牌路径指向该机器上的文件。将 `MOSS_GATE_URL` 和 `MOSS_GATE_TOKEN_FILE` 换为部署时的值。
 
-## 判定、故障和覆盖范围
+```bash
+export MOSS_GATE_URL=http://127.0.0.1:9100
+export MOSS_GATE_TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/agentgate/auth_token"
+.venv-deepagents/bin/python AgentMoss/integrations/cubesandbox/verify.py
+```
 
-- 外部 Gate Deny：不调用 AIO，历史为 denied。
-- 外部放行、内部 Moss 拒绝：工具返回 AIO 原因及适配器退出码 126，历史为 executed_error，外部判定仍保留 Allow。126 不是 Bash 真实退出码。
-- 正常完成：保留实际输出和退出码。AIO HTTP 403/409/503 不当作成功，409 后还需先处理活动命令。
-- running、硬超时、连接中断或响应损坏：历史为 unknown，backend 停止接收新操作，不自动重试、不切换本地。先查询旧会话并清理，再创建新实例；新会话不意味着旧命令已经停止。
-- 初始化失败时，AIOStartupError 给出 sandbox_id、session_id、cleanup_confirmed 和脱敏失败类型，便于处理可能遗留的会话。
-- 文件工具仍经过外部插件，但 AIO 文件 API 不经过内部 shell.py。直接调用 backend.upload_files/download_files 等接口不经过插件中间件。
-- 外部 Moss 本地同名文件可能产生额外判断。客户端与沙箱的文件系统不共享；backend 的工作目录不构成路径或符号链接的权限隔离。
+命令会创建并关闭一次 AIO shell 会话，在工作目录写入后清理临时文件。输出全部为 `PASS` 表示普通命令可执行，外部规则和沙箱内脚本检查均已生效。
+
+## 路径和执行结果
+
+- **工作目录**　每条命令从 `working_dir` 开始。要切换目录并执行任务，可在同一条命令中使用 `cd subdir && ...`。文件工具请传沙箱内的绝对路径，如 `/home/gem/report.txt`。
+- **拒绝执行**　外部检查拒绝时，命令会停在应用侧。沙箱内的规则拒绝时，工具返回 `AGENTMOSS_DENIED` 和适配器退出码 `126`。权限、连接和检查故障可按[沙箱响应说明](../../cubesandbox/README.md#执行命令)排查。
+- **执行状态未知**　超时或连接中断时，先查询旧 shell 会话和命令状态，再决定是否重新执行，以免重复操作。
+- **文件操作**　注册了中间件的文件工具会经过外部检查。直接调用 AIO 文件接口时，需要由沙箱自身的访问控制保护文件。外部服务与沙箱各自使用本机文件系统。

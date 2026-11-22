@@ -1,254 +1,120 @@
-# AgentMoss DeepAgents 插件
+# Deep Agents 接入 AgentMoss
 
-Moss 负责安全检测并返回判定，Gate 负责接收 Agent 请求、调用 Moss，并保存调用和判定记录。本插件将 DeepAgents 的工具调用发送给 Gate，根据返回的 Allow / Deny 执行或拒绝。
+插件在 Deep Agents 调用工具前，把工具名、参数、当前用户请求和会话历史发给 AgentGate。AgentGate 向 AgentMoss 获取判定。收到 `Allow` 后，工具才会执行。收到 `Deny` 时，Agent 会看到拒绝原因。请将这两个服务部署在可以接收应用数据的环境中。
 
-当前工具参数和模型调用说明按原文送检，Gate/Moss 需作为可信服务部署。
+下面以工具在应用所在机器上执行为例。运行位置由 `backend` 决定。本地模式使用应用进程的系统权限，工作目录只决定命令从哪里开始执行。需要让命令在沙箱里执行时，见 [CubeSandbox 接入](../cubesandbox/README.md)。
 
 ## 安装
 
-需要 Python 3.11 或更新版本，并安装 uv。先获取[项目源码](../../../README.md#快速开始)，
-在仓库根目录为 DeepAgents 应用创建独立环境：
+先按[项目快速开始](../../../README.md#快速开始)启动 AgentMoss 和 AgentGate，并确认一次分析请求可以成功返回。在 Deep Agents 应用所在的机器上，从本仓库根目录执行以下命令。插件要求 Python 3.11 及以上，以下插件要求 Python 3.11 及以上，示例使用 Linux、uv 和 Python 3.12。
 
 ```bash
 uv venv --python 3.12 .venv-deepagents
-uv pip install --python .venv-deepagents/bin/python -e './AgentMoss[deepagents-aio]'
-. .venv-deepagents/bin/activate
+uv pip install --python .venv-deepagents/bin/python './AgentMoss[deepagents-aio]'
+source .venv-deepagents/bin/activate
 ```
 
-该命令会安装插件及 `deepagents-aio` 可选依赖，具体约束见[组件 pyproject.toml](../../pyproject.toml)。
-已有 DeepAgents 应用时，将 `--python` 指向该应用的虚拟环境，并使用 `AgentMoss/` 组件目录的实际路径。
-以上命令适用于 Linux/macOS；Windows 的虚拟环境入口位于 `Scripts/`。
+已有 Deep Agents 应用时，在它的虚拟环境中安装同一个组件即可。`deepagents-aio` 包含本地和沙箱两种执行方式的依赖。AgentGate 服务使用自己的虚拟环境。如果应用曾单独安装过 `agentmoss-deepagents`，请在新的应用环境里按上面的命令安装，避免两个发行包同时提供 `agentmoss_deepagents` 模块。
 
-AgentGate 服务与 DeepAgents 应用应使用独立虚拟环境。两者的 `typing-extensions`
-版本要求不同，通过 HTTP 通信无需安装到同一环境。
+## 连接 AgentGate
 
-如果环境中单独安装过 `agentmoss-deepagents`，先卸载该包，再按上面的方式安装，避免同名模块相互覆盖。
-
-## 连接 Gate
-
-先启动 Gate 和 Moss 服务，步骤见[部署说明](docs/deployment.md)。然后配置 DeepAgents 进程的环境变量：
+在启动应用的终端设置 Gate 地址和令牌文件。以下路径适用于 Linux 上同一用户启动的默认部署。
 
 ```bash
 export DEEPAGENTS_GATE_URL=http://127.0.0.1:9100
-export DEEPAGENTS_GATE_API_TOKEN='你的 Gate API Token'
-export DEEPAGENTS_GATE_FAIL_CLOSED=true
+export DEEPAGENTS_GATE_API_TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/agentgate/auth_token"
+export DEEPAGENTS_GATE_TIMEOUT_SECONDS=30
 ```
 
-已有令牌文件可设置 `DEEPAGENTS_GATE_API_TOKEN_FILE=/path/to/gate_token`，与 `DEEPAGENTS_GATE_API_TOKEN` 二选一。
+应用与 AgentGate 分开部署时，填写应用可以访问的 Gate 地址，以及**应用机器上**存放 Gate 令牌的文件路径。通过环境注入令牌时，改用 `DEEPAGENTS_GATE_API_TOKEN`。两种令牌设置只选一种。示例给一次送检预留 30 秒，请根据服务实际耗时调整。详见[服务与凭据配置](docs/deployment.md)。
 
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `DEEPAGENTS_GATE_ENABLED` | true | 启用检查 |
-| `DEEPAGENTS_GATE_URL` | http://127.0.0.1:9100 | Gate 地址 |
-| `DEEPAGENTS_GATE_API_TOKEN` | 无 | Gate 令牌内容，与令牌文件二选一 |
-| `DEEPAGENTS_GATE_API_TOKEN_FILE` | 无 | Gate 令牌文件路径，与令牌内容二选一 |
-| `DEEPAGENTS_GATE_TIMEOUT_SECONDS` | 5 | 请求超时，单位秒 |
-| `DEEPAGENTS_GATE_FAIL_CLOSED` | true | Gate 故障或会话历史不完整时拒绝执行 |
+## 在应用中接入
 
-默认 `fail_closed=true`：Gate 超时、连接失败、鉴权失败或响应无有效判定时拒绝执行。
-显式设置 `DEEPAGENTS_GATE_FAIL_CLOSED=false` 才启用兼容模式：Gate 故障会记录 Bypass 并继续执行，
-历史截断后也允许使用剩余上下文送检。这会降低保护范围；明确返回的 Deny 始终拦截。
-
-也可复用应用配置：`GateRuntime.load(settings["agentgate"])`。字段使用 `gate_url`、`api_token`、`fail_closed` 等名称，见 [config.py](src/agentmoss_deepagents/config.py)。显式配置不与环境变量合并。
-
-## 配置选择 local / aio backend
-
-CubeSandbox 的完整接入流程见 [AIO 接入说明](docs/cubesandbox.md)。
-
-两种模式都使用 **AgentMossMiddleware → AgentGate → 外部 Moss Server**；只切换工具实际执行的位置。也可以按[手动接入](#手动接入本地执行)的方式创建 Gate 连接和检查组件。
-
-安装命令已包含两种模式所需的依赖。`DeepAgentsIntegration.load()` 接收配置字典，以下为 aio 配置：
+在原有的 `create_deep_agent()` 调用中使用插件提供的 `backend` 和 `middleware`。下面的函数可放进已有应用。首次接入时，也可以将它保存为仓库根目录下的 `deep_agent.py`。调用方传入支持工具调用的 `model`、用于保存对话状态的 `checkpointer`、已存在的工作目录 `workspace`、本次对话编号和用户原文。
 
 ```python
 import asyncio
+from pathlib import Path
+
+from deepagents import create_deep_agent
 from agentmoss_deepagents import DeepAgentsIntegration
 
-integration = await asyncio.to_thread(DeepAgentsIntegration.load, {
-    "backend": "aio",
-    "gate": {
-        "gate_url": "http://127.0.0.1:9100",
-        "api_token_file": "/run/secrets/gate-token",
-        "fail_closed": True,
-    },
-    "aio": {
-        "proxy_url": "http://cubeproxy.example:8080",
-        "sandbox_id": "your-existing-sandbox-id",
-        "working_dir": "/home/gem",
-        "default_timeout": 30,
-        "hard_timeout": 30,
-        # 沙箱未开启流量鉴权时省略此项。
-        "traffic_token_file": "/run/secrets/cube-traffic-token",
-    },
-})
-```
 
-local 改为 `"backend": "local"`、`"local": {"root_dir": workspace, "virtual_mode": False}`，删除 aio 块，gate 块相同。不能同时提供两种 backend 配置。省略 gate 块时才调用原 GateConfig.from_env()；显式 gate 块不合并环境变量。
-
-创建主代理和子代理：
-
-```python
-agent = create_deep_agent(
-    model=model,
-    backend=integration.backend,
-    context_schema=dict,
-    middleware=[integration.middleware],
-    checkpointer=existing_checkpointer,
-    subagents=[{
-        "name": "general-purpose",
-        "description": "通用子代理",
-        "middleware": [integration.middleware],
-    }],
-)
-```
-
-DeepAgents 为声明式子代理配置同一个 backend；每个隔离子代理仍须显式添加本插件中间件。自定义编译好的子代理图需要由应用自己绑定对应 backend 和中间件。
-
-调用 `agent.invoke()` / `agent.ainvoke()` 时，`thread_id` 与 `moss_info.session_id` 使用同一会话编号，参数写法见下方[调用示例](#手动接入本地执行)。应用退出前停止并等待所有图调用，再执行 `await integration.aclose()`。`DeepAgentsIntegration.load()` 是同步初始化入口，可能创建远端 shell 会话，异步应用如上在线程中初始化；初始化本身也应在退出前等待完成。
-
-完整的应用函数见 [local 示例](examples/local.py) 和 [aio 示例](examples/aio.py)，model 和 checkpointer 由应用提供。示例不会创建额外模型客户端，也不负责创建或销毁 CubeSandbox 实例。
-
-### AIO 路由、目录和凭据
-
-- 默认发送 `Host: 8080-<sandbox_id>.cube.app`；其他 AIO 端口/域名可显式设置 `aio.route_host`。proxy_url 是客户端可访问的 CubeProxy HTTP(S) 地址。
-- `traffic_token` / `traffic_token_file` 二选一，对应 `e2b-traffic-access-token`；Gate 凭据仍在 gate 块，两者不能混用。文件令牌在初始化时读取，不随每个命令重新加载。
-- working_dir 是沙箱内的绝对 POSIX 路径。每个命令显式使用该目录并启用 strict；单独 `cd` 不会改变下一条请求的起始目录，`cd subdir && ...` 在当前命令内有效。环境变量仍可属于持久 shell 会话；不承诺会话重建后保留环境。
-- DeepAgents 文件工具会先把显式路径规范化为根路径，例如 `foo.txt` 变成 `/foo.txt`，本插件在送检和执行中遵循相同规则；建议工具调用使用完整的沙箱绝对路径。只有直接调用低层 backend 方法时，普通相对路径才基于 working_dir。省略 glob/grep 的 path 使用 working_dir，显式 `/` 表示沙箱根目录。不通过客户端文件系统解析路径或符号链接，working_dir 也不是权限隔离根目录。
-- 每实例创建独立 shell 会话并串行提交；主/子代理可共用。要并行执行独立任务，应用创建独立集成实例。更换沙箱不会自动清空逻辑会话历史；需要新会话时同时更换 thread_id/session_id。
-
-### 两层检查与执行结果
-
-外部 Gate Deny 时不会调用 AIO；外部 Allow 后，已接入 Moss 的镜像仍可拒绝命令。后者作为工具执行错误返回，历史保留外部 Allow，不冒充外部 Gate Deny。
-
-正常完成返回 Bash 真实退出码。AIO HTTP 403、409、503 返回适配器生成的退出码 126，并保留脱敏原因；126 不是 Bash 真实执行结果。409 表明可能已有活动命令，因此该 backend 也停止接收后续操作，需先检查并处理旧会话。不能只看 ToolMessage.status，插件通过结构化 exit_code 记录成功或失败。
-
-命令或文件操作响应丢失、网络超时、连接中断、running/未完成或硬超时不能当作成功：工具结果报告错误或 unknown，会话禁止继续提交操作，且插件不自动重试或切换到本地执行。应用先查询旧 shell 会话、确认旧命令状态并清理旧会话，再创建新实例；仅创建新会话并不意味着旧命令已经停止。关闭失败要保留沙箱和 shell_session_id 以便人工处理。若初始化失败，`AIOStartupError` 提供 `sandbox_id`、`session_id`、`cleanup_confirmed` 和脱敏的失败类型；清理未确认时必须先检查该会话，不能假定已关闭。
-
-读取、编辑、目录列表、grep 和二进制传输直接使用 `agent-sandbox` 文件 API；删除调用一次 AIO shell。glob 直接复用 DeepAgents `BaseSandbox.glob`，保持与模型收到的工具说明一致，包括递归文件名匹配和 `{a,b}` 模式。
-
-`write_file` 使用官方 SDK 的 `/v1/code/execute` Python 接口，在沙箱内执行固定的独占创建操作，拒绝覆盖已有文件；多个实例并发创建同一路径时也只能有一个成功。文件内容作为数据传递，不作为 Python 代码执行，也不上传临时文件。该接口使用 `stateful=false`，要求沙箱提供 Python 代码执行能力；超时取 default_timeout、hard_timeout 和 300 秒的最小值并向下取整，配置不足 1 秒时返回错误。收到不确定或损坏的执行结果仍停止当前会话，不自动重试。
-
-删除目录会递归删除其内容，送 Gate 的合成命令与 AIO 执行共用 `rm -r -- <路径>`。文本读取保留当前页的源文件行号；空白页不表示整文件为空，超出文件末尾的非零 offset 返回读取错误。
-
-图片、音视频、PDF 和 PowerPoint 等媒体文件通过下载 API 读取原始字节，并以 Base64 交给 DeepAgents；不会按文本行分页。其他扩展名的文件遇到文本解码错误时也按二进制读取。单次媒体读取最多 20 MiB，超过时返回明确错误并关闭下载流，后续操作仍可继续。
-
-异步方法复用 DeepAgents 的 `SandboxBackendProtocol`。通过图调用工具时，中间件会等待已取消的工具执行结束；直接调用 backend 异步方法遵循 DeepAgents 的默认取消行为，取消等待不会终止工作线程。`integration.aclose()` 仍会等待正在进行的 SDK 请求结束后再关闭 shell 和 HTTP 连接。
-
-AIO 的 glob/grep 达到上游搜索等待期限后，图调用仍会等本次工具已提交的 SDK 请求结束，再保存历史状态；响应丢失记为 `unknown`。工具调用结束后才开始的排队请求会被阻止提交，因此搜索超时后的返回可能晚于上游等待期限。
-
-grep 单次最多返回 10000 条匹配；超过服务端或调用方的结果上限时，保留截断提示，可收窄搜索条件继续查询。grep 的 HTTP 400/422 参数拒绝会作为普通工具错误返回，后续操作仍可继续。
-
-文件 API 和用于独占创建的代码 API 不经过沙箱内部 shell.py 的检查，但 DeepAgents 的文件工具调用仍先通过插件送 Gate。直接调用 backend.upload_files/download_files 等方法不经过工具中间件，不能据此认为已完成外部送检。
-
-外部 Moss Server 无法仅凭路径读取沙箱里的脚本，本插件不做文件共享或内容上传。沙箱脚本检测依赖部署时使用已接入 Moss 的 AIO 镜像；镜像内部集成与本插件独立。外部 Moss 若存在同名本地文件可能产生额外判断，此限制尚未解决。`integration.status()` 只展示 Gate 策略和 backend 会话状态，不证明镜像内 Moss 已启用。
-
-## 手动接入（本地执行）
-
-分别创建 `GateRuntime`、`LocalShellBackend` 和 `AgentMossMiddleware`，再传给 `create_deep_agent()`。以下使用应用已有的 `model`、`workspace` 和 `existing_checkpointer`：
-
-```python
-from deepagents import create_deep_agent
-from deepagents.backends.local_shell import LocalShellBackend
-from agentmoss_deepagents import AgentMossMiddleware, GateRuntime
-
-runtime = GateRuntime.load()
-backend = LocalShellBackend(root_dir=workspace)
-middleware = AgentMossMiddleware(runtime, backend)
-
-agent = create_deep_agent(
-    model=model,
-    backend=backend,
-    context_schema=dict,
-    middleware=[middleware],
-    checkpointer=existing_checkpointer,
-    subagents=[{
-        "name": "general-purpose",
-        "description": "通用 subagent",
-        "middleware": [middleware],
-    }],
-)
-
-async def chat(session_id: str, user_text: str):
-    return await agent.ainvoke(
-        {"messages": [("user", user_text)]},
-        {"configurable": {"thread_id": session_id}},
-        context={"moss_info": {
-            "session_id": session_id,
-            "user_prompt": user_text,
-        }},
+async def ask(model, checkpointer, workspace, session_id, user_text):
+    integration = await asyncio.to_thread(
+        DeepAgentsIntegration.load,
+        {"backend": "local", "local": {"root_dir": str(Path(workspace).resolve())}},
     )
+    try:
+        agent = create_deep_agent(
+            model=model,
+            checkpointer=checkpointer,
+            backend=integration.backend,
+            middleware=[integration.middleware],
+            context_schema=dict,
+            subagents=[{
+                "name": "general-purpose",
+                "description": "通用子代理",
+                "middleware": [integration.middleware],
+            }],
+        )
+        return await agent.ainvoke(
+            {"messages": [("user", user_text)]},
+            {"configurable": {"thread_id": session_id}},
+            context={"moss_info": {"session_id": session_id, "user_prompt": user_text}},
+        )
+    finally:
+        await integration.aclose()
 ```
 
-- **每个隔离 subagent 都要添加该中间件，包括 general-purpose。** 主agent 的自定义 Middleware 不会自动传给隔离 subagent。参考上述代码例子，在 `subagents` 中为每个 subagent 配置 `middleware=[middleware]`。
-- 同一聊天使用相同 `session_id`，与 `thread_id` 一致；每次调用新建 `moss_info` 字典。Gate 会话名为 `deepagents:<session_id>`。
-- 支持 LocalShellBackend 和本包的 AIOSandboxBackend；传给插件和实际工具的 backend 必须一致。
+### 发起第一次工具调用
 
-同步调用使用 `agent.invoke()`，参数相同。
-
-## 自定义工具
-
-### 定义和注册
-
-用 `@tool` 定义工具，参数标注类型，文档字符串说明用途：
+如果已经有模型和 checkpointer，可直接调用上面的 `ask()`。从零开始时，可用 Deep Agents 自带的 Anthropic 适配器，并把下面的入口追加到 `deep_agent.py` 末尾。
 
 ```python
-from langchain.tools import tool
+if __name__ == "__main__":
+    import os
+    from uuid import uuid4
 
-@tool
-def add_numbers(a: int, b: int) -> int:
-    """计算两个整数的和。"""
-    return a + b
+    from langchain_anthropic import ChatAnthropic
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    workspace = Path("agent-workspace").resolve()
+    workspace.mkdir(exist_ok=True)
+    session_id = uuid4().hex
+    model = ChatAnthropic(model=os.environ["ANTHROPIC_MODEL"])
+    result = asyncio.run(ask(
+        model, InMemorySaver(), workspace, session_id,
+        "请调用 execute 执行 pwd，并告诉我返回的工作目录。",
+    ))
+    print(result["messages"][-1].text)
+    print(f"Gate 会话编号为 deepagents:{session_id}")
 ```
 
-在上述接入示例的 `create_deep_agent()` 中增加 `tools=[add_numbers]`。如果 subagent 也需要这个工具，在对应配置中同样添加 `tools`：
+在已经激活应用环境并设置 Gate 变量的 Bash 终端运行。输入你账户可用、支持工具调用的 Anthropic 模型 ID 及其 API Key。Key 输入时不会显示。
 
-```python
-agent = create_deep_agent(
-    model=model,
-    backend=backend,
-    context_schema=dict,
-    tools=[add_numbers],
-    middleware=[middleware],
-    checkpointer=existing_checkpointer,
-    subagents=[{
-        "name": "general-purpose",
-        "description": "通用 subagent",
-        "tools": [add_numbers],
-        "middleware": [middleware],
-    }],
-)
+```bash
+read -r -p 'Anthropic 模型 ID：' ANTHROPIC_MODEL
+read -r -s -p 'Anthropic API Key：' ANTHROPIC_API_KEY && echo
+export ANTHROPIC_MODEL ANTHROPIC_API_KEY
+python deep_agent.py
 ```
 
-模型调用 `add_numbers` 时，插件先把工具名和参数送给 Gate；Allow 后执行函数，Deny 时不执行。工具内部调用的其他函数不会被自动拆成独立的送检请求。
+如果模型按请求调用了 `execute`，工具会返回本机的 `agent-workspace` 绝对路径。用程序输出的会话编号在 AgentGate 看板找到这条记录，核对命令和判定。登录方式见 [AgentGate 使用说明](../../../AgentGate/README.md)。
 
-自定义工具可以同步调用或 `await` 一个已绑定相同 backend 和中间件的子图，并传入 `context=runtime.context`。子图中的工具仍逐次送检，同层工具串行执行。工具返回前应等待子调用完成；继承了旧上下文、却在父工具结束后才开始的子调用会被拒绝。需要审批暂停与恢复的委派仍使用标准 `task` 工具。
+### 在应用中复用
 
-### 传给 Moss 的参数
+`InMemorySaver` 只保留当前进程中的状态。已有应用可传入自己的持久化 checkpointer。继续一段对话时使用同一个 `session_id`，同一会话的调用按顺序执行。每次调用都由应用新建 `moss_info`，其中的 `session_id` 与 `thread_id` 相同。
 
-普通自定义工具无需手填 `action_type` 和 `action_detail`。例如调用 `add_numbers(a=1, b=2)`，插件将工具名和参数发给 Gate，Gate 转换成 Moss 的输入：
+主代理和每个隔离的子代理都要注册中间件，包括默认的 `general-purpose`。应用自行编译的子代理图也需要绑定对应的 backend 和中间件。
 
-```json
-{
-  "a_next": {
-    "action_type": "add_numbers",
-    "action_detail": "{\"a\":1,\"b\":2}"
-  }
-}
-```
+长期运行的服务可以在启动时创建一次 integration 和 agent，复用到退出前。先等待进行中的请求结束，再调用 `await integration.aclose()`。示例代码见[本地执行](examples/local.py)和[沙箱执行](examples/aio.py)。
 
-会话编号、用户输入和调用历史由插件补充，`cwd` 取 backend 的工作目录。工具返回值不写入 `action_detail`。
+## 自定义工具与审批
 
-目前只对 `execute`、`read_file`、`write_file` 等已知工具内置转换。其他工具默认使用“工具名＋参数 JSON”；例如自定义 `run_command(cmd=...)` 不会自动按 `bash` 送检，需要另做适配。
+将自定义工具传入 `create_deep_agent(tools=[...])` 后，该工具和内置工具一样经过中间件。需要它的子代理也要在自己的 `tools` 中注册。插件把 `execute` 转成 `bash` 动作，把 `read_file` 转成 `read` 动作。普通自定义工具按工具名和参数 JSON 送检，函数内部的操作不会单独送检。直接调用 backend 方法也不会触发中间件。
 
-## 使用约定
-
-- `moss_info` 由应用生成，调用历史由插件维护，不直接接受外部请求传入这两项。
-- 同一会话的请求按顺序执行，等上一个请求结束后再开始下一个。
-- 如果有修改工具参数的 Middleware，将它放在 AgentMossMiddleware 之前。
-- 使用 `DeepAgentsIntegration.load()` 时，等请求结束后调用 `await integration.aclose()`，清理 backend 和 Gate 连接；手动管理 `GateRuntime` 时调用 `await runtime.aclose()` 关闭 Gate 连接。
-
-## 审批暂停与恢复
-
-配置应用的 checkpointer 和 DeepAgents `interrupt_on` 后，可以用原生 `Command(resume=...)` 恢复审批。恢复时仍新建 `moss_info` 字典，保持原来的 `session_id`、`thread_id` 和该轮原始 `user_prompt`；插件从 checkpoint 恢复当前轮次，不把审批恢复计为一次新用户输入。
+使用 Deep Agents 的人工审批时，为 agent 配置 checkpointer 和需要审批的工具，例如 `interrupt_on={"execute": True}`。恢复调用时，继续使用原来的会话编号和本轮用户原文，为 `moss_info` 创建新字典。以下为单个待审批动作的恢复参数。
 
 ```python
 from langgraph.types import Command
@@ -256,42 +122,18 @@ from langgraph.types import Command
 result = await agent.ainvoke(
     Command(resume={"decisions": [{"type": "approve"}]}),
     {"configurable": {"thread_id": session_id}},
-    context={"moss_info": {"session_id": session_id, "user_prompt": original_user_text}},
+    context={"moss_info": {"session_id": session_id, "user_prompt": user_text}},
 )
 ```
 
-以上为默认批量审批的单个待审批调用；多个调用需按 SDK 的顺序提供对应决定。审批人修改工具名称或参数后，插件检查修改后的动作，Gate Deny 仍然阻止执行。子代理暂停时，父 `task` 可记录为 `interrupted` 并恢复委派；这不会放开普通工具的执行 ID 去重检查。
+多个待审批动作按 SDK 的顺序逐个提供决定。审批修改过的工具参数也要经过 Gate 检查。能改写工具参数的中间件，以及按调用审批的 `HumanInTheLoopMiddleware(interrupt_mode="per_call", ...)`，都应排在插件中间件之前。
 
-如果显式使用 `HumanInTheLoopMiddleware(interrupt_mode="per_call", ...)`，将其放在 `AgentMossMiddleware` 之前，保证审批和参数修改先完成，再进入 Gate 检查。该模式按 SDK 返回的 interrupt ID 提交决定。
+## 连接故障与会话历史
 
-## 会话历史与升级
+Gate 请求默认在 5 秒后超时，可用 `DEEPAGENTS_GATE_TIMEOUT_SECONDS` 调整。默认 `DEEPAGENTS_GATE_FAIL_CLOSED=true`，连接失败、鉴权失败或响应缺少有效判定时会阻止执行。显式设为 `false` 会在 Gate 故障时放行。Gate 已返回的 `Deny` 始终生效。
 
-同一会话的主代理和子代理共用调用历史，由应用已有的 checkpointer 保存。历史按会话组织，不记录主代理与子代理的身份关系。
+插件与应用的 checkpointer 一起保存工具调用历史，默认最多保留 200 个动作、20 次用户输入和 32 KiB 历史数据。历史被裁剪后，默认策略会停止后续工具调用。遇到 `history_truncated`，请先核对该会话的审计记录和已经执行的动作。使用 `fail_closed=false` 时，后续判定只能参考保留下来的历史。
 
-持久化历史最多保留 200 条动作、20 次用户输入和 32 KiB；应用可配置更小的窗口。运行时和 checkpoint 使用相同的窗口规则，稳定轮次顺序和裁剪边界防止旧快照恢复已淘汰的记录。超限时整条移除历史记录并标记 `truncated`，当前送检参数不会因此截短。`history_bytes` 必须容纳会话标识和裁剪元数据；过小会在请求开始时明确报错。同一次根调用另行保存已开始的执行 ID，历史被移除后，SDK 节点重试也不会再次执行相同工具调用。这份去重集合只在本次调用内有效，不写入 checkpoint；跨进程恢复仍需应用核对已发生的副作用。
+从使用 v3/v4 历史格式的旧版本升级前，先结束活动请求并备份 checkpoint。已完成的会话会自动转换为 v5。有 `attempted`、`unknown` 或 `interrupted` 记录的会话，需要先核对未完成的调用。回退到旧版本时使用升级前的备份。
 
-插件显式提供 `action_history` 后，Gate 会使用该列表，不会用 SQLite 历史补全。
-当前 Gate/Moss 不会因 `metadata.history_truncated` 自动恢复早期上下文，不能保证识别已被裁掉的攻击链。
-因此默认 `fail_closed=true` 时，插件在送检前拒绝历史已截断的后续工具调用，记录
-`Deny` / `source=history_truncated`，不调用 Gate 或执行后端；从 checkpoint 恢复时同样生效。
-长会话达到上述任一上限后可能停止工具执行。应用应先核对完整审计记录和已发生的副作用，
-不要自动清空历史、切换会话编号或关闭 `fail_closed` 来绕过拒绝。
-显式设为 `false` 时，插件继续发送剩余历史及 `history_truncated=true`，判定仅覆盖可见上下文。
-
-会话历史使用 schema=5。已结束的 v3/v4 历史会自动转换，保留动作内容和执行 ID；升级前先结束请求，确认 checkpoint 没有待执行任务并备份。含 `attempted`、`unknown` 或 `interrupted` 的旧历史需要先人工核对，插件会拒绝自动转换。旧插件不能读取新格式，回退时使用升级前备份或新会话。
-
-## 测试
-
-完成上述安装后，在仓库根目录使用 DeepAgents 应用环境执行：
-
-```bash
-uv pip install --python .venv-deepagents/bin/python pytest pytest-asyncio
-.venv-deepagents/bin/python -m pytest \
-  -c AgentMoss/integrations/deepagents-plugin/pyproject.toml \
-  AgentMoss/integrations/deepagents-plugin/tests -q
-```
-
-`AgentMoss/` 组件的默认测试命令不会收集这里的用例。离线测试使用模拟 HTTP 服务和真实工具调用；
-真实 AIO 用例默认跳过，环境变量和服务要求见 [test_aio_live.py](tests/test_aio_live.py)。
-
-[官方 Middleware 文档](https://docs.langchain.com/oss/python/langchain/middleware/custom)
+如需把设置放进应用配置，可在 `DeepAgentsIntegration.load()` 的配置字典中传入 `gate`，字段包括 `gate_url`、`api_token_file`、`timeout_seconds` 和 `fail_closed`。传入 `gate` 后，插件只读取该字典。省略它才读取 `DEEPAGENTS_GATE_*` 环境变量。完整选项见[插件配置](src/agentmoss_deepagents/config.py)。
