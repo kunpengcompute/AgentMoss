@@ -127,8 +127,12 @@ def _cleanup_group(
                 continue
     total = sum(p.stat().st_size for p in files if p.exists())
     if max_bytes > 0:
-        for p in files:
+        # 至少保留最新 1 个归档：单个文件本身超过上限时不能删掉唯一归档
+        # （2026-11 修，N1）；目录允许暂时超限。
+        for idx, p in enumerate(files):
             if total <= max_bytes:
+                break
+            if idx == len(files) - 1:
                 break
             try:
                 size = p.stat().st_size

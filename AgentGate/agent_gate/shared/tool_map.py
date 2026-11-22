@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,8 @@ _READ_TOKENS = frozenset({
 })
 
 _CONFIG_ENV = "AGENT_GATE_TOOL_NAME_MAP"
+#: 配置文件路径覆盖（默认 ~/.config/agentgate/tool_name_map.json）
+_FILE_ENV = "AGENT_GATE_TOOL_NAME_MAP_FILE"
 
 _tokenize_re = re.compile(r"[^a-zA-Z0-9]+")
 _camel_re = re.compile(r"([a-z0-9])([A-Z])")
@@ -115,26 +118,56 @@ def _tokenize(name: str) -> set[str]:
     return {p for p in _tokenize_re.split(split.lower()) if p}
 
 
-def load_configured_map() -> dict[str, str]:
-    """读取显式配置（JSON 对象字符串）。非法配置只告警，不影响默认行为。"""
-    raw = (os.getenv(_CONFIG_ENV) or "").strip()
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError):
-        logger.warning("%s 不是合法 JSON，已忽略", _CONFIG_ENV)
-        return {}
+def _merge_map(result: dict[str, str], data: object, source: str) -> None:
+    """把一份 JSON 对象合并进结果（大小写不敏感，非字符串条目跳过）。"""
     if not isinstance(data, dict):
-        logger.warning("%s 必须是 JSON 对象，已忽略", _CONFIG_ENV)
-        return {}
-    result: dict[str, str] = {}
+        logger.warning("%s 必须是 JSON 对象，已忽略", source)
+        return
     for k, v in data.items():
         if not isinstance(k, str) or not isinstance(v, str):
             continue
         key, val = k.strip().lower(), v.strip()
         if key and val:
             result[key] = val
+
+
+def config_file_path() -> Path:
+    """工具名映射配置文件路径。
+
+    默认与 auth_token 同目录：``~/.config/agentgate/tool_name_map.json``
+    （``XDG_CONFIG_HOME`` 生效）；``AGENT_GATE_TOOL_NAME_MAP_FILE`` 可覆盖。
+    客户只需编辑这个 JSON 文件，不需要设置环境变量。
+    """
+    override = (os.getenv(_FILE_ENV) or "").strip()
+    if override:
+        return Path(override)
+    xdg = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(xdg) / "agentgate" / "tool_name_map.json"
+
+
+def load_configured_map() -> dict[str, str]:
+    """读取显式配置：**配置文件优先**，环境变量 ``AGENT_GATE_TOOL_NAME_MAP`` 覆盖同名项。
+
+    非法内容只告警，不影响默认行为（内置映射 / 启发式）。
+    """
+    result: dict[str, str] = {}
+
+    # 1) 配置文件（客户日常维护方式）
+    path = config_file_path()
+    try:
+        if path.is_file():
+            _merge_map(result, json.loads(path.read_text(encoding="utf-8")), str(path))
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("工具名映射配置文件读取失败（%s）: %s", path, exc)
+
+    # 2) 环境变量（显式覆盖，便于临时联调）
+    raw = (os.getenv(_CONFIG_ENV) or "").strip()
+    if raw:
+        try:
+            _merge_map(result, json.loads(raw), _CONFIG_ENV)
+        except (ValueError, TypeError):
+            logger.warning("%s 不是合法 JSON，已忽略", _CONFIG_ENV)
+
     return result
 
 

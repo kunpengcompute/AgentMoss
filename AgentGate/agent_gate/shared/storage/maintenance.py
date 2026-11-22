@@ -2,6 +2,8 @@
 
 触发条件：主库条数达到 ``AGENT_GATE_ARCHIVE_THRESHOLD``（默认 10 万），
 或主库字节数达到 ``AGENT_GATE_ARCHIVE_THRESHOLD_MB``（默认 512MB）。
+**清理与归档解耦（2026-11）**：只要配置了清理上限（大小或天数），每次维护都执行；
+低于阈值 / 本次未归档时也会清，否则「调小上限后旧归档永不删除」。
 顺序（**不能颠倒**）：
 
 1. 先把最老的记录归档进本地压缩文件（JSONL + gzip，仍可 zcat 查）；
@@ -35,7 +37,8 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
         return {"archived": 0, "file": "", "skipped": "running"}
     _running = True
     result = {"archived": 0, "file": "", "skipped": "error",
-              "proxy_archived": 0, "proxy_file": "", "proxy_cleanup": {}}
+              "proxy_archived": 0, "proxy_file": "",
+              "archive_cleanup": {}, "proxy_cleanup": {}}
     threshold = keep = records_at_check = None
     review = vacuum = "not-run"
     vacuum_sqlite_errorcode = vacuum_sqlite_errorname = None
@@ -68,7 +71,33 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
         threshold_bytes = sp.archive_threshold_bytes()
         keep = sp.archive_keep_records()
         keep_bytes = sp.archive_keep_bytes()
+
+        # 清理与归档解耦（2026-11 修）：只要配置了清理上限（大小或天数），
+        # 每次维护都执行——不能只在「本次真的归档了」之后才清。否则主库低于
+        # 归档阈值时，已超限的归档文件永远不会被删除（用户调小上限/旧归档堆积）。
+        def _run_cleanup() -> dict:
+            try:
+                from .archive import cleanup_archives
+
+                c = cleanup_archives(
+                    sp.archive_max_bytes(), sp.archive_max_age_days(),
+                    sp.proxy_archive_max_bytes(), sp.proxy_archive_max_age_days(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("归档清理失败: {}", exc)
+                return {}
+            result["archive_cleanup"] = c.get("tool", c)
+            result["proxy_cleanup"] = c.get("proxy", {})
+            if c.get("deleted", 0) > 0:
+                logger.info(
+                    "归档清理: 删除 {} 个旧归档（tool {} / proxy {}）",
+                    c["deleted"], c.get("tool", {}).get("deleted", 0),
+                    c.get("proxy", {}).get("deleted", 0),
+                )
+            return c
+
         if threshold <= 0 and threshold_bytes <= 0:
+            _run_cleanup()
             result["skipped"] = "disabled"
             return result
 
@@ -79,6 +108,11 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
         count_hit = threshold > 0 and records_at_check >= threshold
         bytes_hit = threshold_bytes > 0 and total_bytes >= threshold_bytes
         if not count_hit and not bytes_hit:
+            cleanup = _run_cleanup()
+            logger.info(
+                "存储维护: 未达归档阈值（{} 条 / {} 字节），跳过归档；清理 {} 个",
+                records_at_check, total_bytes, cleanup.get("deleted", 0),
+            )
             result["skipped"] = "below-threshold"
             return result
 
@@ -88,6 +122,7 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
 
         archived, file_path = archive_tool_calls(keep, keep_bytes)
         if archived <= 0:
+            _run_cleanup()
             result["skipped"] = "nothing-to-archive"
             return result
 
@@ -114,20 +149,9 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
             review = type(exc).__name__
 
         # 4) 清理老的归档文件（tool_calls-* 与 proxy_events-* 各按自己的大小/天数配置）
-        try:
-            from .archive import cleanup_archives
+        _run_cleanup()
 
-            cleanup = cleanup_archives(
-                sp.archive_max_bytes(), sp.archive_max_age_days(),
-                sp.proxy_archive_max_bytes(), sp.proxy_archive_max_age_days(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("归档清理失败: {}", exc)
-            cleanup = {"deleted": 0, "tool": {}, "proxy": {}}
-
-        result.update(archived=archived, file=file_path, skipped="",
-                      archive_cleanup=cleanup.get("tool", cleanup),
-                      proxy_cleanup=cleanup.get("proxy", {}))
+        result.update(archived=archived, file=file_path, skipped="")
         return result
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {str(exc)[:160]}"

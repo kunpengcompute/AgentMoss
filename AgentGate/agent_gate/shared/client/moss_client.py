@@ -188,7 +188,18 @@ class MossClient:
         )
         # timeout 默认 100s：需覆盖 AgentMoss 总超时（90s）+ 余量，避免 AgentMoss
         # 还在分析时被 AgentGate 抢断后 fail-closed 误杀。
-        self._timeout = timeout if timeout is not None else moss_cfg.get("timeout", 100.0)
+        # 可用 AGENT_GATE_MOSS_TIMEOUT（秒）覆盖，与 TS 版 AGENT_GATE_MOSS_TIMEOUT_MS 对齐。
+        env_timeout = os.environ.get("AGENT_GATE_MOSS_TIMEOUT", "")
+        try:
+            env_timeout_val = float(env_timeout) if env_timeout else None
+        except ValueError:
+            env_timeout_val = None
+        self._timeout = (
+            timeout
+            if timeout is not None
+            else (env_timeout_val if env_timeout_val and env_timeout_val > 0
+                  else moss_cfg.get("timeout", 100.0))
+        )
         # max_retries 默认 0：AgentMoss 内部已有重试，AgentGate 这层不再重试，
         # 否则单次失败会翻倍耗时。用显式 None 判断避免 0 被 `or` 当 falsy。
         self._max_retries = (
