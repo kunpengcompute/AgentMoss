@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agent_gate.v1.server import security as sp
+from agent_gate.shared.server import security as sp
 
 ROOT = Path(__file__).resolve().parents[3]
 CASES = json.loads((ROOT / "tests" / "fixtures" / "security_cases.json").read_text(encoding="utf-8"))

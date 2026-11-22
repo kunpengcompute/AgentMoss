@@ -31,7 +31,12 @@ except OSError:
 """
     if empty_fd:
         script += "fd = os.open(os.devnull, os.O_RDONLY)\nos.dup2(fd, 3)\n"
-    script += "main(['server', '--host', '127.0.0.1', '--port', '0'])\n"
+    # 基线 CLI 的 main() 读 sys.argv（场景仓同步后与基线一致）。
+    script += (
+        "import sys\n"
+        "sys.argv = ['agent_gate', 'server', '--host', '127.0.0.1', '--port', '0']\n"
+        "main()\n"
+    )
     proc = subprocess.Popen(
         [sys.executable, "-c", script], env=env, cwd=tmp_path,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,

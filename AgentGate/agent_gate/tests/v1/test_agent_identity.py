@@ -22,7 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 TEST_DB_PATH = "/tmp/agent_gate_test_identity.db"
-MOSS_PATCH = "agent_gate.v1.client.moss_client.MossClient"
+MOSS_PATCH = "agent_gate.shared.client.moss_client.MossClient"
 
 MOSS_ALLOW = {
     "decision": "Allow",
@@ -44,8 +44,8 @@ def clean_db():
     is registered — leaving a warm cache across tests would silently turn a
     later request into a no-op.
     """
-    import agent_gate.v1.storage.db as db_module
-    from agent_gate.v1.server.routes import reset_cache
+    import agent_gate.shared.storage.db as db_module
+    from agent_gate.shared.server.routes import reset_cache
 
     def _remove():
         for suffix in ("", "-wal", "-shm"):
@@ -66,9 +66,9 @@ def clean_db():
 
 @pytest.fixture
 def client():
-    from agent_gate.v1.config import reload_config
-    from agent_gate.v1.server.app import create_app
-    from agent_gate.v1.storage.db import get_db
+    from agent_gate.shared.config import reload_config
+    from agent_gate.shared.server.app import create_app
+    from agent_gate.shared.storage.db import get_db
 
     os.environ["AGENT_GATE_STORAGE_DB_PATH"] = TEST_DB_PATH
     reload_config()

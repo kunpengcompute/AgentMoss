@@ -6,8 +6,8 @@ agent_id，AgentMoss 会把它记在链路径里供取证/展示。
 """
 from __future__ import annotations
 
-from agent_gate.v1.storage.db import Database
-from agent_gate.v1.storage.repository import Repository
+from agent_gate.shared.storage.db import Database
+from agent_gate.shared.storage.repository import Repository
 
 
 def _record(n: int = 0):

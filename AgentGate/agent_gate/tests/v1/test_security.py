@@ -25,8 +25,8 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agent_gate.v1.server import security as sp
-from agent_gate.v1.server.app import create_app
+from agent_gate.shared.server import security as sp
+from agent_gate.shared.server.app import create_app
 
 TEST_DB_PATH = "/tmp/agent_gate_security_test.db"
 GOOD_TOKEN = "test-token-0123456789abcdef"
@@ -49,9 +49,9 @@ def auth_on(monkeypatch):
 @pytest.fixture
 def client(monkeypatch, auth_on):
     monkeypatch.setenv("AGENT_GATE_STORAGE_DB_PATH", TEST_DB_PATH)
-    from agent_gate.v1.config import reload_config
+    from agent_gate.shared.config import reload_config
     reload_config()
-    from agent_gate.v1.storage.db import get_db
+    from agent_gate.shared.storage.db import get_db
     db = get_db(TEST_DB_PATH)
     db.init_schema()
     return TestClient(create_app())
@@ -79,7 +79,7 @@ class TestDefaults:
 
         安全靠鉴权兜（监听 0.0.0.0 + 无凭证 401），不靠改监听地址。
         """
-        from agent_gate.v1.config import Config
+        from agent_gate.shared.config import Config
         assert Config().server["host"] == "0.0.0.0"
 
     def test_cli_host_default_is_unchanged(self):
@@ -243,9 +243,9 @@ class TestAgentBinding:
         monkeypatch.delenv("AGENT_GATE_AUTH_TOKEN_FILE", raising=False)
         monkeypatch.delenv("AGENT_GATE_AUTH_TOKEN_FD", raising=False)
         sp.reset_counters()
-        from agent_gate.v1.config import reload_config
+        from agent_gate.shared.config import reload_config
         reload_config()
-        from agent_gate.v1.storage.db import get_db
+        from agent_gate.shared.storage.db import get_db
         get_db(TEST_DB_PATH).init_schema()
 
         client = TestClient(create_app())
@@ -258,7 +258,7 @@ class TestAgentBinding:
     def test_matched_agent_type_passes(self, client, monkeypatch):
         monkeypatch.setenv("AGENT_GATE_AGENT_TOKENS", AGENT_TOKENS)
         sp.reset_counters()
-        with patch("agent_gate.v1.client.moss_client.MossClient") as mock_cls:
+        with patch("agent_gate.shared.client.moss_client.MossClient") as mock_cls:
             mock_cls.return_value.analyze = AsyncMock(return_value={
                 "decision": "Allow", "reason": "ok", "risk_level": "low",
                 "risk_type": "safe", "violated_layers": [], "confidence": 90,
@@ -274,7 +274,7 @@ class TestAgentBinding:
     def test_global_token_may_claim_any_agent(self, client, monkeypatch):
         monkeypatch.setenv("AGENT_GATE_AGENT_TOKENS", AGENT_TOKENS)
         sp.reset_counters()
-        with patch("agent_gate.v1.client.moss_client.MossClient") as mock_cls:
+        with patch("agent_gate.shared.client.moss_client.MossClient") as mock_cls:
             mock_cls.return_value.analyze = AsyncMock(return_value={
                 "decision": "Allow", "reason": "ok", "risk_level": "low",
                 "risk_type": "safe", "violated_layers": [], "confidence": 90,
@@ -296,7 +296,7 @@ class TestAgentDataScope:
     """
 
     def _seed(self):
-        from agent_gate.v1.storage.repository import Repository
+        from agent_gate.shared.storage.repository import Repository
         repo = Repository()
         a1 = repo.get_or_create_agent("opendesk", "host-a", "1.0")
         a2 = repo.get_or_create_agent("qwenpaw", "host-b", "1.0")
@@ -462,9 +462,9 @@ def ws_client(monkeypatch):
     monkeypatch.delenv("AGENT_GATE_AUTH_TOKEN_FILE", raising=False)
     monkeypatch.delenv("AGENT_GATE_AUTH_TOKEN_FD", raising=False)
     sp.reset_counters()
-    from agent_gate.v1.config import reload_config
+    from agent_gate.shared.config import reload_config
     reload_config()
-    from agent_gate.v1.storage.db import get_db
+    from agent_gate.shared.storage.db import get_db
     get_db(TEST_DB_PATH).init_schema()
     return TestClient(create_app())
 
@@ -528,7 +528,7 @@ class TestLimits:
         assert r.status_code == 413
 
     def test_rate_limit_429(self, client, monkeypatch):
-        from agent_gate.v1.server import app as app_module
+        from agent_gate.shared.server import app as app_module
         monkeypatch.setattr(app_module, "_limiter", app_module._RateLimiter(qps=1))
         codes = [client.get("/api/v1/tool_calls", headers=_h()).status_code for _ in range(6)]
         assert 429 in codes
@@ -576,7 +576,7 @@ class TestLimits:
     def test_pooled_limiter_counts_and_releases(self):
         """计数闸门：拿到就能进，满了一律拒绝，release 后恢复。"""
         import asyncio
-        from agent_gate.v1.server.app import _PooledLimiter
+        from agent_gate.shared.server.app import _PooledLimiter
         lim = _PooledLimiter()
 
         async def scenario():
@@ -622,12 +622,12 @@ class TestFilePermissions:
 
 class TestMossClientAuth:
     def test_reads_token_from_env(self, monkeypatch):
-        from agent_gate.v1.client import moss_client
+        from agent_gate.shared.client import moss_client
         monkeypatch.setenv("AGENT_MOSS_AUTH_TOKEN", "moss-tok")
         assert moss_client.resolve_moss_token(force=True) == "moss-tok"
 
     def test_reads_token_from_file(self, monkeypatch, tmp_path):
-        from agent_gate.v1.client import moss_client
+        from agent_gate.shared.client import moss_client
         monkeypatch.delenv("AGENT_MOSS_AUTH_TOKEN", raising=False)
         monkeypatch.delenv("AGENT_GATE_MOSS_TOKEN", raising=False)
         p = tmp_path / "auth_token"
@@ -636,7 +636,7 @@ class TestMossClientAuth:
         assert moss_client.resolve_moss_token(force=True) == "file-tok"
 
     def test_reads_token_from_data_dir(self, monkeypatch, tmp_path):
-        from agent_gate.v1.client import moss_client
+        from agent_gate.shared.client import moss_client
         monkeypatch.delenv("AGENT_MOSS_AUTH_TOKEN", raising=False)
         monkeypatch.delenv("AGENT_MOSS_AUTH_TOKEN_FILE", raising=False)
         monkeypatch.delenv("AGENT_GATE_MOSS_TOKEN", raising=False)
@@ -647,7 +647,7 @@ class TestMossClientAuth:
     def test_analyze_sends_bearer(self, monkeypatch):
         """回归：0.7.6 及以前不带任何凭证，AgentMoss 默认鉴权后会全部 401。"""
         import httpx
-        from agent_gate.v1.client import moss_client
+        from agent_gate.shared.client import moss_client
 
         monkeypatch.setenv("AGENT_MOSS_AUTH_TOKEN", "moss-tok")
         moss_client.resolve_moss_token(force=True)

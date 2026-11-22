@@ -9,8 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agent_gate.v1.normalizer import Normalizer
-from agent_gate.v1.server.models import AgentGateInput, SystemContext
+from agent_gate.shared.normalizer import Normalizer
+from agent_gate.shared.server.models import AgentGateInput, SystemContext
 
 
 @pytest.fixture
@@ -27,10 +27,10 @@ def timezone_probe(tmp_path):
     script = r'''
 import asyncio, importlib.util, json, sys, time
 time.tzset()
-from agent_gate.v1.storage.db import Database
-from agent_gate.v1.storage.repository import Repository
-from agent_gate.v1.normalizer import Normalizer
-from agent_gate.v1.server.models import AgentGateInput, SystemContext
+from agent_gate.shared.storage.db import Database
+from agent_gate.shared.storage.repository import Repository
+from agent_gate.shared.normalizer import Normalizer
+from agent_gate.shared.server.models import AgentGateInput, SystemContext
 db = Database(sys.argv[1]); db.init_schema(); repo = Repository(db)
 agent = repo.get_or_create_agent("tz-check", "host")
 repo.get_or_create_session("tz-check", agent)

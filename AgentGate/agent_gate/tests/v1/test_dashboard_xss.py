@@ -14,8 +14,8 @@
 
 import pytest
 
-from agent_gate.v1.server.dashboard import DASHBOARD_HTML
-from agent_gate.v1.server.security import DASHBOARD_SECURITY_HEADERS
+from agent_gate.shared.server.dashboard import DASHBOARD_HTML
+from agent_gate.shared.server.security import DASHBOARD_SECURITY_HEADERS
 
 
 def _script_block() -> str:
@@ -71,7 +71,7 @@ def test_dashboard_page_ships_security_headers(monkeypatch):
     """实际请求 /dashboard/ 时响应头必须真的带上（不是只有常量定义）。"""
     from fastapi.testclient import TestClient
 
-    from agent_gate.v1.server.app import create_app
+    from agent_gate.shared.server.app import create_app
 
     monkeypatch.setenv("AGENT_GATE_AUTH_MODE", "off")
     client = TestClient(create_app())

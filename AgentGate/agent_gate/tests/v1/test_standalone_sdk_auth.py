@@ -1,6 +1,6 @@
 """独立 SDK（sdk/python/gate_client.py）的鉴权回归。
 
-背景：AgentGate 0.7.6 起默认开启 Bearer 鉴权。包内 SDK（``agent_gate.v1.sdk``）
+背景：AgentGate 0.7.6 起默认开启 Bearer 鉴权。包内 SDK（``agent_gate.shared.sdk``）
 当时已补上 token，但 **sdk/ 目录下那份独立客户端没有** —— 而它是随 sdist 发布、
 且被文档明确推荐给集成方单独拷贝使用的。默认配置下不带 token 会 401，等于官方
 SDK 不可用。

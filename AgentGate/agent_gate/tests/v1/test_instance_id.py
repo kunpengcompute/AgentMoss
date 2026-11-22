@@ -11,10 +11,10 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from agent_gate.v1 import instance_id as iid_mod
-from agent_gate.v1.instance_id import get_instance_id
-from agent_gate.v1.normalizer import Normalizer
-from agent_gate.v1.server.models import AgentGateInput
+from agent_gate.shared import instance_id as iid_mod
+from agent_gate.shared.instance_id import get_instance_id
+from agent_gate.shared.normalizer import Normalizer
+from agent_gate.shared.server.models import AgentGateInput
 
 
 def test_get_instance_id_env_override(monkeypatch, tmp_path):

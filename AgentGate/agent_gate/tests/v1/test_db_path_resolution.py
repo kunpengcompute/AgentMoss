@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_gate.v1.config import resolve_storage_db_path
-from agent_gate.v1.storage.db import Database
+from agent_gate.shared.config import resolve_storage_db_path
+from agent_gate.shared.storage.db import Database
 
 
 @pytest.fixture
@@ -72,7 +72,7 @@ def test_run_server_passes_an_absolute_db_path(isolated_home, monkeypatch):
     """The bug lived in ``_run_server``, so guard its wiring too."""
     captured: dict = {}
 
-    import agent_gate.v1.server.app as app_module
+    import agent_gate.shared.server.app as app_module
 
     monkeypatch.setattr(
         app_module, "run_server", lambda **kwargs: captured.update(kwargs)

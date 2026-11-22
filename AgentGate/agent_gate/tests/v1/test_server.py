@@ -30,21 +30,21 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent_gate import __version__ as agent_gate_version
-from agent_gate.v1.config import Config, reload_config, get_config
-from agent_gate.v1.server.models import (
+from agent_gate.shared.config import Config, reload_config, get_config
+from agent_gate.shared.server.models import (
     AgentGateInput,
     AgentGateResponse,
     HealthResponse,
     SessionTraceResponse,
     SystemContext,
 )
-from agent_gate.v1.storage.db import Database, get_db
-from agent_gate.v1.storage.repository import Repository
-from agent_gate.v1.client.cache import DecisionCache
-from agent_gate.v1.client.moss_client import MossClient
-from agent_gate.v1.normalizer import Normalizer
-from agent_gate.v1.collector import CollectorOrchestrator, get_orchestrator
-from agent_gate.v1.server.app import create_app
+from agent_gate.shared.storage.db import Database, get_db
+from agent_gate.shared.storage.repository import Repository
+from agent_gate.shared.client.cache import DecisionCache
+from agent_gate.shared.client.moss_client import MossClient
+from agent_gate.shared.normalizer import Normalizer
+from agent_gate.shared.collector import CollectorOrchestrator, get_orchestrator
+from agent_gate.shared.server.app import create_app
 
 # ---- Test database path ----
 TEST_DB_PATH = "/tmp/agent_gate_test.db"
@@ -56,9 +56,9 @@ def clean_db():
     if os.path.exists(TEST_DB_PATH):
         os.remove(TEST_DB_PATH)
     # Reset module-level singletons
-    import agent_gate.v1.storage.db as db_module
+    import agent_gate.shared.storage.db as db_module
     db_module._db = None
-    import agent_gate.v1.storage.repository as repo_module
+    import agent_gate.shared.storage.repository as repo_module
     yield
     if os.path.exists(TEST_DB_PATH):
         try:
@@ -118,7 +118,7 @@ class TestHealthCheck:
 class TestAnalyzeEndpoint:
     """Test the analyze endpoint with mocked AgentMoss."""
 
-    PATCH_TARGET = "agent_gate.v1.client.moss_client.MossClient"
+    PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
 
     @pytest.fixture
     def moss_mock(self):
@@ -290,7 +290,7 @@ class TestUpstreamOsTypePriority:
     actions that are critical on the agent's platform.
     """
 
-    PATCH_TARGET = "agent_gate.v1.client.moss_client.MossClient"
+    PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
 
     def _forwarded_payload(self, client, command, **extra):
         """Post one analyze request, return the payload forwarded to AgentMoss.
@@ -376,7 +376,7 @@ class TestToolNameMapping:
     stops firing for that agent.
     """
 
-    PATCH_TARGET = "agent_gate.v1.client.moss_client.MossClient"
+    PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
 
     def _forwarded_payload(self, client, **body):
         with patch(self.PATCH_TARGET) as mock_cls:
@@ -509,10 +509,10 @@ class TestCache:
 
     def test_cache_hit_in_endpoint(self, client, repo):
         """Test that cache hit skips AgentMoss call."""
-        from agent_gate.v1.server.routes import reset_cache
+        from agent_gate.shared.server.routes import reset_cache
         reset_cache()  # Ensure clean cache for test
 
-        PATCH_TARGET = "agent_gate.v1.client.moss_client.MossClient"
+        PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
         with patch(PATCH_TARGET) as mock_cls:
             instance = mock_cls.return_value
             instance.analyze = AsyncMock(return_value={
@@ -557,7 +557,7 @@ class TestCache:
 class TestFailClosed:
     def test_analyze_fail_closed_on_connection_error(self, client):
         """Test that connection error to AgentMoss → Deny."""
-        PATCH_TARGET = "agent_gate.v1.client.moss_client.MossClient"
+        PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
         with patch(PATCH_TARGET) as mock_cls:
             instance = mock_cls.return_value
             # Return a Deny response (simulating fail-closed)
@@ -926,7 +926,7 @@ class TestCollector:
 class TestNormalizer:
     @pytest.mark.asyncio
     async def test_normalize_basic(self):
-        from agent_gate.v1.server.models import AgentGateInput
+        from agent_gate.shared.server.models import AgentGateInput
         normalizer = Normalizer(repo=None)
 
         input_data = AgentGateInput(
@@ -949,7 +949,7 @@ class TestNormalizer:
     @pytest.mark.asyncio
     async def test_normalize_prompt_history(self):
         """prompt_history 交错时序应透传到 AgentMoss 请求."""
-        from agent_gate.v1.server.models import AgentGateInput
+        from agent_gate.shared.server.models import AgentGateInput
         normalizer = Normalizer(repo=None)
 
         input_data = AgentGateInput(
@@ -979,7 +979,7 @@ class TestNormalizer:
     @pytest.mark.asyncio
     async def test_normalize_with_db_history(self, repo):
         """Test that normalizer fetches action_history from DB."""
-        from agent_gate.v1.server.models import AgentGateInput
+        from agent_gate.shared.server.models import AgentGateInput
 
         repo.get_or_create_agent("test-agent", "test-host")
         agent_id = "test-agent:test-host"
@@ -1016,7 +1016,7 @@ class TestNormalizer:
     @pytest.mark.asyncio
     async def test_normalize_agent_provided_history_overrides_db(self, repo):
         """Agent-provided history should override DB history."""
-        from agent_gate.v1.server.models import AgentGateInput, ActionHistoryItem
+        from agent_gate.shared.server.models import AgentGateInput, ActionHistoryItem
 
         repo.get_or_create_agent("test-agent", "test-host")
         agent_id = "test-agent:test-host"
@@ -1049,7 +1049,7 @@ class TestNormalizer:
     @pytest.mark.asyncio
     async def test_normalize_forwards_action_history_called_at(self):
         """Agent 上报的 called_at 必须透传 —— 授权时效窗靠它和 a_next 相减。"""
-        from agent_gate.v1.server.models import AgentGateInput, ActionHistoryItem
+        from agent_gate.shared.server.models import AgentGateInput, ActionHistoryItem
 
         normalizer = Normalizer(repo=None)
         asked_at = "2026-11-02T10:00:00"
@@ -1077,7 +1077,7 @@ class TestNormalizer:
     async def test_normalize_stamps_a_next_called_at(self):
         """a_next.called_at 由 AgentGate 补当前时刻（调用方通常不上报）。"""
         import datetime
-        from agent_gate.v1.server.models import AgentGateInput
+        from agent_gate.shared.server.models import AgentGateInput
 
         normalizer = Normalizer(repo=None)
         before = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=5)
@@ -1160,7 +1160,7 @@ class TestFullFlow:
         """Simulate a full session with multiple tool calls."""
         session_id = "full-flow-session"
         agent_type = "integration-test"
-        PATCH_TARGET = "agent_gate.v1.client.moss_client.MossClient"
+        PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
 
         with patch(PATCH_TARGET) as mock_cls:
             instance = mock_cls.return_value
@@ -1216,7 +1216,7 @@ class TestFullFlow:
     def test_session_history_accumulates(self, client, repo):
         """Verify that history accumulates across multiple analyze calls."""
         session_id = "accum-session"
-        PATCH_TARGET = "agent_gate.v1.client.moss_client.MossClient"
+        PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
 
         with patch(PATCH_TARGET) as mock_cls:
             instance = mock_cls.return_value

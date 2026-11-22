@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_gate.v1.server import app as app_module
-from agent_gate.v1.storage.db import Database
+from agent_gate.shared.server import app as app_module
+from agent_gate.shared.storage.db import Database
 
 
 @pytest.fixture
@@ -97,8 +97,8 @@ def test_ipv6_wildcard_keeps_port_occupied_only_on_ipv4(loop_backend):
 def test_run_server_selects_bindable_port(tmp_path, monkeypatch, occupied, host, workers):
     db = Database(str(tmp_path / "gate.db"))
     db.init_schema()
-    import agent_gate.v1.storage.db as db_module
-    import agent_gate.v1.storage.maintenance as maintenance
+    import agent_gate.shared.storage.db as db_module
+    import agent_gate.shared.storage.maintenance as maintenance
     monkeypatch.setattr(db_module, "get_db", lambda *args: db)
     monkeypatch.setattr(maintenance, "start_storage_maintenance", lambda: None)
     seen = {}
@@ -283,7 +283,7 @@ def test_real_run_server_serves_http_with_ipv6_port_selection(tmp_path, ipv6_hos
     (tmp_path / "config" / "agent_gate.yaml").write_text("{}\n")
     log_path = tmp_path / "server.log"
     script = (
-        "import sys; from agent_gate.v1.server.app import run_server; "
+        "import sys; from agent_gate.shared.server.app import run_server; "
         "run_server(host=sys.argv[1], port=int(sys.argv[2]), db_path=sys.argv[3])"
     )
     with socket.socket(family) as listener, log_path.open("w") as output:

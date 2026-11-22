@@ -11,7 +11,7 @@ AgentGate 默认开鉴权（``AGENT_GATE_AUTH_MODE=auto``）。此前只有主�
 
 from unittest.mock import MagicMock, patch
 
-from agent_gate.v1.sdk import GateClient
+from agent_gate.shared.sdk import GateClient
 
 
 def _fake_urlopen(captured: dict):

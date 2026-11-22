@@ -10,13 +10,13 @@ def _auth_off_by_default(monkeypatch):
     monkeypatch.delenv("AGENT_GATE_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("AGENT_GATE_AGENT_TOKENS", raising=False)
     try:
-        from agent_gate.v1.server import security as sp
+        from agent_gate.shared.server import security as sp
         sp.reset_counters()
     except Exception:
         pass
     yield
     try:
-        from agent_gate.v1.server import security as sp
+        from agent_gate.shared.server import security as sp
         sp.reset_counters()
     except Exception:
         pass

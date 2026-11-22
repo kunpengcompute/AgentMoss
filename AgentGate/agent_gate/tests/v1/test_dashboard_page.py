@@ -15,7 +15,7 @@ import subprocess
 
 import pytest
 
-from agent_gate.v1.server.dashboard import DASHBOARD_HTML
+from agent_gate.shared.server.dashboard import DASHBOARD_HTML
 
 
 def _script_block() -> str:

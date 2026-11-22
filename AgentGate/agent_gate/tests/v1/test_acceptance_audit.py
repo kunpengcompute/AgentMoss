@@ -5,11 +5,11 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_gate.v1.client.cache import DecisionCache
-from agent_gate.v1.server.app import create_app
-from agent_gate.v1.server import routes
-from agent_gate.v1.storage.db import Database
-from agent_gate.v1.storage.repository import Repository
+from agent_gate.shared.client.cache import DecisionCache
+from agent_gate.shared.server.app import create_app
+from agent_gate.shared.server import routes
+from agent_gate.shared.storage.db import Database
+from agent_gate.shared.storage.repository import Repository
 
 
 @pytest.fixture

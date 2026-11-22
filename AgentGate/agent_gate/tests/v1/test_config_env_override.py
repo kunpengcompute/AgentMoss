@@ -13,9 +13,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_gate.v1 import config as config_mod
-from agent_gate.v1.client.moss_client import MossClient
-from agent_gate.v1.config import Config
+from agent_gate.shared import config as config_mod
+from agent_gate.shared.client.moss_client import MossClient
+from agent_gate.shared.config import Config
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +99,9 @@ async def test_moss_url_fallback(monkeypatch):
     assert url == "http://from-moss:9090"
 
 
-async def test_default_when_nothing_set(monkeypatch):
+async def test_default_when_nothing_set(monkeypatch, tmp_path):
+    # 隔离真实端口文件（本机可能正跑 AgentMoss 并写了别的端口）
+    monkeypatch.setenv("AGENT_MOSS_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("AGENT_MOSS_INSTANCE", raising=False)
     url = await _base_url_of(monkeypatch)
     assert url == "http://127.0.0.1:9090"

@@ -4,10 +4,10 @@ import asyncio
 
 import pytest
 
-from agent_gate.v1.normalizer import Normalizer
-from agent_gate.v1.server.models import AgentGateInput, SystemContext
-from agent_gate.v1.storage.db import Database
-from agent_gate.v1.storage.repository import Repository
+from agent_gate.shared.normalizer import Normalizer
+from agent_gate.shared.server.models import AgentGateInput, SystemContext
+from agent_gate.shared.storage.db import Database
+from agent_gate.shared.storage.repository import Repository
 
 
 @pytest.fixture

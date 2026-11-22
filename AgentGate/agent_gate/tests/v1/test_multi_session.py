@@ -8,12 +8,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_gate.v1.normalizer import Normalizer
-from agent_gate.v1.multi_session import (
+from agent_gate.shared.normalizer import Normalizer
+from agent_gate.shared.multi_session import (
     multi_session_enabled,
     stateful_incremental_enabled,
 )
-from agent_gate.v1.server.models import AgentGateInput
+from agent_gate.shared.server.models import AgentGateInput
 
 
 @pytest.fixture(autouse=True)
@@ -125,7 +125,7 @@ async def test_normalizer_skips_stateful_incremental_when_disabled(monkeypatch):
 
 
 def test_session_history_limit_default_and_bounds(monkeypatch):
-    from agent_gate.v1.multi_session import session_history_limit
+    from agent_gate.shared.multi_session import session_history_limit
 
     monkeypatch.delenv("AGENT_GATE_SESSION_HISTORY_LIMIT", raising=False)
     assert session_history_limit() == 5          # 默认保持现有性能

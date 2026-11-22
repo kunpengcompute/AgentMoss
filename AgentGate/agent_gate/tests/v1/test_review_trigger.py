@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from agent_gate.v1.client.moss_client import MossClient
-from agent_gate.v1.storage.db import get_agent_gate_db_path
+from agent_gate.shared.client.moss_client import MossClient
+from agent_gate.shared.storage.db import get_agent_gate_db_path
 
 
 # ----------------------------------------------------------------------
@@ -39,7 +39,7 @@ async def test_review_carries_bearer_token():
     post = AsyncMock(return_value=httpx.Response(200, json={}))
     try:
         with patch.object(client._client, "post", post), patch(
-            "agent_gate.v1.client.moss_client.resolve_moss_token",
+            "agent_gate.shared.client.moss_client.resolve_moss_token",
             return_value="tok-abc",
         ):
             await client.review(agent_id="a", db_path="/tmp/ag.db")
@@ -80,14 +80,14 @@ async def test_review_skips_without_db_path():
 
 
 async def test_v1_routes_triggers_every_100_calls():
-    from agent_gate.v1.server import routes
+    from agent_gate.shared.server import routes
 
     routes._review_counter = 0
     fake = MagicMock()
     fake.review = AsyncMock()
 
     with patch(
-        "agent_gate.v1.storage.db.get_agent_gate_db_path", return_value="/tmp/ag.db"
+        "agent_gate.shared.storage.db.get_agent_gate_db_path", return_value="/tmp/ag.db"
     ):
         for _ in range(99):
             routes._maybe_trigger_review(fake, "agent-1")
