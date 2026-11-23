@@ -300,6 +300,7 @@ class SensitivePathChecker:
                         reason=f"访问敏感路径: {sp.desc} ({sp.path})",
                         risk_type="file_access",
                         is_credential=True,
+                        denied_read_path=sp.path,
                         violated_rule="sensitive_path_access",
                     )
                 # read_only 路径：只拦截读取操作，写入/删除放行（如 /dev/random：
@@ -313,6 +314,7 @@ class SensitivePathChecker:
                         risk_level=sp.risk_level,
                         reason=f"读取敏感路径: {sp.desc} ({sp.path})",
                         risk_type="file_access",
+                        denied_read_path=sp.path,
                         violated_rule="sensitive_path_access",
                     )
                 # dir_del_only 目录级条目（.ssh/.aws）独立于 is_write 判定：
@@ -1885,6 +1887,10 @@ class HeuristicDetector:
         result = self._sensitive_path_checker.check(a_next)
         if result.hit:
             best = _merge_heuristic_hit(best, result)
+            # 同级文件风险保留先命中的主因，实际读取的路径由内联复核确认。
+            if (best is not result and result.denied_read_path
+                    and best.risk_type == "file_access" and best.risk_level == result.risk_level):
+                best.denied_read_path = result.denied_read_path
 
         # 5. 危险操作模式检测（从 L2 搬入）：通配符+删除、重定向覆盖关键目录
         # 已按内容语言处理的写工具调用跳过（content 里的 rm/*/重定向是数据）；

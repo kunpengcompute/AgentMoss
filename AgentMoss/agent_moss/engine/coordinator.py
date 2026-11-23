@@ -38,7 +38,9 @@ from .heuristic import (
     is_fully_safe_bash_command, is_readonly_sensitive_bash_command,
     is_inline_script_command, build_path_context,
 )
-from .inline_analyzer import analyze_inline_script, has_inline_danger_evidence, is_literal_text_command
+from .inline_analyzer import (
+    analyze_inline_script, confirms_inline_read, has_inline_danger_evidence, is_literal_text_command,
+)
 from .llm_analyzer import LLMAnalyzer
 from .logic_rules import LogicRulesChecker, _SHELL_FULL_READ_CMDS, _split_shell_segments
 from .script_content_analyzer import (
@@ -242,7 +244,8 @@ class AgentMossBot:
                     should_deny_l1 and skip_inline_file_access and is_inline_script_cmd
                     and a_next.get("action_type", "").lower() in ("bash", "executebash", "terminal-executebash")
                 ):
-                    command = _independent_file_command(a_next.get("action_detail", ""), self._profile)
+                    detail = a_next.get("action_detail", "")
+                    command = _independent_file_command(detail, self._profile)
                     if command:
                         hit = self._heuristic_detector.detect(
                             {**a_next, "action_detail": command}, reason, prompt_session,
@@ -250,6 +253,8 @@ class AgentMossBot:
                         if hit.hit and hit.risk_type == "file_access" and hit.risk_level in ("medium", "high", "critical"):
                             heuristic_result = hit
                             skip_inline_file_access = False
+                    elif self._profile.os_type != "windows" and heuristic_result.denied_read_path:
+                        skip_inline_file_access = not confirms_inline_read(detail, heuristic_result.denied_read_path)
                 if should_deny_l1 and not skip_inline_file_access:
                     violated_layers.append("L1.1")
                     logger.info(
