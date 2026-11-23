@@ -175,7 +175,7 @@ class AgentGateResponse(BaseModel):
     l3_outcome: str = Field(
         default="", description="L3 outcome passed through from AgentMoss"
     )
-    source: str = Field(default="agent_moss", description="Analysis source: agent_moss / cache / fail_closed")
+    source: str = Field(default="agent_moss", description="Analysis source: agent_moss / fail_closed")
 
 
 # --- Trace query models ---

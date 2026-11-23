@@ -58,11 +58,6 @@ class Config:
                 "timeout": 5.0,
                 "pool_size": 5,
             },
-            "cache": {
-                "enabled": True,
-                "max_size": 500,
-                "ttl": 300,
-            },
             "audit": {
                 "log_dir": "auto",   # auto → resolve_data_dir("logs")
                 "enabled": True,
@@ -236,10 +231,6 @@ class Config:
     @property
     def collector(self) -> dict:
         return self._data["collector"]
-
-    @property
-    def cache(self) -> dict:
-        return self._data["cache"]
 
     @property
     def audit(self) -> dict:

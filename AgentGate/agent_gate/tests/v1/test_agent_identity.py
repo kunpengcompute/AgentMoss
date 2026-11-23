@@ -38,14 +38,8 @@ MOSS_ALLOW = {
 
 @pytest.fixture(autouse=True)
 def clean_db():
-    """Fresh database *and* decision cache per test.
-
-    Both are module-level singletons, and a cache hit returns before the agent
-    is registered — leaving a warm cache across tests would silently turn a
-    later request into a no-op.
-    """
+    """Fresh database per test (module-level singleton)."""
     import agent_gate.shared.storage.db as db_module
-    from agent_gate.shared.server.routes import reset_cache
 
     def _remove():
         for suffix in ("", "-wal", "-shm"):
@@ -57,7 +51,6 @@ def clean_db():
     def _reset():
         _remove()
         db_module._db = None
-        reset_cache()
 
     _reset()
     yield
@@ -77,12 +70,7 @@ def client():
 
 
 def _analyze(client, **overrides) -> None:
-    """Post one analyze request.
-
-    ``command`` / ``session_id`` are overridable because a cache hit returns
-    before the agent is registered — reusing the same triple would silently
-    turn a later request into a no-op.
-    """
+    """Post one analyze request."""
     payload = {
         "agent_type": "qwenpaw",
         "session_id": "sess-1",

@@ -41,31 +41,6 @@ def get_moss_client():
     return MossClient()
 
 
-# Module-level cache singleton
-_cache_instance = None
-
-
-def get_cache():
-    """Dependency: get DecisionCache (singleton)."""
-    global _cache_instance
-    if _cache_instance is None:
-        from ..client.cache import DecisionCache
-        from ..config import get_config
-        cfg = get_config().cache
-        if cfg.get("enabled", True):
-            _cache_instance = DecisionCache(
-                max_size=cfg.get("max_size", 500),
-                ttl=cfg.get("ttl", 300),
-            )
-    return _cache_instance
-
-
-def reset_cache():
-    """Reset cache singleton (for testing)."""
-    global _cache_instance
-    _cache_instance = None
-
-
 def get_normalizer():
     """Dependency: get Normalizer with repository."""
     from agent_gate.shared.normalizer import Normalizer
@@ -147,13 +122,12 @@ async def analyze(
     repo=Depends(get_repo),
     orchestrator=Depends(get_orchestrator),
     moss_client=Depends(get_moss_client),
-    cache=Depends(get_cache),
     normalizer=Depends(get_normalizer),
 ):
     """Main analysis endpoint.
 
     Receives tool-call data from an Agent, collects system context,
-    normalizes the data, queries/updates cache, calls AgentMoss,
+    normalizes the data, calls AgentMoss every time (no decision reuse),
     and returns the security decision.
     """
     start = time.monotonic()
@@ -208,32 +182,20 @@ async def analyze(
         os_type=os_type,
     )
 
-    # 2. Check decision cache
-    cached = cache.get(input_data.session_id, input_data.cwd, command) if cache else None
-
-    # 3. Collect system context (in background thread pool)
+    # 2. Collect system context (in background thread pool)
     context = orchestrator.collect()
 
-    # 缓存命中也需落库和采集快照；事件推送保持仅用于新的上游判定。
-    if cached is not None:
-        logger.debug(f"Cache hit for {tool_name}:{command[:50]}")
-        moss_result = {
-            **cached,
-            "source": "cache",
-            "analysis_duration_ms": (time.monotonic() - start) * 1000,
-        }
-    else:
-        # 4. Normalize to AgentMoss format (includes DB action_history lookup)
-        moss_request = await normalizer.normalize(input_data, context)
+    # 3. Normalize to AgentMoss format (includes DB action_history lookup)
+    moss_request = await normalizer.normalize(input_data, context)
 
-        # Phase 2: these steps are now done after MossClient call
-        # For now, defer system_snapshot write to after the analysis
-        # (we need tool_call_id which we don't have yet)
+    # 4. Call AgentMoss
+    #
+    # 每次都真实分析，不复用历史判定。判定依赖的不只是命令文本：策略开关、
+    # 单条规则启停、会话历史、脚本文件内容、L3 结果都会改变结论。缓存 Allow
+    # 等于赌“这些都没变”，只要漏一项就是漏报；因此这里不再保留决策缓存。
+    moss_result = await moss_client.analyze(moss_request)
 
-        # 5. Call AgentMoss
-        moss_result = await moss_client.analyze(moss_request)
-
-    # 6. Write tool_call record
+    # 5. Write tool_call record
     tool_call_dict = {
         "tool_name": tool_name,
         "command": command,
@@ -248,7 +210,7 @@ async def analyze(
         moss_result=moss_result,
     )
 
-    # 7. Write system snapshot (deferred from step 4)
+    # 6. Write system snapshot (deferred from step 3)
     context_dict = context.model_dump() if hasattr(context, "model_dump") else {}
     repo.insert_system_snapshot(
         session_id=input_data.session_id,
@@ -256,30 +218,25 @@ async def analyze(
         context=context_dict,
     )
 
-    # 8. Update cache (Allow only；缓存命中的结果无需重复写回)
-    if cache and cached is None:
-        cache.set(input_data.session_id, input_data.cwd, command, moss_result)
-
     elapsed = (time.monotonic() - start) * 1000
     logger.info(
         f"Analysis complete: {tool_name} → {moss_result.get('decision')} "
         f"({elapsed:.1f}ms total)"
     )
 
-    # 9. Broadcast to dashboard WebSocket clients（仅新判定推送，缓存命中不重复播报）
-    if cached is None:
-        broadcast_event({
-            "type": "analyze_complete",
-            "agent_type": input_data.agent_type,
-            "session_id": input_data.session_id,
-            "tool_name": tool_name,
-            "command": command,
-            "decision": moss_result.get("decision", "Deny"),
-            "risk_level": moss_result.get("risk_level", ""),
-            "analysis_duration_ms": elapsed,
-        })
+    # 7. Broadcast to dashboard WebSocket clients
+    broadcast_event({
+        "type": "analyze_complete",
+        "agent_type": input_data.agent_type,
+        "session_id": input_data.session_id,
+        "tool_name": tool_name,
+        "command": command,
+        "decision": moss_result.get("decision", "Deny"),
+        "risk_level": moss_result.get("risk_level", ""),
+        "analysis_duration_ms": elapsed,
+    })
 
-    # 10. 低频回顾（fire-and-forget）：每 N 条落库触发一次，让 AgentMoss 直读
+    # 8. 低频回顾（fire-and-forget）：每 N 条落库触发一次，让 AgentMoss 直读
     #     本地存储重建链状态 + 提取待攻击前序。对齐 TS 版 v1/routes.ts；
     #     不阻塞本次响应，失败也不影响已算出的判定。
     _maybe_trigger_review(moss_client, agent_id)
@@ -300,7 +257,7 @@ async def analyze(
         # L3 结局：透传 AgentMoss 的稳定枚举，便于客户直接看「L3 有没有真判」
         l3_outcome=moss_result.get("l3_outcome") or "",
         collected_context=context,
-        source="cache" if cached is not None else "agent_moss",
+        source="agent_moss",
     )
 
 

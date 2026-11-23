@@ -2,9 +2,8 @@
 
 Tests cover:
   1. Health check endpoint
-  2. Analyze endpoint — Allow / Deny decisions
-  3. Decision cache (Allow only caching)
-  4. Fail-Closed behavior when AgentMoss is unavailable
+  2. Analyze endpoint — Allow / Deny decisions (always re-analyzed)
+  3. Fail-Closed behavior when AgentMoss is unavailable
   5. Trace query API (session traces, tool_calls query)
   6. Database operations (agents, sessions, tool_calls, snapshots)
   7. Collector orchestrator
@@ -40,7 +39,6 @@ from agent_gate.shared.server.models import (
 )
 from agent_gate.shared.storage.db import Database, get_db
 from agent_gate.shared.storage.repository import Repository
-from agent_gate.shared.client.cache import DecisionCache
 from agent_gate.shared.client.moss_client import MossClient
 from agent_gate.shared.normalizer import Normalizer
 from agent_gate.shared.collector import CollectorOrchestrator, get_orchestrator
@@ -293,12 +291,7 @@ class TestUpstreamOsTypePriority:
     PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
 
     def _forwarded_payload(self, client, command, **extra):
-        """Post one analyze request, return the payload forwarded to AgentMoss.
-
-        ``command`` must be unique per test — the decision cache is keyed on
-        (session_id, cwd, command) and would otherwise short-circuit the
-        second call, so ``analyze`` would never be invoked.
-        """
+        """Post one analyze request, return the payload forwarded to AgentMoss."""
         with patch(self.PATCH_TARGET) as mock_cls:
             instance = mock_cls.return_value
             instance.analyze = AsyncMock(return_value={
@@ -320,7 +313,7 @@ class TestUpstreamOsTypePriority:
                 **extra,
             })
             assert response.status_code == 200
-            assert instance.analyze.await_count == 1, "cache short-circuited the call"
+            assert instance.analyze.await_count == 1
             return instance.analyze.call_args.args[0]
 
     def test_upstream_os_type_wins_over_host(self, client):
@@ -443,76 +436,20 @@ class TestToolNameMapping:
 
 
 # ============================================================
-# 3. Decision Cache Tests
+# 3. Decision-reuse regression tests
 # ============================================================
 
-class TestCache:
-    def test_cache_get_miss(self):
-        cache = DecisionCache(max_size=10, ttl=60)
-        result = cache.get("sess", "/tmp", "ls")
-        assert result is None
-
-    def test_cache_set_and_get_allow(self):
-        cache = DecisionCache(max_size=10, ttl=60)
-        cache.set("sess", "/tmp", "ls", {"decision": "Allow", "reason": "Safe"})
-        result = cache.get("sess", "/tmp", "ls")
-        assert result is not None
-        assert result["decision"] == "Allow"
-
-    def test_cache_does_not_cache_deny(self):
-        cache = DecisionCache(max_size=10, ttl=60)
-        cache.set("sess", "/tmp", "rm", {"decision": "Deny", "reason": "Dangerous"})
-        result = cache.get("sess", "/tmp", "rm")
-        assert result is None
-
-    def test_cache_different_command_same_session(self):
-        cache = DecisionCache(max_size=10, ttl=60)
-        cache.set("sess", "/tmp", "ls", {"decision": "Allow"})
-        assert cache.get("sess", "/tmp", "ls") is not None
-        assert cache.get("sess", "/tmp", "rm") is None
-
-    def test_cache_ttl_expiration(self):
-        cache = DecisionCache(max_size=10, ttl=0)  # ttl=0 means no expiration check
-        cache.set("sess", "/tmp", "ls", {"decision": "Allow"})
-        result = cache.get("sess", "/tmp", "ls")
-        # ttl=0 means entries never expire (checked by `if self._ttl > 0`)
-        assert result is not None
-        assert result["decision"] == "Allow"
-
-    def test_cache_ttl_expiry_after_time(self):
-        """Test that expired entries are removed when TTL > 0."""
-        import time as _time
-        cache = DecisionCache(max_size=10, ttl=1)
-        cache.set("sess", "/tmp", "ls", {"decision": "Allow"})
-
-        # Artificially age the cache entry
-        key = cache._key("sess", "/tmp", "ls")
-        entry = cache._cache.get(key)
-        if entry:
-            cache._cache[key] = (_time.time() - 2, entry[1])
-
-        result = cache.get("sess", "/tmp", "ls")
-        assert result is None
-
-    def test_cache_lru_eviction(self):
-        cache = DecisionCache(max_size=3, ttl=3600)
-        for i in range(5):
-            cache.set(f"sess{i}", "/tmp", f"cmd{i}", {"decision": "Allow"})
-        # Only 3 entries remain, oldest 2 evicted
-        assert cache.size == 3
-
-    def test_cache_clear(self):
-        cache = DecisionCache(max_size=10, ttl=60)
-        cache.set("sess", "/tmp", "ls", {"decision": "Allow"})
-        cache.clear()
-        assert cache.size == 0
-
-    def test_cache_hit_in_endpoint(self, client, repo):
-        """Test that cache hit skips AgentMoss call."""
-        from agent_gate.shared.server.routes import reset_cache
-        reset_cache()  # Ensure clean cache for test
-
+class TestDecisionReuseRemoved:
+    def test_repeated_identical_request_is_reanalyzed(self, client, repo):
+        """同一 session/cwd/command 连续两次都必须真实调用 AgentMoss。"""
         PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
+        payload = {
+            "agent_type": "test",
+            "session_id": "sess-no-cache",
+            "tool_name": "bash",
+            "command": "ls -la",
+            "cwd": "/tmp",
+        }
         with patch(PATCH_TARGET) as mock_cls:
             instance = mock_cls.return_value
             instance.analyze = AsyncMock(return_value={
@@ -525,29 +462,52 @@ class TestCache:
                 "analysis_duration_ms": 5.0,
             })
 
-            # First call — should call AgentMoss
-            response1 = client.post("/api/v1/analyze", json={
-                "agent_type": "test",
-                "session_id": "sess-cache",
-                "tool_name": "bash",
-                "command": "ls -la",
-                "cwd": "/tmp",
-            })
-            assert response1.status_code == 200
-            assert instance.analyze.call_count == 1
+            response1 = client.post("/api/v1/analyze", json=payload)
+            response2 = client.post("/api/v1/analyze", json=payload)
 
-            # Second call with same params — should use cache
-            response2 = client.post("/api/v1/analyze", json={
-                "agent_type": "test",
-                "session_id": "sess-cache",
-                "tool_name": "bash",
-                "command": "ls -la",
-                "cwd": "/tmp",
-            })
+            assert response1.status_code == 200
             assert response2.status_code == 200
-            assert response2.json()["source"] == "cache"
-            # MossClient.analyze should NOT be called again
-            assert instance.analyze.call_count == 1
+            assert instance.analyze.await_count == 2
+            assert response1.json()["source"] == "agent_moss"
+            assert response2.json()["source"] == "agent_moss"
+
+    def test_policy_toggle_sequence_follows_agent_moss(self, client, repo):
+        """模拟 L1 开→关→开：每次都必须以 AgentMoss 的最新判定为准。"""
+        PATCH_TARGET = "agent_gate.shared.client.moss_client.MossClient"
+        payload = {
+            "agent_type": "test",
+            "session_id": "sess-policy-toggle",
+            "tool_name": "bash",
+            "command": "rm -rf /",
+            "cwd": "/tmp",
+        }
+        deny = {
+            "decision": "Deny",
+            "reason": "L1 hit",
+            "risk_level": "critical",
+            "risk_type": "script_execution",
+            "violated_layers": ["L1.1"],
+            "confidence": 95,
+            "analysis_duration_ms": 5.0,
+        }
+        allow = {
+            "decision": "Allow",
+            "reason": "L1 disabled",
+            "risk_level": "low",
+            "risk_type": "safe",
+            "violated_layers": [],
+            "confidence": 95,
+            "analysis_duration_ms": 5.0,
+        }
+        with patch(PATCH_TARGET) as mock_cls:
+            instance = mock_cls.return_value
+            instance.analyze = AsyncMock(side_effect=[deny, allow, deny])
+
+            responses = [client.post("/api/v1/analyze", json=payload) for _ in range(3)]
+
+            assert [r.json()["decision"] for r in responses] == ["Deny", "Allow", "Deny"]
+            assert instance.analyze.await_count == 3
+            assert all(r.json()["source"] == "agent_moss" for r in responses)
 
 
 # ============================================================
@@ -1106,7 +1066,6 @@ class TestConfig:
         assert cfg.server["port"] == 9100
         assert cfg.agent_moss["url"] == "http://127.0.0.1:9090"
         assert cfg.collector["system_info"] is True
-        assert cfg.cache["enabled"] is True
         assert cfg.storage["retention_days"] == 30
 
     def test_config_auto_db_path(self):
