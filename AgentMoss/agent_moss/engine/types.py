@@ -3,6 +3,9 @@
 from dataclasses import dataclass, field
 
 
+RISK_PRIORITY = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
 @dataclass
 class SecurityJudgment:
     """AgentMoss 安全判断结果"""
