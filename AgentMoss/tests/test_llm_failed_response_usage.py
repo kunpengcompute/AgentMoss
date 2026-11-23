@@ -7,7 +7,7 @@ import pytest
 
 from agent_moss.engine.llm_analyzer import LLMAnalyzer, LLMAnalysisFailure
 from agent_moss.engine.types import HeuristicResult, LogicRuleResult
-from agent_moss.infra.config import CacheConfig, Config, LLMConfig, RetryConfig
+from agent_moss.infra.config import CacheConfig, Config, LLMConfig, RetryConfig, SecurityConfig
 from agent_moss.infra.token_stats import get_token_stats
 
 
@@ -139,9 +139,8 @@ def test_failed_policy_response_records_usage(local_model, monkeypatch):
     from agent_moss.engine.analyzer import analyze as run_analysis
     from agent_moss.infra.policy_cache import PolicyCache
     responses, _, config = local_model
+    config.security = SecurityConfig(llm_analysis_enabled=False)
     config.timeout.step_interval = 0
-    # Reserve the mock response for policy generation by skipping the L3 judge.
-    monkeypatch.setenv("AGENT_MOSS_DISABLE_LLM", "1")
     monkeypatch.setenv("AGENT_MOSS_ENABLE_POLICY_GEN", "1")
     monkeypatch.setenv("AGENT_MOSS_SAVE_POLICY", "0")
     responses.append({"content": None, "finish_reason": "length", "usage": USED})

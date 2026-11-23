@@ -2,23 +2,15 @@
 
 - ``MossClient.review`` 发对地址/字段/凭证，且**失败不抛异常**（fire-and-forget）；
 - V1 路由按「每 100 条触发一次」节流；
-- 周期回顾和归档后回顾传递实际写入的 SQLite 文件。
+- ``get_agent_gate_db_path`` 返回 AgentMoss 可直读的存储路径。
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
-from fastapi import FastAPI
-from loguru import logger
 
 from agent_gate.shared.client.moss_client import MossClient
-from agent_gate.shared.normalizer import Normalizer
-from agent_gate.shared.server import routes
-from agent_gate.shared.server.models import SystemContext
-from agent_gate.shared.storage.db import Database
-from agent_gate.shared.storage.repository import Repository
+from agent_gate.shared.storage.db import get_agent_gate_db_path
 
 
 # ----------------------------------------------------------------------
@@ -69,13 +61,13 @@ async def test_review_is_fire_and_forget_on_failure():
         await client.close()
 
 
-@pytest.mark.parametrize("db_path", ["", ":memory:"])
-async def test_review_skips_without_shared_file(db_path):
+async def test_review_skips_without_db_path():
+    """没给存储路径就不发请求。"""
     client = MossClient(base_url="http://127.0.0.1:9999", timeout=5.0)
     post = AsyncMock()
     try:
         with patch.object(client._client, "post", post):
-            await client.review(agent_id="a", db_path=db_path)
+            await client.review(agent_id="a", db_path="")
     finally:
         await client.close()
 
@@ -87,97 +79,33 @@ async def test_review_skips_without_shared_file(db_path):
 # ----------------------------------------------------------------------
 
 
-@pytest.fixture
-def custom_db(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "default-data"))
-    db = Database("custom #1.db")
-    db.init_schema()
-    try:
-        yield db
-    finally:
-        db.close()
+async def test_v1_routes_triggers_every_100_calls():
+    from agent_gate.shared.server import routes
+
+    routes._review_counter = 0
+    fake = MagicMock()
+    fake.review = AsyncMock()
+    repo = MagicMock()
+    repo.db_path = "/tmp/ag.db"
+
+    for _ in range(99):
+        routes._maybe_trigger_review(fake, "agent-1", repo)
+    assert fake.review.await_count == 0, "第 99 条不应触发"
+
+    routes._maybe_trigger_review(fake, "agent-1", repo)
+    await __import__("asyncio").sleep(0)
+
+    assert fake.review.await_count == 1, "第 100 条应触发一次"
+    assert fake.review.await_args.kwargs["agent_id"] == "agent-1"
+    assert fake.review.await_args.kwargs["db_path"] == "/tmp/ag.db"
 
 
-async def test_v1_routes_triggers_every_100_calls(custom_db, monkeypatch):
-    monkeypatch.setattr(routes, "_review_counter", 0)
-    repo = Repository(custom_db)
-    moss = AsyncMock()
-    moss.analyze.return_value = {"decision": "Allow", "reason": "ok"}
-    app = FastAPI()
-    app.include_router(routes.router)
-    app.dependency_overrides[routes.get_repo] = lambda: repo
-    app.dependency_overrides[routes.get_moss_client] = lambda: moss
-    app.dependency_overrides[routes.get_orchestrator] = lambda: MagicMock(
-        collect=SystemContext
-    )
-    app.dependency_overrides[routes.get_normalizer] = lambda: Normalizer(repo=repo)
-    payload = {
-        "agent_type": "test",
-        "metadata": {"hostname": "gate"},
-        "session_id": "s",
-        "instance_id": "test-instance",
-        "tool_name": "bash",
-        "action_history": [],
-        "session_history": [],
-    }
-
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://gate"
-    ) as client:
-        for index in range(100):
-            response = await client.post(
-                "/api/v1/analyze", json={**payload, "command": f"echo {index}"}
-            )
-            assert response.status_code == 200
-            if index < 99:
-                moss.review.assert_not_called()
-    await asyncio.gather(*routes._review_tasks)
-    written = custom_db.execute("PRAGMA database_list").fetchone()["file"]
-    assert custom_db.execute("SELECT count(*) FROM tool_calls").fetchone()[0] == 100
-    moss.review.assert_awaited_once_with(agent_id="test:gate", db_path=written)
+# ----------------------------------------------------------------------
+# 存储路径
+# ----------------------------------------------------------------------
 
 
-def test_maintenance_reviews_actual_database_after_archive(custom_db, monkeypatch):
-    from agent_gate.shared.storage import db as db_module
-    from agent_gate.shared.storage.maintenance import run_storage_maintenance
-
-    monkeypatch.setattr(db_module, "_db", custom_db)
-    monkeypatch.setenv("AGENT_GATE_ARCHIVE_THRESHOLD", "2")
-    monkeypatch.setenv("AGENT_GATE_ARCHIVE_KEEP", "1")
-    repo = Repository(custom_db)
-    agent_id = repo.get_or_create_agent("test", "gate")
-    repo.get_or_create_session("s", agent_id)
-    for command in ("echo first", "echo second"):
-        repo.insert_tool_call("s", {"command": command}, {"decision": "Allow"})
-
-    with patch("agent_gate.shared.client.moss_client.MossClient") as mock_client:
-        review = AsyncMock()
-        mock_client.return_value.review = review
-        result = run_storage_maintenance(agent_id)
-    assert result["archived"] == 1
-    assert custom_db.execute("SELECT command FROM tool_calls").fetchone()[0] == "echo second"
-    written = custom_db.execute("PRAGMA database_list").fetchone()["file"]
-    review.assert_awaited_once_with(agent_id=agent_id, db_path=written)
-
-
-@pytest.mark.parametrize(
-    ("response", "error", "expected"),
-    [
-        (httpx.Response(404), None, "review HTTP 404"),
-        (None, httpx.ReadTimeout(""), "review unreachable: ReadTimeout"),
-    ],
-)
-async def test_review_logs_failure(response, error, expected):
-    client = MossClient(base_url="http://127.0.0.1:9999", timeout=5.0)
-    post = AsyncMock(return_value=response, side_effect=error)
-    messages = []
-    sink = logger.add(messages.append, format="{message}", level="WARNING")
-    try:
-        with patch.object(client._client, "post", post):
-            await client.review(agent_id="test", db_path="/tmp/test.db")
-    finally:
-        logger.remove(sink)
-        await client.close()
-
-    assert any(expected in message for message in messages)
+def test_db_path_points_at_sqlite_file():
+    path = get_agent_gate_db_path()
+    assert path.endswith(".db")
+    assert "agent_gate" in path

@@ -19,6 +19,7 @@ from ..infra.config import (
     get_llm_action_detail_max_chars,
     get_llm_history_max_items,
     get_llm_max_prompt_tokens,
+    get_llm_prompt_history_max_turns,
     get_llm_timeout,
     get_log_path,
 )
@@ -36,8 +37,6 @@ from .skill_engine import SkillEngine
 from .types import HeuristicResult, LogicRuleResult, SecurityJudgment
 
 logger = logging.getLogger(__name__)
-
-_PROMPT_HISTORY_MAX_TURNS = 20
 
 
 class LLMAnalysisFailure(Exception):
@@ -158,7 +157,8 @@ class LLMAnalyzer:
         matched_skills = self._skill_engine.match_skills(a_next, reason)
         skills_text = self._skill_engine.format_skills_for_prompt(matched_skills)
 
-        # 2.5 格式化近期历史意图，供 LLM 结合前文理解「继续」等指令。
+        # 2.5 格式化交错历史 prompt（供 LLM 判断意图一致性，避免"继续"覆盖初始意图）
+        # 只喂 prompt 文本 + 各轮动作类型/详情（截断），与 action_history 互补但不重复。
         prompt_history_text = self._format_prompt_history(prompt_history)
 
         # 3. 格式化特征匹配/逻辑规则提示
@@ -617,15 +617,22 @@ class LLMAnalyzer:
     def _format_prompt_history(
         prompt_history: list[dict[str, object]] | None,
         max_text_chars: int = 500,
+        max_turns: int | None = None,
     ) -> str:
         """格式化最近提交的历史轮次，保留原轮号。
 
-        窗口内的非空意图按字符截断，附带动作只显示类型。无可展示的意图时返回占位。
+        窗口内的非空意图按字符截断，附带动作只显示类型。默认只保留最近
+        ``AGENT_MOSS_LLM_PROMPT_HISTORY_MAX_TURNS``（20）轮，避免 prompt
+        随会话长度无限膨胀；0 表示不限制。空/None 返回占位。
         """
         if not prompt_history:
             return "（未提供历史意图）"
 
-        first_turn_index = max(0, len(prompt_history) - _PROMPT_HISTORY_MAX_TURNS)
+        if max_turns is None:
+            max_turns = get_llm_prompt_history_max_turns()
+        first_turn_index = (
+            max(0, len(prompt_history) - max_turns) if max_turns > 0 else 0
+        )
         lines = []
         longest_text_chars = 0
         for i, turn in enumerate(prompt_history[first_turn_index:], start=first_turn_index + 1):
@@ -654,8 +661,9 @@ class LLMAnalyzer:
             lines.append(line)
 
         logger.debug(
-            "L3 prompt_history turns_in=%d turns_kept=%d longest_text_chars=%d",
-            len(prompt_history), len(lines), longest_text_chars,
+            "L3 prompt_history turns_in=%d turns_kept=%d window=%d longest_text_chars=%d",
+            len(prompt_history), len(lines), max_turns or len(prompt_history),
+            longest_text_chars,
         )
         if not lines:
             return "（未提供历史意图）"

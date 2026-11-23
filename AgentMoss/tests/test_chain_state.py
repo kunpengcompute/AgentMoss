@@ -474,3 +474,39 @@ def test_chain_state_auto_rotate_keeps_recent_and_archives_old(tmp_path, monkeyp
         assert tracker.nodes[-1].action_detail == "echo rotate-10"
     finally:
         store2.close()
+
+
+def test_fingerprint_normalizes_time_alias_and_truncation():
+    """实时微秒/DB 秒、工具别名、落库截断必须生成同一 seed 指纹。"""
+    from agent_moss.engine.formal_engine.stateful import _fingerprint
+
+    full = "echo " + "x" * 100
+    truncated = full[:20] + "…[truncated 84B sha256:" + __import__("hashlib").sha256(
+        full.encode()
+    ).hexdigest()[:16] + "]"
+
+    realtime = _fingerprint(
+        "s", "executeBash", full, "2026-11-23T12:00:00.123456+00:00",
+    )
+    review = _fingerprint(
+        "s", "terminal-executeBash", truncated, "2026-11-23 12:00:00",
+    )
+    assert realtime == review
+
+
+def test_seed_skips_same_action_across_time_precision_and_alias():
+    """同一动作第二次 seed（秒级/别名形态）不再新增节点。"""
+    from agent_moss.engine.formal_engine.stateful import StatefulChainTracker
+
+    tracker = StatefulChainTracker(agent_id="dedupe")
+    first = {"session_id": "s", "action_history": [{
+        "action_type": "executeBash", "action_detail": "echo hi",
+        "called_at": "2026-11-23T12:00:00.999999+00:00",
+    }]}
+    second = {"session_id": "s", "action_history": [{
+        "action_type": "terminal-executeBash", "action_detail": "echo hi",
+        "called_at": "2026-11-23 12:00:00",
+    }]}
+    assert tracker.seed([first]) == 1
+    assert tracker.seed([second]) == 0
+    assert len(tracker.nodes) == 1

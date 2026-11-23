@@ -90,8 +90,15 @@ def _agent_gate_version() -> str:
     """包版本（与 TS 版 AGENTGATE_VERSION 对齐）。
 
     此前 HealthResponse.version 硬编码 "0.2.2"，任何版本升级后看板页脚都显示
-    错误版本。打包安装读分发元数据；源码运行退化为 0.0.0-dev。
+    错误版本。**源码版本优先**：场景仓/开发目录旁边常装着别的
+    ``agent-gate-sec`` 分发，只读 metadata 会把 0.9.x 源码报成陈旧版本；
+    分发元数据只作为 version.py 缺失时的兜底。
     """
+    try:
+        from ...version import __version__ as _source_version
+        return _source_version
+    except Exception:  # noqa: BLE001 - 打包异常时继续尝试分发元数据
+        pass
     try:
         from importlib.metadata import version as _pkg_version
         return _pkg_version("agent-gate-sec")

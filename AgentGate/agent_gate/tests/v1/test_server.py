@@ -25,8 +25,17 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root to path —— 这份测试同时用于基线 editions/ 与场景仓
+# AgentGate/agent_gate/tests/，两处目录深度不同，按 pyproject.toml 向上定位。
+def _project_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists() and (parent / "agent_gate" / "version.py").exists():
+            return parent
+    return Path(__file__).resolve().parents[2]
+
+
+_AGENT_GATE_ROOT = _project_root()
+sys.path.insert(0, str(_AGENT_GATE_ROOT))
 
 from agent_gate import __version__ as agent_gate_version
 from agent_gate.shared.config import Config, reload_config, get_config
@@ -1092,7 +1101,7 @@ class TestConfig:
         assert cfg.get("nonexistent.key", "default") == "default"
 
     def test_config_from_yaml(self):
-        cfg = Config(config_path=Path(__file__).parent.parent / "config" / "agent_gate.yaml")
+        cfg = Config(config_path=_AGENT_GATE_ROOT / "config" / "agent_gate.yaml")
         assert cfg.server["port"] == 9100
 
 

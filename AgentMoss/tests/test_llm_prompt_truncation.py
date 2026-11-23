@@ -94,6 +94,27 @@ def test_format_prompt_history_uses_placeholder_without_intent(history):
     assert LLMAnalyzer._format_prompt_history(history) == "（未提供历史意图）"
 
 
+def test_format_prompt_history_respects_configured_turns(monkeypatch):
+    monkeypatch.setenv("AGENT_MOSS_LLM_PROMPT_HISTORY_MAX_TURNS", "2")
+    history = [{"text": f"意图 {turn}"} for turn in range(1, 4)]
+
+    result = LLMAnalyzer._format_prompt_history(history)
+
+    assert result.splitlines() == [
+        "  第2轮用户意图: 意图 2",
+        "  第3轮用户意图: 意图 3",
+    ]
+
+
+def test_format_prompt_history_zero_keeps_all(monkeypatch):
+    monkeypatch.setenv("AGENT_MOSS_LLM_PROMPT_HISTORY_MAX_TURNS", "0")
+    history = [{"text": f"意图 {turn}"} for turn in range(1, 26)]
+
+    result = LLMAnalyzer._format_prompt_history(history)
+
+    assert len(result.splitlines()) == 25
+
+
 def test_estimate_tokens_roughly_matches_length():
     assert LLMAnalyzer._estimate_tokens("x" * 2500) == 1001
     assert LLMAnalyzer._estimate_tokens("") == 1
