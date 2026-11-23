@@ -247,8 +247,15 @@ class TestLayer1And2:
         [
             ("rm -rf /", "Deny", "critical", ["L1.1"]),
             ("rm -rf --no-preserve-root /", "Deny", "critical", ["L1.1"]),
+            ("rm -rf -v /", "Deny", "critical", ["L1.1"]),
+            ("rm -rf -- /", "Deny", "critical", ["L1.1"]),
+            ("rm -rf --no-preserve-root /.", "Deny", "critical", ["L1.1"]),
+            ("rm -rf --no-preserve-root \"/\"", "Deny", "critical", ["L1.1"]),
+            # 与无选项行为一致：/.build-cache 仍按根目录规则拦截（选项不能改变判定）
+            ("rm -rf --no-preserve-root /.build-cache", "Deny", "critical", ["L1.1"]),
+            ("rm -rf -v /etc", "Deny", "critical", ["L1.1"]),
             ("rm -rf --no-preserve-root /tmp/build/", "Allow", "low", []),
-            ("rm -rf --no-preserve-root /.build-cache", "Allow", "low", []),
+            ("rm -rf -v /tmp/build/", "Allow", "low", []),
         ],
     )
     def test_rm_root_operand(self, default_config, linux_profile, command, decision, level, layers):
@@ -491,6 +498,12 @@ class TestLayer1And2:
             ("deny-790-agentgate-token-read.json", dict(decision="Deny", risk_level="critical")),
             ("deny-791-agentgate-db-write.json", dict(decision="Deny", risk_level="high")),
             ("deny-792-agentmoss-runtime-write.json", dict(decision="Deny", risk_level="critical")),
+            # rm 附加选项不能绕过根目录/敏感路径（2026-11 修复）
+            ("deny-793-rm-root-options.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-794-rm-root-dot-options.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-795-rm-root-quoted-options.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-796-rm-sensitive-options.json", dict(decision="Deny", risk_level="critical")),
+            ("deny-797-rm-hidden-root-options.json", dict(decision="Deny", risk_level="critical")),
             # 2026-10 安全加固：AgentMoss 自身资产的读保护（同机其他 agent 直接 cat 就能拿到）
             ("deny-260-agentmoss-auth-token-read.json", dict(decision="Deny", risk_level="critical")),
             ("deny-261-agentmoss-state-db-read.json", dict(decision="Deny", risk_level="critical")),
@@ -1007,6 +1020,9 @@ class TestLayer1And2:
             # 配套 allow：deny_write 只拦写——读工具名映射（自查）与读网关日志（排障）放行
             ("allow-1128-agentgate-toolname-map-read.json", dict(decision="Allow", risk_level="low")),
             ("allow-1129-agentgate-db-log-read.json", dict(decision="Allow", risk_level="low")),
+            # rm 附加选项不能导致临时目录定向清理被误拦（一拦一放配套）
+            ("allow-1130-rm-temp-options.json", dict(decision="Allow", risk_level="low")),
+            ("allow-1131-rm-temp-short-options.json", dict(decision="Allow", risk_level="low")),
             ("allow-264-tmp-normal-file.json", dict(decision="Allow", risk_level="low")),
             ("allow-266-agentmoss-name-lookalike.json", dict(decision="Allow", risk_level="low")),
             # 脚本分支感知放行：bash deploy.sh backup 走安全分支，不再全文本误报（需 script_branch_cwd fixture 的 deploy.sh）
