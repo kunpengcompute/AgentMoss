@@ -99,6 +99,8 @@ curl -fsS http://127.0.0.1:9090/api/v1/analyze \
 
 `POST /api/v1/review` 可以直接接收 `sessions`，格式与 `session_history` 相同，也支持通过 `db_path` 读取服务端允许访问的 AgentGate SQLite 文件或记录目录。响应中的 `verified` 表示验证结果，`violations` 列出发现的问题。
 
+指定 `db_path` 时，AgentMoss 优先读取该路径。文件不存在时，有有效动作的 `sessions` 可作为备用历史，否则返回 `404`。可正常读取的空库返回 `200`，有备用历史时使用备用历史。路径超出允许目录返回 `403`，库损坏等读取错误返回 `500`。
+
 默认的控制台地址为 `http://127.0.0.1:9090/console/`。页面提示鉴权时，输入运行该服务的 AgentMoss 令牌。
 
 ## 配置

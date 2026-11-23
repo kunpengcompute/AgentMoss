@@ -12,6 +12,7 @@ An explicit path (CLI flag or config) must always win; ``None`` / ``""`` /
 """
 
 import argparse
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -68,7 +69,52 @@ def test_database_never_creates_a_file_named_auto(isolated_home, monkeypatch):
     assert Path(db.db_path) == resolve_storage_db_path("auto")
 
 
-def test_run_server_passes_an_absolute_db_path(isolated_home, monkeypatch):
+def test_database_preserves_sqlite_memory_filename(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = Database(":memory:")
+    try:
+        db.init_schema()
+        assert db.execute("PRAGMA database_list").fetchone()["file"] == ""
+        assert not (tmp_path / ":memory:").exists()
+    finally:
+        db.close()
+
+
+def test_db_path_lookup_before_and_after_startup(isolated_home, monkeypatch):
+    from agent_gate.shared.storage import db as db_module
+
+    monkeypatch.setattr(db_module, "_db", None)
+    default_path = resolve_storage_db_path("auto")
+    assert Path(db_module.get_agent_gate_db_path()) == default_path
+    assert not default_path.exists()
+    active_path = isolated_home / "custom.sqlite"
+    db = db_module.get_db(str(active_path))
+    try:
+        assert Path(db_module.get_agent_gate_db_path()).samefile(active_path)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("filename", ["file:custom.sqlite?mode=rwc", "file:tmp?mode=memory"])
+def test_database_preserves_sqlite_uri_interpretation(tmp_path, monkeypatch, filename):
+    monkeypatch.chdir(tmp_path)
+    # Whether SQLite recognizes URI filenames by default depends on its build.
+    conn = sqlite3.connect(filename)
+    try:
+        expected = conn.execute("PRAGMA database_list").fetchone()[2]
+    finally:
+        conn.close()
+    db = Database(filename)
+    try:
+        db.init_schema()
+        assert db.execute("PRAGMA database_list").fetchone()["file"] == expected
+        assert db.db_path == (expected or ":memory:")
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("source", ["default", "config", "env", "cli"])
+def test_run_server_passes_configured_db_path(isolated_home, monkeypatch, source):
     """The bug lived in ``_run_server``, so guard its wiring too."""
     captured: dict = {}
 
@@ -79,18 +125,28 @@ def test_run_server_passes_an_absolute_db_path(isolated_home, monkeypatch):
     )
 
     from agent_gate.v1 import cli
+    from agent_gate.shared import config
+
+    monkeypatch.setattr(config, "_config", None)
+    monkeypatch.delenv("AGENT_GATE_STORAGE_DB_PATH", raising=False)
+    config_path = isolated_home / "config.yaml"
+    expected = isolated_home / "share" / "agent_gate" / "agent_gate.db"
+    if source != "default":
+        expected = isolated_home / f"{source}.sqlite"
+        config_path.write_text(f"storage:\n  db_path: {isolated_home / 'config.sqlite'}\n")
+    if source in ("env", "cli"):
+        monkeypatch.setenv("AGENT_GATE_STORAGE_DB_PATH", str(isolated_home / "env.sqlite"))
 
     args = argparse.Namespace(
-        config_path=None,
+        config_path=config_path if source != "default" else None,
         host=None,
         port=None,
         mode=None,
         socket_path=None,
         log_level=None,
         workers=None,
-        db_path=None,
+        db_path=str(expected) if source == "cli" else None,
     )
     cli._run_server(args)
 
-    assert captured["db_path"] != "auto"
-    assert Path(captured["db_path"]).is_absolute()
+    assert Path(captured["db_path"]) == expected

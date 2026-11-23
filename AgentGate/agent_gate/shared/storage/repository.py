@@ -24,6 +24,10 @@ class Repository:
     def __init__(self, db: Optional[Database] = None):
         self._db = db or get_db()
 
+    @property
+    def db_path(self) -> str:
+        return self._db.db_path
+
     # ---- Agent ----
 
     def get_or_create_agent(

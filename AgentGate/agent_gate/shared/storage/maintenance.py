@@ -143,7 +143,7 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
 
             review = "attempted"
             asyncio.run(
-                MossClient().review(agent_id=agent_id, db_path=str(repo._db._db_path))
+                MossClient().review(agent_id=agent_id, db_path=repo.db_path)
             )
         except Exception as exc:  # noqa: BLE001
             review = type(exc).__name__

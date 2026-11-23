@@ -4,13 +4,12 @@ Manages connection lifecycle and schema creation.
 Uses a single-write connection + WAL mode for concurrent reads.
 """
 
-import os
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Optional
 
-from ..config import get_config
+from ..config import resolve_storage_db_path
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -82,11 +81,13 @@ class Database:
     """Thread-safe SQLite database manager for AgentGate."""
 
     def __init__(self, db_path: Optional[str] = None):
-        from ..config import resolve_storage_db_path
         # "auto" (the config default) is a sentinel, not a filename — see
         # resolve_storage_db_path. Treating it as a path used to litter the
         # CWD with a file named `auto`.
         self._db_path = resolve_storage_db_path(db_path)
+        if self._db_path != Path(":memory:") and not str(self._db_path).startswith("file:"):
+            # Open and advertise the same file even if the reader has a different cwd.
+            self._db_path = self._db_path.absolute()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._write_lock = threading.Lock()
@@ -140,6 +141,9 @@ class Database:
 
     @property
     def db_path(self) -> str:
+        if str(self._db_path).startswith("file:"):
+            # SQLite resolves URI options and reports an empty filename for memory databases.
+            return self.execute("PRAGMA database_list").fetchone()["file"] or ":memory:"
         return str(self._db_path)
 
 
@@ -156,15 +160,7 @@ def get_db(db_path: Optional[str] = None) -> Database:
 
 
 def get_agent_gate_db_path() -> str:
-    """当前 AgentGate 存储路径（供 AgentMoss ``/api/v1/review`` 直读）。
-
-    与 TS 版 ``getAgentGateDbPath()`` 对应：AgentMoss 的 review 接口拿到这个
-    路径后**直接读文件**，把全量 tool_calls seed 进状态库 —— 数据不双份存储，
-    全量事件流仍以 AgentGate 存储为唯一事实源。
-
-    不复用 ``get_db()``：那会顺带建表/建目录，而调用方（低频回顾触发点）
-    只需要一个路径字符串，不该有初始化副作用。
-    """
-    from ..config import resolve_storage_db_path
-
+    """Return the active singleton's path, or the default before database initialization."""
+    if _db is not None:
+        return _db.db_path
     return str(resolve_storage_db_path())

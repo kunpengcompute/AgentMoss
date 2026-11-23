@@ -995,19 +995,10 @@ async def review(req: ReviewRequest):
     ——跑在事件循环上时，招行现场表现为「analyze 一多，console 就打不开、
     随后 503」。与 analyze 同样的处理：整体丢进线程池。
 
-    安全校验（路径越界 403）留在事件循环里：纯字符串判断，微秒级，
-    且能在真正开始读盘之前就把请求挡掉。
+    路径解析与允许目录校验也在工作线程中执行，校验通过后才打开历史文件。
     """
-    if req.db_path and not sp.path_within(req.db_path, sp.review_roots()):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "db_path 不在允许读取的目录内；标准 AgentGate 部署无需配置，"
-                "自定义路径请加入 AGENT_MOSS_REVIEW_PATHS"
-            ),
-        )
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: _run_review(req))
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run_review, req)
 
 
 def _review_seed_limit(store) -> int:
@@ -1068,15 +1059,53 @@ def _trim_review_sessions(sessions: list[dict], limit: int) -> tuple[list[dict],
     return out, total - limit
 
 
-def _run_review(req: ReviewRequest) -> ReviewResponse:
-    """``/review`` 的同步主体（在 executor 线程里执行，绝不阻塞事件循环）。
+def _load_review_sessions(req: ReviewRequest) -> list[dict]:
+    if not req.db_path:
+        return req.sessions
 
-    db_path 的越界校验已上移到 async 入口（读盘前先挡掉），这里不再重复。
-    """
+    from .agent_gate_reader import load_agent_gate_sessions
+
+    source_path = os.path.realpath(os.path.expanduser(req.db_path))
+    if not sp.path_within(source_path, sp.review_roots()):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "db_path 不在允许读取的目录内；标准 AgentGate 部署无需配置，"
+                "自定义路径请加入 AGENT_MOSS_REVIEW_PATHS"
+            ),
+        )
+    try:
+        sessions = load_agent_gate_sessions(source_path)
+    except FileNotFoundError:
+        sessions = None
+    if sessions:
+        return sessions
+
+    # A missing or empty source can only use actions supplied in this request.
+    backup = []
+    for session in req.sessions:
+        history = session.get("action_history")
+        if not isinstance(history, list):
+            continue
+        actions = [
+            action for action in history
+            if isinstance(action, dict) and isinstance(action.get("action_detail"), str)
+            and action["action_detail"].strip()
+        ]
+        if actions:
+            backup.append({**session, "action_history": actions})
+    if sessions is None:
+        if not backup:
+            raise HTTPException(status_code=404, detail="指定的回顾路径不存在")
+        logger.warning("回顾路径不存在，使用请求中的 sessions: agent=%s", req.agent_id or "default")
+    return backup
+
+
+def _run_review(req: ReviewRequest) -> ReviewResponse:
+    """在线程池中选择历史来源、更新链状态并验证。"""
     try:
         from ..engine.formal_engine import FormalEngine
         from ..engine.formal_engine.chain_state import get_chain_state_store
-        from .agent_gate_reader import load_agent_gate_sessions
 
         agent_id = req.agent_id or "default"
         _review_t0 = time.monotonic()
@@ -1092,16 +1121,8 @@ def _run_review(req: ReviewRequest) -> ReviewResponse:
             )
         except Exception:  # noqa: BLE001
             pass
+        sessions = _load_review_sessions(req)
         store = get_chain_state_store()
-
-        # 1. 读取历史（db_path 直读 > 显式 sessions）
-        sessions: list[dict] = []
-        if req.db_path:
-            sessions = load_agent_gate_sessions(req.db_path)
-            if not sessions:
-                sessions = req.sessions if req.sessions else []
-        else:
-            sessions = req.sessions if req.sessions else []
         # 限制单次 seed 的规模（可配置 + 按时间线水位自适应收紧）
         _seed_limit = _review_seed_limit(store)
         sessions, _dropped = _trim_review_sessions(sessions, _seed_limit)
@@ -1130,31 +1151,22 @@ def _run_review(req: ReviewRequest) -> ReviewResponse:
         except Exception:  # noqa: BLE001
             pass
 
-        # 2. 全量 FormalEngine 验证（跨会话组合链 / 敏感数据传播）
-        #    用"本次 seed 的 sessions（多 session 原始结构）+ 当前已累积节点"构建
-        #    多 session 行为图，正确跨越 session 边界匹配链。
+        # 只有未指定来源的回顾可从已有链状态重建验证历史。
+        verify_sessions = sessions
+        if not req.db_path and not sessions and tracker.nodes:
+            # 旧状态与本次 seed 用同一动作上限，避免验证整条时间线。
+            nodes = tracker.nodes[-_seed_limit:] if _seed_limit > 0 else tracker.nodes
+            verify_sessions = [{
+                "session_id": tracker.agent_id,
+                "action_history": [
+                    {"action_type": n.action_type, "action_detail": n.action_detail} for n in nodes
+                ],
+            }]
+
         verified = True
         violations: list[dict] = []
-        if sessions or tracker.nodes:
-            eng = FormalEngine()
-            # 历史用本次 seed 的 sessions（多 session）；若 db 直读则用读出来的 sessions。
-            #
-            # ⚠️ **必须限制规模**（2026-11 实测）：FormalEngine.verify 的耗时是
-            # 超线性的 —— 1000 条 203ms、5000 条 1.5s、20000 条 **14s**。
-            # 原先 sessions 为空时拿 tracker.nodes 全量去验证，6 万节点就是
-            # 一分钟以上；而 AgentGate 每 100 次 analyze 就触发一次 review，
-            # 线程池会被这一个接口吃干。这里与 seed 用同一个上限。
-            if sessions:
-                verify_sessions = sessions
-            else:
-                _nodes = tracker.nodes[-_seed_limit:] if _seed_limit > 0 else tracker.nodes
-                verify_sessions = [
-                    {"session_id": tracker.agent_id, "action_history": [
-                        {"action_type": n.action_type, "action_detail": n.action_detail}
-                        for n in _nodes
-                    ]}
-                ]
-            full = eng.verify(
+        if verify_sessions or (req.db_path and req.a_next):
+            full = FormalEngine().verify(
                 sessions=verify_sessions,
                 a_next=(
                     {"action_type": req.a_next.action_type, "action_detail": req.a_next.action_detail}
@@ -1179,7 +1191,7 @@ def _run_review(req: ReviewRequest) -> ReviewResponse:
         if sessions:
             from ..engine.formal_engine.pattern_miner import mine_dangerous_patterns
             discovered = mine_dangerous_patterns(
-                verify_sessions if sessions else [],
+                sessions,
                 min_sup=2,
             )
 

@@ -61,7 +61,7 @@ _review_counter = 0
 _review_tasks: set = set()
 
 
-def _maybe_trigger_review(moss_client, agent_id: str) -> None:
+def _maybe_trigger_review(moss_client, agent_id: str, repo) -> None:
     """低频回顾触发（fire-and-forget）。
 
     每 N 条落库投递一次，让 AgentMoss 直读本地存储重建链状态、提取待攻击
@@ -70,21 +70,20 @@ def _maybe_trigger_review(moss_client, agent_id: str) -> None:
     Args:
         moss_client: 本次请求注入的 MossClient（复用其连接配置）。
         agent_id: 目标 agent 标识（AgentMoss 状态库分桶用）。
+        repo: 本次工具调用实际写入的 Repository。
     """
     global _review_counter
     _review_counter += 1
     if _review_counter % _REVIEW_INTERVAL != 0:
         return
     try:
-        from ..storage.db import get_agent_gate_db_path
-
         task = asyncio.create_task(
-            moss_client.review(agent_id=agent_id, db_path=get_agent_gate_db_path())
+            moss_client.review(agent_id=agent_id, db_path=repo.db_path)
         )
         _review_tasks.add(task)
         task.add_done_callback(_review_tasks.discard)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("review trigger skipped: %s", exc)
+        logger.debug("review trigger skipped: {}", exc)
 
 
 def _agent_gate_version() -> str:
@@ -239,7 +238,7 @@ async def analyze(
     # 8. 低频回顾（fire-and-forget）：每 N 条落库触发一次，让 AgentMoss 直读
     #     本地存储重建链状态 + 提取待攻击前序。对齐 TS 版 v1/routes.ts；
     #     不阻塞本次响应，失败也不影响已算出的判定。
-    _maybe_trigger_review(moss_client, agent_id)
+    _maybe_trigger_review(moss_client, agent_id, repo)
 
     return AgentGateResponse(
         decision=moss_result.get("decision", "Deny"),

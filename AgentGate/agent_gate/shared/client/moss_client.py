@@ -332,9 +332,9 @@ class MossClient:
 
         Args:
             agent_id: 目标 agent 标识（决定 AgentMoss 状态库分桶）。
-            db_path: AgentGate 存储路径；空串直接跳过（与 TS 版一致）。
+            db_path: AgentGate 存储路径。仅文件型数据库可供另一进程直读。
         """
-        if not db_path:
+        if not db_path or db_path == ":memory:":
             return
 
         url = f"{self._base_url}/api/v1/review"
@@ -352,7 +352,7 @@ class MossClient:
                 timeout=httpx.Timeout(30.0),
             )
             if resp.status_code >= 400:
-                logger.warning("AgentMoss review HTTP %s", resp.status_code)
+                logger.warning("AgentMoss review HTTP {}", resp.status_code)
             else:
                 # 结果出口（2026-10）：此前只检查状态码，review 算出的全量性质
                 # 违规（P3–P8 等）被直接丢弃 —— 全量范围等于静默漏报。这里把
@@ -364,13 +364,13 @@ class MossClient:
                 violations = data.get("violations") or []
                 if violations:
                     logger.warning(
-                        "AgentMoss 全量回顾发现 %d 条性质违规（agent=%s）: %s",
+                        "AgentMoss 全量回顾发现 {} 条性质违规（agent={}）: {}",
                         len(violations), agent_id,
                         ", ".join(str(v.get("property_id", "?")) for v in violations[:8]),
                     )
         except Exception as exc:  # noqa: BLE001
             # 与 analyze 不同：回顾失败**不降级为 Deny**，实时路径完全不受影响
-            logger.warning("AgentMoss review unreachable: %s", exc)
+            logger.warning("AgentMoss review unreachable: {!r}", exc)
 
     def _fail_closed_response(self, error: str, risk_type: str = "service_unavailable", reason_prefix: str = "AgentMoss security service unavailable") -> dict:
         return {
