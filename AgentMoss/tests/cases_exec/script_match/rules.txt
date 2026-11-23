@@ -1,4 +1,4 @@
-(?i)\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/(?!\w)
+(?i)\brm[ \t]+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*[ \t]+(?:/(?!\w)|(?:(?:-[a-zA-Z]+|--[\w=-]*)[ \t]+)+/(?=$|[\s;&|<>()]))
 (?i)\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+/(?:etc|var(?!/tmp)|usr|boot|root|opt|srv|sys|proc|home(?:/|/[A-Za-z0-9_.-]+/?)?(?=[\s;|&\"']|$))
 (?i)\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/(?!tmp|var/tmp|run|dev/shm|mnt|media)(?:/|\b)
 (?i)\brm\s+-[a-zA-Z]*f[a-zA-Z]*\s+/(?!tmp/|var/tmp/|run/|dev/shm/)

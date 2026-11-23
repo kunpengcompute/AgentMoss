@@ -243,6 +243,26 @@ class TestLayer1And2:
     """测试层1（特征匹配）+ 层2（逻辑规则），不依赖 LLM"""
 
     @pytest.mark.parametrize(
+        ("command", "decision", "level", "layers"),
+        [
+            ("rm -rf /", "Deny", "critical", ["L1.1"]),
+            ("rm -rf --no-preserve-root /", "Deny", "critical", ["L1.1"]),
+            ("rm -rf --no-preserve-root /tmp/build/", "Allow", "low", []),
+            ("rm -rf --no-preserve-root /.build-cache", "Allow", "low", []),
+        ],
+    )
+    def test_rm_root_operand(self, default_config, linux_profile, command, decision, level, layers):
+        # 只调用分析器，避免将关闭根目录保护的命令导出到 cases_exec 的可执行脚本。
+        result = analyze(
+            session_id="rm-root-operand", prompt_session="", action_history=[],
+            a_next={"action_type": "bash", "action_detail": command}, reason="",
+            config=default_config, profile=linux_profile,
+        )
+        assert (result["decision"], result["risk_level"], result["violated_layers"]) == (
+            decision, level, layers,
+        )
+
+    @pytest.mark.parametrize(
         "case_file, expected_parts",
         [
             ("deny-01-chmod-777.json", dict(decision="Deny", risk_level="critical")),
@@ -2516,7 +2536,7 @@ class TestOSProfile:
         # 用「正则片段」匹配「正则字符串」容易因转义歧义误判，这里改为断言 pattern
         # 字符串包含稳定子串（pattern 是正则 source，子串是其中的字面片段）。
         expected_fragments = [
-            "rm\\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\\s+/",  # rm -rf /
+            r"rm[ \t]+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*",  # rm 递归强制删除，目标判定见 test_rm_root_operand
             "[0-7]{0,3}7\\b",  # chmod 危险权限（含 -R 递归形态；断言稳定子串 [0-7]{0,3}7\b）
             "[2-7][0-7]{3}",  # setuid/setgid（含 3/5/7xxx 组合位，对齐 Python NEW-FN；断言稳定子串 [2-7][0-7]{3}）
             "sudo\\s+(rm|chmod|chown|dd|mkfs",  # sudo 提权

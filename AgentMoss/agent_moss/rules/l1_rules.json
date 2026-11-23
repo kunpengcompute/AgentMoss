@@ -1,7 +1,7 @@
 {
   "dangerous_commands": [
     {
-      "pattern": "\\brm\\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\\s+/(?!\\w)",
+      "pattern": "\\brm[ \\t]+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*[ \\t]+(?:/(?!\\w)|(?:(?:-[a-zA-Z]+|--[\\w=-]*)[ \\t]+)+/(?=$|[\\s;&|<>()]))",
       "risk_level": "critical",
       "risk_type": "script_execution",
       "reason": "检测到递归强制删除根目录 (rm -rf /)"
