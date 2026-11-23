@@ -1973,7 +1973,7 @@ class LogicRulesChecker:
                 risk_type="intent_deviation",
             )
         # 意图不明确（读/写/删都提取不到）但动作是覆盖/删除：不猜，放行交 L3；
-        # L3 带完整对话历史，能理解"根据之前说的办"这类指代。留日志供审计。
+        # L3 可结合近期历史意图理解"根据之前说的办"这类指代。留日志供审计。
         if action_cat in ("overwrite", "delete") and not intents:
             logger.info(
                 "[intent] 意图不明确，跳过意图偏离判定并交 L3：prompt=%r 动作=%s(%r)",
@@ -2008,7 +2008,7 @@ class LogicRulesChecker:
             return cur
         # 指代前文：回退到最近的历史 prompt。**回退必须准确**——
         # 找不到候选、或最近多条候选的意图互相冲突时，视为「无法确定意图」，
-        # 返回当前（不命中 → 放行），交 L3 结合完整历史判断。
+        # 返回当前（不命中 → 放行），交 L3 结合近期历史判断。
         turns = prompt_history or []
         candidates: list[str] = []
         for turn in reversed(turns[-_REFERENCE_LOOKBACK:]):

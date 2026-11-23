@@ -37,6 +37,8 @@ from .types import HeuristicResult, LogicRuleResult, SecurityJudgment
 
 logger = logging.getLogger(__name__)
 
+_PROMPT_HISTORY_MAX_TURNS = 20
+
 
 class LLMAnalysisFailure(Exception):
     """LLM 分析失败的异常"""
@@ -156,8 +158,7 @@ class LLMAnalyzer:
         matched_skills = self._skill_engine.match_skills(a_next, reason)
         skills_text = self._skill_engine.format_skills_for_prompt(matched_skills)
 
-        # 2.5 格式化交错历史 prompt（供 LLM 判断意图一致性，避免"继续"覆盖初始意图）
-        # 只喂 prompt 文本 + 各轮动作类型/详情（截断），与 action_history 互补但不重复。
+        # 2.5 格式化近期历史意图，供 LLM 结合前文理解「继续」等指令。
         prompt_history_text = self._format_prompt_history(prompt_history)
 
         # 3. 格式化特征匹配/逻辑规则提示
@@ -617,17 +618,17 @@ class LLMAnalyzer:
         prompt_history: list[dict[str, object]] | None,
         max_text_chars: int = 500,
     ) -> str:
-        """格式化交错历史 prompt 为 LLM 可读文本。
+        """格式化最近提交的历史轮次，保留原轮号。
 
-        每轮输出 "第 N 轮用户意图: <text>"，若该轮带 actions 则附上动作类型
-        （动作详情截断，避免撑爆 context）。空/None 返回占位。
+        窗口内的非空意图按字符截断，附带动作只显示类型。无可展示的意图时返回占位。
         """
         if not prompt_history:
             return "（未提供历史意图）"
 
+        first_turn_index = max(0, len(prompt_history) - _PROMPT_HISTORY_MAX_TURNS)
         lines = []
         longest_text_chars = 0
-        for i, turn in enumerate(prompt_history, 1):
+        for i, turn in enumerate(prompt_history[first_turn_index:], start=first_turn_index + 1):
             if not isinstance(turn, dict):
                 continue
             text = turn.get("text", "")
