@@ -33,20 +33,22 @@ def test_empty_rules_file_build_and_disk_status(tmp_path):
     assert data["worker_state"] == "not_checked"
 
 
-def test_linux_profile_build_uses_real_native_and_status_is_disk_only(tmp_path, monkeypatch):
+def test_linux_profile_build_uses_real_native_and_status_is_disk_only(tmp_path, monkeypatch, linux_profile):
     library = os.environ.get("AGENT_MOSS_TEST_HS_LIB")
     if not library:
         pytest.skip("set AGENT_MOSS_TEST_HS_LIB to a real Hyperscan compile library")
     monkeypatch.setenv("AGENT_MOSS_ACCEL_LIB", library)
     monkeypatch.setenv("AGENT_MOSS_ACCEL_BACKEND", "hyperscan")
+    monkeypatch.delenv("AGENT_MOSS_SCENARIO", raising=False)
     entry = tmp_path / "prefilter.hsdb"
     built = _run(tmp_path, "build-db", "--profile", "linux", "--out", str(entry))
     assert built.returncode == 0, built.stderr
     report = json.loads(built.stdout)
-    assert report["rules_total"] == 163
+    assert report["rules_total"] == len(linux_profile.dangerous_commands)
     assert report["rules_prefilter"] >= 160
     status = _run(tmp_path, "status", "--db", str(entry))
     assert status.returncode == 0, status.stderr
     data = json.loads(status.stdout)
+    assert data["package"]["rules_total"] == report["rules_total"]
     assert data["package"]["rules_accelerated"] == report["rules_prefilter"]
     assert data["worker_state"] == "not_checked"
