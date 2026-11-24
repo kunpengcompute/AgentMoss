@@ -523,6 +523,44 @@ def test_local_parse_budgets_skip_only_the_oversized_candidates(reason):
     assert [child.path for child in ir.calls] == ["fits.sh", "fits-depth.sh", "later.sh"]
 
 
+def test_string_assignments_reach_child_with_exact_arguments(reason):
+    source = (
+        'from subprocess import run as launch\n'
+        'first = "draft"\n'
+        'first = "two words"; second = \'\'\n'
+        'launch(["bash", "child.sh", first, second])\n'
+        'launch = "replaced"\n'
+        'launch(["bash", "hidden.sh"])'
+    )
+    _assert_fallback(_fallback_source(source, reason), reason, [
+        ScriptCall(path="child.sh", args=["two words", ""], interpreter="bash"),
+    ])
+
+
+@pytest.mark.parametrize("assignment, operand, expected", [
+    ('mode = "two" " words"', "mode", "two words"),
+    ('mode = "draft" + unknown', "mode", None),
+    ('mode = "clean"  # note', "mode", "clean"),
+    (r'mode = "one\ttwo"', "mode", "one\ttwo"),
+    ('ｍode = "normalized"', "mode", "normalized"),  # Python normalizes the fullwidth m.
+    ('None = "invalid"', "Ｎｏｎｅ", None),  # Only the fullwidth spelling parses as a name.
+])
+def test_fallback_binds_only_the_complete_assignment(reason, assignment, operand, expected):
+    source = _fallback_source(f'{assignment}\nsubprocess.run(["bash", "child.sh", {operand}])', reason)
+    calls = [] if expected is None else [ScriptCall(path="child.sh", args=[expected], interpreter="bash")]
+    _assert_fallback(source, reason, calls)
+
+
+@pytest.mark.parametrize("size", [8192, 8193])
+def test_literal_assignment_respects_statement_budget(reason, size):
+    value = "a" * (size - len('mode = ""'))
+    source = _fallback_source(
+        f'mode = "previous"\nmode = "{value}"\nsubprocess.run(["bash", "child.sh", mode])', reason,
+    )
+    calls = [ScriptCall(path="child.sh", args=[value], interpreter="bash")] if size == 8192 else []
+    _assert_fallback(source, reason, calls)
+
+
 def _scan_marked_child(tmp_path, source):
     parent = tmp_path / "parent.py"
     child = tmp_path / "child.sh"
@@ -762,6 +800,36 @@ def test_only_potentially_executed_fallback_calls_visit_children(tmp_path, reaso
     source = _fallback_source(body.format(command=_MULTILINE_COMMAND), reason)
     retained, _ = _scan_marked_child(tmp_path, source)
     assert retained == source
+
+
+_NESTED_UNREACHABLE = (
+    'import os\nif False:\n    if False:\n        os.system("bash inner.sh")\n'
+    '    os.system("bash outer.sh")\nos.system("bash top.sh")'
+)
+
+
+@pytest.mark.parametrize("source, reason, incomplete", [
+    (_with_lines(_NESTED_UNREACHABLE, 501), "line_budget", False),
+    (_NESTED_UNREACHABLE + "\nif :", "syntax_error", False),
+    ('import os\nif False:\n    os.system("bash hidden.sh")\n  pass\nos.system("bash top.sh")', "syntax_error", True),
+], ids=["nested-line-budget", "nested-syntax-error", "recover-inside-unreachable-suite"])
+def test_fallback_reads_top_level_child_after_unreachable_suites(tmp_path, monkeypatch, source, reason, incomplete):
+    parent = tmp_path / "parent.py"
+    parent.write_text(source, encoding="utf-8")
+    for name in ("inner.sh", "outer.sh", "hidden.sh", "top.sh"):
+        (tmp_path / name).write_text(f"echo {name}\n", encoding="utf-8")
+    read_script = Mock(wraps=tracker._read_script)
+    monkeypatch.setattr(tracker, "_read_script", read_script)
+    diagnostics = Mock()
+    diagnostics.begin.return_value = {}
+
+    result = analyze_script_content("bash", "python3 parent.py", cwd=str(tmp_path), diagnostics=diagnostics)
+
+    assert [entry.args[0] for entry in read_script.call_args_list] == [str(parent), str(tmp_path / "top.sh")]
+    assert [node.preprocessed_content for node in result.nodes] == [source, "echo top.sh\n"]
+    details = diagnostics.begin.return_value["nodes"][0]
+    assert details["fallback_reason"] == reason
+    assert details["child_tokenization_incomplete"] is incomplete
 
 
 def test_agreeing_if_and_else_replace_the_previous_binding(tmp_path, reason):

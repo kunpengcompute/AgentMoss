@@ -69,6 +69,9 @@ _FALLBACK_PYTHON_CALL_HINTS = tuple(
 _BARE_CALL_HINT_RE = re.compile(r"(?:/bin/)?(?:bash|sh|zsh|python3?|node|ruby|perl|php|lua)[ \t]+", re.IGNORECASE)
 _ASSIGNMENT_PREFIXES = ("=", ":=", "+=", "-=", "*=", "/=", "%=", "@=", "&=", "|=", "^=", "//=", "**=", "<", ">")
 _FSTRING_START_RE = re.compile(r"(?i:fr?|rf)['\"]")
+_PLAIN_STRING_ASSIGNMENT = re.compile(
+    r"""[A-Za-z_]\w*[ \t]*=[ \t]*(?:"[^"\\]*"|'[^'\\]*')[ \t]*""", re.ASCII,
+)
 
 
 # ==================== 符号环境 ====================
@@ -1118,6 +1121,7 @@ class _FallbackBindings:
         self.strings: dict[str, str] = {"__name__": "__main__"}
         self._head: list[tokenize.TokenInfo] = []
         self._suites = []
+        self._unreachable_suites = 0
         self._last_if = None
         self._reset_statement()
 
@@ -1198,7 +1202,7 @@ class _FallbackBindings:
             return False  # A previous branch already matched this elif/else.
         if self._inline_branch is not None and not self._inline_branch.reachable:
             return False
-        return not any(isinstance(state, _IfBranch) and not state.reachable for _, state in self._suites)
+        return self._unreachable_suites == 0
 
     def recover(self) -> None:
         # Completed top-level statements survive a lexical restart. A pending
@@ -1208,6 +1212,7 @@ class _FallbackBindings:
         ):
             self.invalidate()
         self._suites.clear()
+        self._unreachable_suites = 0
         self._last_if = None
         self._reset_statement()
 
@@ -1326,9 +1331,11 @@ class _FallbackBindings:
         if kind in (tokenize.COMMENT, tokenize.NL):
             return
         if kind == tokenize.INDENT:
-            suite = self._pending_suite or ("conditional", None)
-            self._suites.append(suite)
-            if suite[0] == "conditional":
+            suite, outer = self._pending_suite or ("conditional", None)
+            self._suites.append((suite, outer))
+            if isinstance(outer, _IfBranch) and not outer.reachable:
+                self._unreachable_suites += 1
+            if suite == "conditional":
                 self.invalidate()
             self._reset_statement()
             return
@@ -1337,6 +1344,8 @@ class _FallbackBindings:
             if suite == "function":
                 self._leave_definition(outer, source, line_offsets[start[0] - 1] + start[1])
             elif isinstance(outer, _IfBranch):
+                if not outer.reachable:
+                    self._unreachable_suites -= 1
                 self._close_branch(outer)
             elif suite != "finally":
                 self.invalidate()
@@ -1474,19 +1483,32 @@ class _FallbackBindings:
     def _finish(self, source: str, offsets: list[int], end: tuple[int, int]) -> None:
         first = self._head[0]
         is_import = first.string in ("import", "from")
-        is_fstring = bool(_FSTRING_START_RE.match(first.string))
-        if not is_import and not is_fstring and not (
-            len(self._head) == 3 and first.type == tokenize.NAME
-            and (self._head[1].string == ":" or self._head[1].string == "="
-                 and (self._head[2].type == tokenize.STRING or self._head[2].string == "("
-                      or _FSTRING_START_RE.match(self._head[2].string)))
-        ):
-            return
+        literal = None
+        if not is_import:
+            if first.type == tokenize.NAME:
+                if len(self._head) != 3:
+                    return
+                _, operator, operand = self._head
+                if operator.string == "=" and operand.type == tokenize.STRING:
+                    literal = operand
+                elif operator.string != ":" and not (
+                    operator.string == "=" and (operand.string == "(" or _FSTRING_START_RE.match(operand.string))
+                ):
+                    return
+            elif not _FSTRING_START_RE.match(first.string):
+                return
         begin = offsets[first.start[0] - 1] + first.start[1]
         stop = offsets[end[0] - 1] + end[1]
         if self._peak_depth <= _MAX_FALLBACK_CALL_DEPTH and stop - begin <= _MAX_FALLBACK_CALL_CHARS:
             fragment = source[begin:stop]
-            if is_fstring and ":=" not in fragment:
+            if first.type != tokenize.NAME and not is_import and ":=" not in fragment:
+                return
+            # The three head tokens may be followed by another literal or an
+            # expression. Only the complete bounded statement can establish a value.
+            if (literal is not None and (literal.end == end or fragment.endswith((" ", "\t")))
+                    and literal.string.isascii() and literal.string.isprintable()
+                    and _PLAIN_STRING_ASSIGNMENT.fullmatch(fragment) and not keyword.iskeyword(first.string)):
+                self._bind_string(first.string, literal.string[1:-1])
                 return
             try:
                 statements = ast.parse(fragment).body
@@ -1529,10 +1551,12 @@ class _FallbackBindings:
                         and isinstance(assignment.value, ast.Constant) and isinstance(assignment.value.value, str)):
                     self.strings[assignment.target.id] = assignment.value.value
         if target is not None:
-            value = _literal_text(statement.value, self)
-            self._forget(target)
-            if value is not None:
-                self.strings[target] = value
+            self._bind_string(target, _literal_text(statement.value, self))
+
+    def _bind_string(self, name: str, value: str | None) -> None:
+        self._forget(name)
+        if value is not None:
+            self.strings[name] = value
 
     def _record_import(self, statement: ast.Import | ast.ImportFrom) -> None:
         for alias in statement.names:
