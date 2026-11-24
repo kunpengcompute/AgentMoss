@@ -7,13 +7,17 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import pytest
 
+from agent_moss.engine import analyzer
 from agent_moss.engine.types import (
     L3_OUTCOMES,
     SecurityJudgment,
     derive_l3_outcome,
 )
+from agent_moss.infra.config import Config, RetryConfig, TimeoutConfig
 
 
 def _j(source: str, allowed: bool = True) -> SecurityJudgment:
@@ -81,3 +85,31 @@ def test_case_insensitive_source() -> None:
     """source 大小写不应影响判定（TS 侧同样 lower-case）。"""
     assert derive_l3_outcome(_j("LLM", True)) == "ok"
     assert derive_l3_outcome(_j("LLM_Failure_Fallback", True)) == "fail_open"
+
+
+@pytest.mark.parametrize("include_l3_diagnostics", [True, False])
+def test_circuit_reason_is_preserved_when_policy_generation_fails(monkeypatch, include_l3_diagnostics):
+    circuit_reason = "LLM 分析失败（warn-allow，fail_open）: fixture circuit open"
+    monkeypatch.setattr(analyzer, "judge_security", Mock(return_value=SecurityJudgment(
+        allowed=True, source="llm_circuit_open", reason=circuit_reason,
+    )))
+    monkeypatch.setattr(analyzer, "MossLogger", Mock())
+    monkeypatch.setattr(analyzer, "is_policy_gen_enabled", lambda: True)
+    monkeypatch.setattr(analyzer, "call_llm", Mock(side_effect=ValueError("fixture policy generation failure")))
+    cache = Mock()
+    cache.get.return_value = None
+    config = Config(timeout=TimeoutConfig(step_interval=0), retry=RetryConfig(max_retries=1))
+
+    result = analyzer.analyze(
+        session_id="policy-circuit", prompt_session="", action_history=[],
+        a_next={"action_type": "bash", "action_detail": "echo example"}, reason="",
+        config=config, cache=cache, include_l3_diagnostics=include_l3_diagnostics,
+    )
+
+    assert result["decision"] == "Deny"
+    assert "fixture policy generation failure" in result["reason"]
+    assert result["l3_outcome"] == "circuit_open"
+    if include_l3_diagnostics:
+        assert result["_l3_circuit_reason"] == circuit_reason
+    else:
+        assert "_l3_circuit_reason" not in result

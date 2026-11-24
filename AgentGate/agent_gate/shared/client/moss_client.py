@@ -6,6 +6,7 @@ If AgentMoss is unreachable, returns Deny (security-first).
 
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,6 +24,15 @@ _MOSS_TOKEN_TTL = 60.0
 #: 只记一次，避免链状态触顶后每个请求都刷一条 warning。
 _DEGRADED_LAST_LOGGED: dict[str, float] = {}
 _DEGRADED_LOG_INTERVAL = 300.0
+
+_GATE_REQUIRE_IDENTITY_HEADER = "X-AgentGate-Require-Identity"
+_GATE_CALL_ID_HEADER = "X-AgentGate-Call-Id"
+_GATE_RATE_LIMITED_CALL_ID_HEADER = "X-AgentGate-Rate-Limited-Call-Id"
+_GATE_BUSY_CALL_ID_HEADER = "X-AgentGate-Busy-Call-Id"
+_GATE_RESERVED_FIELDS = frozenset({
+    "gate_call_id", "gate_call_time_us", "gate_delivery_uncertain",
+    "_gate_call_id", "_gate_call_time_us", "_gate_protocol_rejected",
+})
 
 
 def _moss_port_file() -> Path | None:
@@ -161,6 +171,15 @@ def resolve_moss_token(force: bool = False) -> str:
     return tok
 
 
+def resolve_moss_gate_token() -> str:
+    """Select the dedicated Gate identity without consulting legacy credentials."""
+    return os.getenv("AGENT_GATE_MOSS_GATE_TOKEN", "").strip()
+
+
+def _without_gate_fields(data: dict) -> dict:
+    return {key: value for key, value in data.items() if key not in _GATE_RESERVED_FIELDS}
+
+
 class MossClient:
     """Async HTTP client for AgentMoss security analysis service.
 
@@ -240,32 +259,64 @@ class MossClient:
         except Exception:  # noqa: BLE001 — 探活失败只回报状态
             return {"moss_version": "N/A", "moss_status": "unreachable"}
 
-    async def analyze(self, request: dict) -> dict:
+    async def analyze(self, request: dict, *, accepted_at_us: int | None = None) -> dict:
         """Send analysis request to AgentMoss.
 
         Returns:
             dict with decision/reason/risk_level fields.
             On failure, returns Deny with error details (Fail-Closed).
         """
+        gate_token = resolve_moss_gate_token()
+        gate_call_id = uuid.uuid4().hex if gate_token else ""
+        gate_audit = {}
+        payload = _without_gate_fields(request)
+        if isinstance(payload.get("metadata"), dict):
+            payload["metadata"] = _without_gate_fields(payload["metadata"])
+        if gate_call_id:
+            call_time_us = accepted_at_us if accepted_at_us is not None else time.time_ns() // 1000
+            payload.update(gate_call_id=gate_call_id, gate_call_time_us=call_time_us)
+            gate_audit = {"_gate_call_id": gate_call_id, "_gate_call_time_us": call_time_us}
+
         last_error = ""
         attempt = 0
         max_attempts = self._max_retries + 1
         auth_retried = False
+        delivery_uncertain = False
+        auth_rejected = False
         while attempt < max_attempts:
             display_attempt = attempt + 1
             attempt += 1
             headers = {}
-            token = resolve_moss_token()
+            token = gate_token or resolve_moss_token()
+            if gate_call_id:
+                headers[_GATE_REQUIRE_IDENTITY_HEADER] = "1"
+                headers[_GATE_CALL_ID_HEADER] = gate_call_id
+                payload["gate_delivery_uncertain"] = delivery_uncertain
             if token:
                 headers["Authorization"] = f"Bearer {token}"
             try:
                 response = await self._client.post(
                     f"{self._base_url}/api/v1/analyze",
-                    json=request,
+                    json=payload,
                     headers=headers,
                 )
+                if gate_call_id and response.status_code == 429:
+                    if response.headers.get(_GATE_RATE_LIMITED_CALL_ID_HEADER) != gate_call_id:
+                        return self._gate_protocol_rejection("unconfirmed rate limit response")
+                    return {
+                        **self._fail_closed_response("AgentMoss analysis rate limited"),
+                        **gate_audit,
+                    }
                 response.raise_for_status()
                 result = response.json()
+                if gate_call_id and (
+                    not isinstance(result, dict)
+                    or result.get("gate_call_id") != gate_call_id
+                    or result.get("decision") not in ("Allow", "Deny")
+                ):
+                    return self._gate_protocol_rejection("unconfirmed analysis response")
+                result = _without_gate_fields(result)
+                result.update(gate_audit)
                 logger.debug(
                     f"AgentMoss response: decision={result.get('decision')}, "
                     f"duration={result.get('analysis_duration_ms', 0)}ms"
@@ -279,29 +330,57 @@ class MossClient:
                 return result
 
             except httpx.TimeoutException as e:
+                if gate_call_id and not isinstance(e, (httpx.ConnectTimeout, httpx.PoolTimeout)):
+                    delivery_uncertain = True
                 last_error = f"AgentMoss timeout after {self._timeout}s"
                 logger.warning(f"{last_error} (attempt {display_attempt})")
 
             except httpx.ConnectError as e:
-                last_error = f"AgentMoss connection failed: {e}"
+                last_error = "AgentMoss connection failed" if gate_call_id else f"AgentMoss connection failed: {e}"
+                logger.warning(f"{last_error} (attempt {display_attempt})")
+
+            except httpx.TransportError as e:
+                if not gate_call_id:
+                    last_error = f"AgentMoss unexpected error: {e}"
+                    logger.warning(f"{last_error} (attempt {display_attempt})")
+                    break
+                delivery_uncertain = True
+                last_error = "AgentMoss transport failed"
                 logger.warning(f"{last_error} (attempt {display_attempt})")
 
             except httpx.HTTPStatusError as e:
-                last_error = f"AgentMoss HTTP {e.response.status_code}"
+                status_code = e.response.status_code
+                last_error = f"AgentMoss HTTP {status_code}"
                 # 401：AgentMoss 可能刚首次启动生成了 token（我们缓存里还是空），
                 # 或 token 被轮换。强制重读一次再试，不占用正常重试次数。
-                if e.response.status_code == 401 and not auth_retried:
+                if status_code == 401 and not auth_retried:
                     auth_retried = True
                     max_attempts += 1
-                    resolve_moss_token(force=True)
+                    if gate_call_id:
+                        auth_rejected = True
+                        gate_token = resolve_moss_gate_token()
+                        if not gate_token:
+                            return self._gate_protocol_rejection("dedicated credential unavailable")
+                    else:
+                        resolve_moss_token(force=True)
                     logger.warning("AgentMoss 返回 401，已重新读取访问 token，重试一次")
                     continue
                 logger.warning(f"{last_error} (attempt {display_attempt})")
+                if gate_call_id:
+                    if not 500 <= status_code < 600:
+                        return self._gate_protocol_rejection(last_error)
+                    if status_code == 503 and e.response.headers.get(_GATE_BUSY_CALL_ID_HEADER) == gate_call_id:
+                        # Moss 已确认专用身份，且本次尝试尚未分析。
+                        auth_rejected = False
+                    else:
+                        delivery_uncertain = True
                 # Don't retry on 4xx
-                if 400 <= e.response.status_code < 500:
+                if 400 <= status_code < 500:
                     break
 
             except Exception as e:
+                if gate_call_id:
+                    return self._gate_protocol_rejection("invalid analysis response")
                 last_error = f"AgentMoss unexpected error: {e}"
                 logger.warning(f"{last_error} (attempt {display_attempt})")
                 break
@@ -317,7 +396,9 @@ class MossClient:
         is_timeout = "timeout" in last_error.lower()
         risk_type = "analysis_timeout" if is_timeout else "service_unavailable"
         reason_prefix = "AgentMoss analysis timeout" if is_timeout else "AgentMoss security service unavailable"
-        return self._fail_closed_response(last_error, risk_type, reason_prefix)
+        if auth_rejected:
+            return self._gate_protocol_rejection(last_error)
+        return {**self._fail_closed_response(last_error, risk_type, reason_prefix), **gate_audit}
 
     async def review(self, agent_id: str = "", db_path: str = "") -> None:
         """低频回顾：让 AgentMoss 从 AgentGate 本地存储直读全量 tool_calls。
@@ -328,7 +409,7 @@ class MossClient:
         - **fire-and-forget**：调用方用 ``asyncio.create_task`` 触发、不 await；
           失败只记日志，绝不影响实时判定路径；
         - **30s 超时**：回顾是全量重打，比单条 analyze 快，但比健康检查慢；
-        - **需携带 Bearer**：AgentMoss 默认开鉴权，复用 ``resolve_moss_token``。
+        - **需携带 Bearer**：与 analyze 使用同一身份。
 
         Args:
             agent_id: 目标 agent 标识（决定 AgentMoss 状态库分桶）。
@@ -339,7 +420,10 @@ class MossClient:
 
         url = f"{self._base_url}/api/v1/review"
         headers = {"Content-Type": "application/json"}
-        token = resolve_moss_token()
+        gate_token = resolve_moss_gate_token()
+        if gate_token:
+            headers[_GATE_REQUIRE_IDENTITY_HEADER] = "1"
+        token = gate_token or resolve_moss_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
@@ -371,6 +455,10 @@ class MossClient:
         except Exception as exc:  # noqa: BLE001
             # 与 analyze 不同：回顾失败**不降级为 Deny**，实时路径完全不受影响
             logger.warning("AgentMoss review unreachable: {!r}", exc)
+
+    def _gate_protocol_rejection(self, reason: str) -> dict:
+        logger.warning("AgentMoss dedicated protocol rejected: {}", reason)
+        return {**self._fail_closed_response(reason), "_gate_protocol_rejected": True}
 
     def _fail_closed_response(self, error: str, risk_type: str = "service_unavailable", reason_prefix: str = "AgentMoss security service unavailable") -> dict:
         return {

@@ -35,7 +35,7 @@ L3_OUTCOMES = (
     "skipped",              # L3 未启用（无 key / 层级开关关闭）
     "fail_open",            # L3 调用失败，按 fail_open 放行（**能力降级**）
     "fail_closed",          # L3 调用失败，按 fail_closed 拒绝（**能力降级**）
-    "failed_but_blocked",   # L3 调用失败，但前序层已拦截（结论不受影响）
+    "failed_but_blocked",   # L3 调用失败，最终由其他分析层拒绝
     "circuit_open",         # LLM 熔断器打开，未发起请求（**能力降级**）
 )
 

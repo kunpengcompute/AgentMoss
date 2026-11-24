@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from loguru import logger
 
+from ..client.moss_client import resolve_moss_gate_token
 from . import security as sp
 from .dashboard import broadcast_event
 from .models import (
@@ -137,6 +138,7 @@ async def analyze(
     and returns the security decision.
     """
     start = time.monotonic()
+    accepted_at_us = time.time_ns() // 1000 if resolve_moss_gate_token() else None
     # 0'. 与 TS 版对齐：只发 a_next（Python API 格式）的调用方，tool_name/command
     #     从 action_type/action_detail 兜底；两者都有时以顶层字段为准。
     _a_next_in = input_data.a_next or {}
@@ -199,7 +201,10 @@ async def analyze(
     # 每次都真实分析，不复用历史判定。判定依赖的不只是命令文本：策略开关、
     # 单条规则启停、会话历史、脚本文件内容、L3 结果都会改变结论。缓存 Allow
     # 等于赌“这些都没变”，只要漏一项就是漏报；因此这里不再保留决策缓存。
-    moss_result = await moss_client.analyze(moss_request)
+    if accepted_at_us is None:
+        moss_result = await moss_client.analyze(moss_request)
+    else:
+        moss_result = await moss_client.analyze(moss_request, accepted_at_us=accepted_at_us)
 
     # 5. Write tool_call record
     tool_call_dict = {
