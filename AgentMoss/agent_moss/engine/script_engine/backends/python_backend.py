@@ -700,10 +700,14 @@ def _extract_calls_ast(
             calls.extend(analysis.found.get(node, ()))
         elif isinstance(node, ast.ImportFrom) and node.level:
             if node.module:
-                import_calls.append(ScriptCall(path=node.module.replace(".", "/") + ".py", interpreter="python3"))
+                import_calls.append(ScriptCall(
+                    path=node.module.replace(".", "/") + ".py", interpreter="python3", is_import=True,
+                ))
             for alias in node.names:
                 if alias.name != "*":
-                    import_calls.append(ScriptCall(path=alias.name.replace(".", "/") + ".py", interpreter="python3"))
+                    import_calls.append(ScriptCall(
+                        path=alias.name.replace(".", "/") + ".py", interpreter="python3", is_import=True,
+                    ))
 
     calls.extend(import_calls)
 

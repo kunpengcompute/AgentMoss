@@ -32,24 +32,73 @@ from .symbolic import (
 
 
 # ==================== 参数绑定 ====================
-_POSITIONAL_RE = re.compile(r"""\$(?:([1-9@*])|\{([1-9][0-9]*|[@*])(?:(:-|-)([^{}'"\\$\x60]*))?\})""")
-_SHELL_PART_RE = re.compile(rf"{_CASE_QUOTED_PART}|{_POSITIONAL_RE.pattern}")
-_DOUBLE_QUOTED_PART_RE = re.compile(rf"\\[\s\S]|{_POSITIONAL_RE.pattern}")
+_POSITIONAL_RE = re.compile(r"\$(?:([1-9@*])|\{([1-9][0-9]*|[@*])(?:(:-|-)|\}))")
+_QUOTED_WORD_PART_RE = re.compile(r"""\$\{|\\[\s\S]|\$[1-9@*]""")
+_SHELL_WORD_PART_RE = re.compile(rf"""'[^']*'|"|{_QUOTED_WORD_PART_RE.pattern}""")
+_DOUBLE_QUOTE_END_RE = re.compile(r"""\\[\s\S]|\$\{|""" + '"')
+_DEFAULT_BOUNDARY_RE = re.compile(rf"""{_CASE_QUOTED_PART}|\$\{{|\$\(|[}}'"\x60]""")
 _IFS_RE = re.compile(r"([ \t\n]+)")
+_MAX_DEFAULT_DEPTH = 32
 
 
-def _positional_value(part: re.Match[str], args: list[str]) -> str | list[str]:
-    bare, braced, operator, default = part.groups()
+def _braced_word_end(text: str, start: int) -> int | None:
+    depth = 1
+    for token in _DEFAULT_BOUNDARY_RE.finditer(text, start):
+        if token[0] == "${":
+            depth += 1
+        elif token[0] == "}":
+            depth -= 1
+            if not depth:
+                return token.end()
+        elif token[0] in ("$(", '"', "'", "`"):
+            return None
+    return None
+
+
+def _double_quote_end(text: str, start: int) -> int | None:
+    while token := _DOUBLE_QUOTE_END_RE.search(text, start):
+        if token[0] == '"':
+            return token.end()
+        start = token.end()
+        if token[0] == "${":
+            end = _braced_word_end(text, start)
+            if end is None:
+                return None
+            start = end
+    return None
+
+
+def _shell_word_parts(text: str, quoted: bool = False) -> Iterator[tuple[int, int]]:
+    pattern = _QUOTED_WORD_PART_RE if quoted else _SHELL_WORD_PART_RE
+    offset = 0
+    while token := pattern.search(text, offset):
+        end = token.end()
+        if token[0] == "${":
+            end = _braced_word_end(text, end)
+        elif token[0] == '"':
+            end = _double_quote_end(text, end)
+        if end is None:
+            return
+        yield token.start(), end
+        offset = end
+
+
+def _positional_value(token: str, args: list[str]) -> tuple[str | list[str], bool]:
+    """返回可用的实参，或尚未求值的默认项。"""
+    part = _POSITIONAL_RE.match(token)
+    if part is None:
+        return token, False
+    bare, braced, operator = part.groups()
     name = bare or braced
     if name == "@":
-        return args
+        return args, False
     if name == "*":
-        return " ".join(args)
+        return " ".join(args), False
     # 先按长度筛选不可到达的索引，避免超长数字影响分析。
     index = int(name) - 1 if len(name) <= len(str(len(args))) else len(args)
-    if index >= len(args) or (operator == ":-" and not args[index]):
-        return default or ""
-    return args[index]
+    if index < len(args) and (operator != ":-" or args[index]):
+        return args[index], False
+    return (token[part.end():-1], True) if operator else ("", False)
 
 
 def bind_positional_args(content: str, args: list[str]) -> str:
@@ -57,24 +106,29 @@ def bind_positional_args(content: str, args: list[str]) -> str:
     if not args or "$" not in content:
         return content
 
-    def expand(token: str, *, quoted: bool = False) -> str:
-        match = _POSITIONAL_RE.fullmatch(token)
-        if match is None:
-            return token
-        value = _positional_value(match, args)
-        values = value if isinstance(value, list) else [value]
-        if quoted:
-            return '" "'.join(re.sub(r'([\\$"\x60])', r"\\\1", value) for value in values)
-        return " ".join(values)
+    def bind_text(text: str, *, quoted: bool = False) -> str:
+        output: list[str] = []
+        offset = 0
+        for start, end in _shell_word_parts(text, quoted):
+            token = text[start:end]
+            output.append(text[offset:start])
+            offset = end
+            if token.startswith('"'):
+                output.append('"' + bind_text(token[1:-1], quoted=True) + '"')
+            elif _POSITIONAL_RE.match(token):
+                value, use_default = _positional_value(token, args)
+                values = value if isinstance(value, list) else [value]
+                if use_default:
+                    values = _expand_shell_word(values[0], args, split_unquoted=not quoted)
+                if quoted:
+                    values = [re.sub(r'([\\$"\x60])', r"\\\1", item) for item in values]
+                output.append(('" "' if quoted else " ").join(values))
+            else:
+                output.append(token)
+        output.append(text[offset:])
+        return "".join(output)
 
-    def bind_part(part: re.Match[str]) -> str:
-        token = part[0]
-        if token.startswith('"'):
-            body = _DOUBLE_QUOTED_PART_RE.sub(lambda m: expand(m[0], quoted=True), token[1:-1])
-            return f'"{body}"'
-        return expand(token)
-
-    return _SHELL_PART_RE.sub(bind_part, content)
+    return bind_text(content)
 
 
 # ==================== case 分支解析 ====================
@@ -272,46 +326,61 @@ def _mark_loops_reachable(content: str) -> str:
 
 # ==================== 子脚本调用提取（含参数） ====================
 
+_CHILD_INTERPRETER_RE = re.compile(r"\b(?:bash|sh|zsh|python3?|node|ruby|perl|php|lua)\b")
 _CHILD_CALL_RE = re.compile(
-    r"(?:^|[ \t;&|])[ \t]*"
+    r"(?:^[ \t]*(?:\(?[^()\n;&<>]+\)[ \t]*)?|(?<=[;&|])(?<![<>][&|]))[ \t]*"
+    r"(?:(?:if|then|elif|else|while|until|do|!|\{|exec|command)[ \t]+|\([ \t]*"
+    r"|[A-Za-z_][A-Za-z0-9_]*=[^ \t\n;&|<>()\x00]*[ \t]+)*"
     r"((?:/bin/)?bash|sh|zsh|python3?|node|ruby|perl|php|lua)[ \t]+"
-    r"([^\n;|&<>\x00]+)",
-    re.MULTILINE | re.IGNORECASE,
+    r"([^\n;|&<>()\x00]+)",
+    re.MULTILINE,
 )
 
 
 def _argument_parts(
     word: str, args: list[str] | None, *, quoted: bool = False,
+    split_unquoted: bool = True, default_depth: int = 0,
 ) -> Iterator[str | None]:
     """产出单词的字面片段；None 表示展开后的字段边界。"""
     offset = 0
-    parts = _DOUBLE_QUOTED_PART_RE if quoted else _SHELL_PART_RE
-    for part in parts.finditer(word):
-        if part.start() > offset:
-            yield word[offset:part.start()]
-        offset = part.end()
-        text = part[0]
+    for start, end in _shell_word_parts(word, quoted):
+        if start > offset:
+            yield word[offset:start]
+        offset = end
+        text = word[start:end]
         if not quoted and text.startswith("'"):
             yield text[1:-1]
         elif not quoted and text.startswith('"'):
             if text == '""':
                 yield ""
             else:
-                yield from _argument_parts(text[1:-1], args, quoted=True)
+                yield from _argument_parts(
+                    text[1:-1], args, quoted=True, default_depth=default_depth,
+                )
         elif text.startswith("\\"):
             escaped = text[1:]
             if escaped != "\n":
                 yield escaped if not quoted or escaped in '$"\\`' else text
-        elif args is None:
+        elif args is None or _POSITIONAL_RE.match(text) is None:
             yield text
         else:
-            value = _positional_value(part, args)
-            if quoted and isinstance(value, list):
+            value, use_default = _positional_value(text, args)
+            field_split = not quoted and split_unquoted
+            if use_default:
+                if default_depth >= _MAX_DEFAULT_DEPTH:
+                    yield text
+                    continue
+                yield from _argument_parts(
+                    value, args, split_unquoted=field_split, default_depth=default_depth + 1,
+                )
+                if not value and not field_split:
+                    yield ""
+            elif not field_split and isinstance(value, list):
                 for index, item in enumerate(value):
                     if index:
                         yield None
                     yield item
-            elif quoted:
+            elif not field_split:
                 yield value
             else:
                 # shortcut: 使用默认 IFS；文件名通配和自定义 IFS 留给运行时。
@@ -325,10 +394,12 @@ def _argument_parts(
         yield word[offset:]
 
 
-def _expand_shell_word(word: str, args: list[str] | None) -> list[str]:
+def _expand_shell_word(
+    word: str, args: list[str] | None, *, split_unquoted: bool = True,
+) -> list[str]:
     fields: list[str] = []
     pieces: list[str] = []
-    for part in _argument_parts(word, args):
+    for part in _argument_parts(word, args, split_unquoted=split_unquoted):
         if part is not None:
             pieces.append(part)
         elif pieces:
@@ -341,9 +412,22 @@ def _expand_shell_word(word: str, args: list[str] | None) -> list[str]:
 
 def extract_calls_from_content(content: str, entry_args: list[str] | None = None) -> list[ScriptCall]:
     """基于原始单词边界提取子脚本参数，展开后的值不再作为 Shell 语法解析。"""
-    if not _CHILD_CALL_RE.search(content):
+    if not _CHILD_INTERPRETER_RE.search(content):
         return []
     syntax = "\n".join(case_syntax_lines(content))
+    # 默认项可以包含空格或控制字符，整段仍只属于原来的一个单词。
+    if "${" in content:
+        parts: list[str] = []
+        offset = 0
+        for start, end in _shell_word_parts(content):
+            token = content[start:end]
+            if "${" not in token or syntax[start] == " ":
+                continue
+            parts.append(syntax[offset:start])
+            parts.append("".join("\n" if ch == "\n" else "x" for ch in token))
+            offset = end
+        parts.append(syntax[offset:])
+        syntax = "".join(parts)
     calls: list[ScriptCall] = []
     for match in _CHILD_CALL_RE.finditer(syntax):
         start, end = match.span(2)

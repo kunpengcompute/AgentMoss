@@ -138,11 +138,17 @@ class NotModeledStmt(Stmt):
 # 线性复杂度 O(行数)，无嵌套遍历开销。
 
 CASE_HEADER_RE = re.compile(r"^[ \t]*case[ \t]+", re.MULTILINE)
-_CASE_OPEN_RE = re.compile(
+_CASE_COMMAND_START = (
     r"(?:^|(?<=[;|&()]))[ \t]*"
     r"(?:(?:if|then|elif|else|while|until|do|\{|!|time(?:[ \t]+-p)?)[ \t]+)*"
-    r"(?:coproc(?:[ \t]+[A-Za-z_]\w*)?[ \t]+)?"
-    r"case[ \t]+(?=[^\s;&|()<>])"
+)
+_COPROC_PREFIX = r"coproc[ \t]+(?:[^\s;&|()<>]+[ \t]+)?"
+_CASE_OPEN_RE = re.compile(
+    _CASE_COMMAND_START + rf"(?:{_COPROC_PREFIX})?case[ \t]+(?=[^\s;&|()<>])"
+)
+_COPROC_GROUP_RE = re.compile(
+    _CASE_COMMAND_START + _COPROC_PREFIX
+    + r"(?:(?:\{|if|for|while|until|select)(?=$|[\s;&|()<>])|\()"
 )
 _CASE_CLOSE_RE = re.compile(r"(?:^|(?<=[;&]))[ \t]*esac(?=$|[ \t;&|])")
 _CASE_HEADER_LINE_RE = re.compile(r"[ \t]*case[ \t]+([^\s;&|()<>]+)(?:[ \t]+(in))?[ \t]*")
@@ -175,6 +181,8 @@ def _find_block_end(
 
 def _case_depth_delta(line: str) -> int | None:
     """在已遮蔽的语法行中识别命令边界；无法可靠配对时返回 None。"""
+    if _COPROC_GROUP_RE.search(line):
+        return None  # coproc 命令组可能在同一行开启内层 case。
     opens = len(_CASE_OPEN_RE.findall(line))
     closes = list(_CASE_CLOSE_RE.finditer(line))
     if opens + len(closes) > 1 or (closes and closes[0].start() != 0):

@@ -208,6 +208,97 @@ esac""", encoding="utf-8")
     assert "echo expanded_branch" not in result.nodes[1].preprocessed_content
 
 
+@pytest.mark.parametrize("selector", ["$1", '"$1"'])
+def test_case_with_coproc_group_keeps_full_text(selector):
+    script = f"""case {selector} in
+  bak*) coproc worker {{ case "$2" in
+      on) echo inner_on ;;
+      off) echo inner_off ;;
+    esac
+    }}
+    echo after_group
+    ;;
+  *) echo outer_default ;;
+esac"""
+
+    ir = shell_backend.ShellBackend().parse(script, ["bak42", "off"])
+
+    assert not ir.control_flow_resolved
+    for marker in ("inner_on", "inner_off", "after_group", "outer_default"):
+        assert f"echo {marker}" in ir.reachable_content
+
+
+@pytest.mark.parametrize(
+    "args,default,expected",
+    [
+        (["child script.sh"], "$UNKNOWN", "child script.sh"),
+        (["known.sh"], "$" + "{UNKNOWN}", "known.sh"),
+        (["", "fallback.sh"], "$" + "{2}", "fallback.sh"),
+        (["known.sh"], '"$UNKNOWN"', "known.sh"),
+        (["known.sh"], "$" + "{UNKNOWN:-$OTHER}", "known.sh"),
+        ([""], "$UNKNOWN", None),
+    ],
+)
+def test_child_path_uses_positional_default_only_as_needed(tmp_path, args, default, expected):
+    from agent_moss.engine.script_engine.tracker import RecursiveTracker
+
+    script = 'bash "$' + '{1:-' + default + '}" run'
+    parent = tmp_path / "parent.sh"
+    parent.write_text(script, encoding="utf-8")
+    if expected is not None:
+        (tmp_path / expected).write_text("echo child_body", encoding="utf-8")
+
+    ir = shell_backend.ShellBackend().parse(script, args)
+    result = RecursiveTracker().track(str(parent), args)
+
+    assert [(call.path, call.args) for call in ir.calls] == (
+        [(expected, ["run"])] if expected is not None else []
+    )
+    assert [node.script_path for node in result.nodes[1:]] == (
+        [str(tmp_path / expected)] if expected is not None else []
+    )
+
+
+def test_child_calls_require_shell_command_position():
+    script = """echo Usage: bash ignored.sh
+printf 'Example: bash quoted.sh; bash ignored.sh'
+echo help bash ignored.sh; true && bash first.sh
+echo input | bash second.sh
+if bash check.sh; then bash third.sh; fi
+case "$1" in
+  run) bash case_child.sh ;;
+esac"""
+
+    calls = shell_backend.extract_calls_from_content(script)
+
+    assert [call.path for call in calls] == [
+        "first.sh", "second.sh", "check.sh", "third.sh", "case_child.sh",
+    ]
+
+
+def test_tracker_visits_calls_with_distinct_arguments_and_stops_cycles(tmp_path):
+    from agent_moss.engine.script_engine.tracker import RecursiveTracker
+
+    parent = tmp_path / "parent.sh"
+    child = tmp_path / "child.sh"
+    parent.write_text(
+        "bash child.sh first; bash child.sh first; bash child.sh second\n",
+        encoding="utf-8",
+    )
+    child.write_text("""case $1 in
+  first) echo first_branch ;;
+  second) echo second_branch ;;
+esac
+bash parent.sh different
+""", encoding="utf-8")
+
+    result = RecursiveTracker().track(str(parent), ["original"])
+
+    assert [node.script_path for node in result.nodes] == [str(parent), str(child), str(child)]
+    assert "echo first_branch" in result.nodes[1].preprocessed_content
+    assert "echo second_branch" in result.nodes[2].preprocessed_content
+
+
 def test_glob_if_keeps_dangerous_command():
     script = '''if [[ "$1" == bak* ]]; then
   rm -rf /opt/data
