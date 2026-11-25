@@ -35,6 +35,7 @@ from .symbolic import (
 _POSITIONAL_RE = re.compile(r"\$(?:([1-9@*])|\{([1-9][0-9]*|[@*])(?:(:-|-)|\}))")
 _QUOTED_WORD_PART_RE = re.compile(r"""\$\{|\\[\s\S]|\$[1-9@*]""")
 _SHELL_WORD_PART_RE = re.compile(rf"""'[^']*'|"|{_QUOTED_WORD_PART_RE.pattern}""")
+_SHELL_SOURCE_PART_RE = re.compile(rf"\#|{_SHELL_WORD_PART_RE.pattern}")
 _DOUBLE_QUOTE_END_RE = re.compile(r"""\\[\s\S]|\$\{|""" + '"')
 _DEFAULT_BOUNDARY_RE = re.compile(rf"""{_CASE_QUOTED_PART}|\$\{{|\$\(|[}}'"\x60]""")
 _IFS_RE = re.compile(r"([ \t\n]+)")
@@ -68,20 +69,37 @@ def _double_quote_end(text: str, start: int) -> int | None:
     return None
 
 
-def _shell_word_parts(text: str, quoted: bool = False) -> Iterator[tuple[int, int]]:
-    pattern = _QUOTED_WORD_PART_RE if quoted else _SHELL_WORD_PART_RE
+def _shell_word_parts(
+    text: str, quoted: bool = False, *, syntax: str | None = None,
+) -> Iterator[tuple[int, int]]:
+    if quoted:
+        pattern = _QUOTED_WORD_PART_RE
+    else:
+        pattern = _SHELL_SOURCE_PART_RE if syntax is not None else _SHELL_WORD_PART_RE
     offset = 0
     while token := pattern.search(text, offset):
         end = token.end()
+        if token[0] == "#" and syntax is not None and syntax[token.start()] == " ":
+            end = text.find("\n", end)
+            if end < 0:
+                return
+            offset = end + 1
+            continue
         if token[0] == "${":
             end = _braced_word_end(text, end)
         elif token[0] == '"':
             end = _double_quote_end(text, end)
         if end is None:
-            return
+            if syntax is None:
+                return
+            # Keep the unsupported command as text and resume on the next line.
+            newline = text.find("\n", token.end())
+            if newline < 0:
+                return
+            offset = newline + 1
+            continue
         yield token.start(), end
         offset = end
-
 
 def _positional_value(token: str, args: list[str]) -> tuple[str | list[str], bool]:
     """返回可用的实参，或尚未求值的默认项。"""
@@ -109,7 +127,10 @@ def bind_positional_args(content: str, args: list[str]) -> str:
     def bind_text(text: str, *, quoted: bool = False) -> str:
         output: list[str] = []
         offset = 0
-        for start, end in _shell_word_parts(text, quoted):
+        syntax = None
+        if not quoted:
+            syntax = "\n".join(case_syntax_lines(text)) if "#" in text else text
+        for start, end in _shell_word_parts(text, quoted, syntax=syntax):
             token = text[start:end]
             output.append(text[offset:start])
             offset = end
@@ -330,6 +351,8 @@ _CHILD_INTERPRETER_RE = re.compile(r"\b(?:bash|sh|zsh|python3?|node|ruby|perl|ph
 _CHILD_CALL_RE = re.compile(
     r"(?:^[ \t]*(?:\(?[^()\n;&<>]+\)[ \t]*)?|(?<=[;&|])(?<![<>][&|]))[ \t]*"
     r"(?:(?:if|then|elif|else|while|until|do|!|\{|exec|command)[ \t]+|\([ \t]*"
+    r"|(?:(?:/usr)?/bin/)?time(?:[ \t]+-p)?(?:[ \t]+--)?[ \t]+"
+    r"|(?:(?:/usr)?/bin/)?env(?:[ \t]+(?:-i|--ignore-environment))?(?:[ \t]+--)?[ \t]+"
     r"|[A-Za-z_][A-Za-z0-9_]*=[^ \t\n;&|<>()\x00]*[ \t]+)*"
     r"((?:/bin/)?bash|sh|zsh|python3?|node|ruby|perl|php|lua)[ \t]+"
     r"([^\n;|&<>()\x00]+)",
@@ -337,15 +360,26 @@ _CHILD_CALL_RE = re.compile(
 )
 
 
+def _split_fields(text: str) -> Iterator[str | None]:
+    # shortcut: use default IFS; pathname expansion and custom IFS are runtime-dependent.
+    for index, field in enumerate(_IFS_RE.split(text)):
+        if index % 2:
+            yield None
+        elif field:
+            yield field
+
+
 def _argument_parts(
     word: str, args: list[str] | None, *, quoted: bool = False,
     split_unquoted: bool = True, default_depth: int = 0,
 ) -> Iterator[str | None]:
     """产出单词的字面片段；None 表示展开后的字段边界。"""
+    field_split = not quoted and split_unquoted
     offset = 0
     for start, end in _shell_word_parts(word, quoted):
         if start > offset:
-            yield word[offset:start]
+            literal = word[offset:start]
+            yield from _split_fields(literal) if field_split else (literal,)
         offset = end
         text = word[start:end]
         if not quoted and text.startswith("'"):
@@ -365,7 +399,6 @@ def _argument_parts(
             yield text
         else:
             value, use_default = _positional_value(text, args)
-            field_split = not quoted and split_unquoted
             if use_default:
                 if default_depth >= _MAX_DEFAULT_DEPTH:
                     yield text
@@ -383,15 +416,10 @@ def _argument_parts(
             elif not field_split:
                 yield value
             else:
-                # shortcut: 使用默认 IFS；文件名通配和自定义 IFS 留给运行时。
-                fields = _IFS_RE.split(" ".join(value) if isinstance(value, list) else value)
-                for index, field in enumerate(fields):
-                    if index % 2:
-                        yield None
-                    elif field:
-                        yield field
+                yield from _split_fields(" ".join(value) if isinstance(value, list) else value)
     if offset < len(word):
-        yield word[offset:]
+        literal = word[offset:]
+        yield from _split_fields(literal) if field_split else (literal,)
 
 
 def _expand_shell_word(
@@ -419,7 +447,7 @@ def extract_calls_from_content(content: str, entry_args: list[str] | None = None
     if "${" in content:
         parts: list[str] = []
         offset = 0
-        for start, end in _shell_word_parts(content):
+        for start, end in _shell_word_parts(content, syntax=syntax):
             token = content[start:end]
             if "${" not in token or syntax[start] == " ":
                 continue

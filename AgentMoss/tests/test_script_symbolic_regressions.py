@@ -143,6 +143,27 @@ esac"""
     assert "echo outer_default" not in ir.reachable_content
 
 
+@pytest.mark.parametrize("selector", ["$1", '"$1"'])
+@pytest.mark.parametrize("wrapper", ["time --", "time -p --"])
+def test_timed_nested_case_keeps_inner_branches(selector, wrapper):
+    script = f"""case {selector} in
+  bak*) {wrapper} case "$2" in
+      on) echo inner_on ;;
+      off) echo inner_off ;;
+    esac
+    echo after_nested
+    ;;
+  *) echo outer_default ;;
+esac"""
+
+    ir = shell_backend.ShellBackend().parse(script, ["bak42", "off"])
+
+    assert ir.control_flow_resolved
+    for marker in ("inner_on", "inner_off", "after_nested"):
+        assert f"echo {marker}" in ir.reachable_content
+    assert "echo outer_default" not in ir.reachable_content
+
+
 def test_case_with_ambiguous_inline_closer_keeps_full_text():
     script = """case $1 in
   bak*) echo before; case $2 in
@@ -274,6 +295,57 @@ esac"""
     assert [call.path for call in calls] == [
         "first.sh", "second.sh", "check.sh", "third.sh", "case_child.sh",
     ]
+
+
+def test_wrapped_shell_calls_require_command_position():
+    script = """echo Usage: time bash ignored_time.sh
+printf '%s\\n' Example: env bash ignored_env.sh
+time bash timed.sh first
+time -p -- bash timed_options.sh second
+env bash env_plain.sh third
+/usr/bin/env -i MODE=test bash env_assigned.sh fourth
+"""
+
+    calls = shell_backend.extract_calls_from_content(script)
+
+    assert [(call.path, call.args) for call in calls] == [
+        ("timed.sh", ["first"]),
+        ("timed_options.sh", ["second"]),
+        ("env_plain.sh", ["third"]),
+        ("env_assigned.sh", ["fourth"]),
+    ]
+
+
+@pytest.mark.parametrize(
+    "first_command",
+    [
+        'printf "%s" note # trailing "',
+        "printf '%s' note # trailing '$1",
+        'printf "%s" "$' + '{2:-$(printf "%s" fallback)}"',
+    ],
+)
+def test_shell_binding_continues_after_comment_or_unsupported_command(first_command):
+    script = first_command + '\nprintf %s $1\n'
+
+    ir = shell_backend.ShellBackend().parse(script, ["visible"])
+
+    assert ir.reachable_content == first_command + '\nprintf %s visible\n'
+
+
+@pytest.mark.parametrize(
+    "quote,default,expected",
+    [
+        ("", "one two", ["one", "two"]),
+        ('"', "one two", ["one two"]),
+        ("", r"one\ two tail", ["one two", "tail"]),
+    ],
+)
+def test_positional_default_fields_follow_shell_quoting(quote, default, expected):
+    script = "bash child.sh " + quote + "$" + "{1:-" + default + "}" + quote
+
+    calls = shell_backend.ShellBackend().parse(script, [""]).calls
+
+    assert [(call.path, call.args) for call in calls] == [("child.sh", expected)]
 
 
 def test_tracker_visits_calls_with_distinct_arguments_and_stops_cycles(tmp_path):

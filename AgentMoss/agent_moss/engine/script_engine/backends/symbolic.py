@@ -140,7 +140,7 @@ class NotModeledStmt(Stmt):
 CASE_HEADER_RE = re.compile(r"^[ \t]*case[ \t]+", re.MULTILINE)
 _CASE_COMMAND_START = (
     r"(?:^|(?<=[;|&()]))[ \t]*"
-    r"(?:(?:if|then|elif|else|while|until|do|\{|!|time(?:[ \t]+-p)?)[ \t]+)*"
+    r"(?:(?:if|then|elif|else|while|until|do|\{|!|time(?:[ \t]+-p)?(?:[ \t]+--)?)[ \t]+)*"
 )
 _COPROC_PREFIX = r"coproc[ \t]+(?:[^\s;&|()<>]+[ \t]+)?"
 _CASE_OPEN_RE = re.compile(
