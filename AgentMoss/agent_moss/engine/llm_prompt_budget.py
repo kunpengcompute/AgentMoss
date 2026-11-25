@@ -89,11 +89,13 @@ class _HistoryTurn:
 
 def _visible_turns(
     prompt_history: list[dict[str, object]] | None, max_turns: int,
-) -> list[_HistoryTurn]:
+) -> tuple[list[_HistoryTurn], int]:
+    """Return the visible turn window and how many earlier non-empty turns it omitted."""
     history = prompt_history or []
     first = max(0, len(history) - max_turns) if max_turns > 0 else 0
+    omitted = 0
     turns = []
-    for number, turn in enumerate(history[first:], start=first + 1):
+    for index, turn in enumerate(history):
         if not isinstance(turn, dict):
             continue
         text = turn.get("text", "")
@@ -108,9 +110,13 @@ def _visible_turns(
                     action_type = action.get("action_type")
                     if isinstance(action_type, str) and action_type:
                         action_types.append(action_type)
-        if text or action_types:
-            turns.append(_HistoryTurn(number, text, ", ".join(action_types)))
-    return turns
+        if not (text or action_types):
+            continue
+        if index < first:
+            omitted += 1
+            continue
+        turns.append(_HistoryTurn(index + 1, text, ", ".join(action_types)))
+    return turns, omitted
 
 
 def _history_lines(
@@ -140,11 +146,17 @@ def format_prompt_history(
     max_turns: int | None = None,
 ) -> str:
     """Format the latest raw turn window, retaining the original turn numbers."""
-    turns = _visible_turns(
+    turns, omitted = _visible_turns(
         prompt_history, get_llm_prompt_history_max_turns() if max_turns is None else max_turns,
     )
     lines, _ = _history_lines(turns, max_text_chars, max_text_chars, len(turns))
+    if omitted:
+        lines.insert(0, _history_window_omission(omitted))
     return "\n".join(lines) if lines else _NO_PROMPT_HISTORY
+
+
+def _history_window_omission(omitted: int) -> str:
+    return f"（因历史窗口上限省略 {omitted} 轮更早历史意图）"
 
 
 def _history_omission(intents: int, actions_only: int) -> str:
@@ -222,9 +234,12 @@ def prepare_l3_prompt(
     skip_l3_hints: str,
     path_context: str,
 ) -> PreparedL3Prompt:
-    turns = _visible_turns(prompt_history, settings.prompt_history_max_turns)
+    turns, window_omitted = _visible_turns(prompt_history, settings.prompt_history_max_turns)
     turn_chars = settings.prompt_turn_max_chars
     lines, truncated = _history_lines(turns, turn_chars, turn_chars, len(turns))
+    if window_omitted:
+        lines.insert(0, _history_window_omission(window_omitted))
+    needs_authorization = truncated or bool(window_omitted)
     max_items = settings.history_max_items
     initial_detail_chars = settings.action_detail_max_chars
     detail_chars = initial_detail_chars
@@ -233,7 +248,7 @@ def prepare_l3_prompt(
         "prompt_session": _truncate(prompt_session, settings.prompt_session_max_chars, _SESSION_SIZE_MARKER),
         "action_history": format_action_history(action_history, max_items, detail_chars),
         "prompt_history_text": "\n".join(lines) if lines else _NO_PROMPT_HISTORY,
-        "history_authorization": _HISTORY_AUTHORIZATION if truncated else "",
+        "history_authorization": _HISTORY_AUTHORIZATION if needs_authorization else "",
         "a_next": a_next,
         "reason": reason,
         "skills_text": skills_text,
