@@ -2107,7 +2107,7 @@ class LogicRulesChecker:
                 hit=False,
                 l3_hint=(
                     "L2 意图观察（不确定，交 L3）：出现读意图词，但当前动作是覆盖写，"
-                    f"prompt 没有明确“只读/不要修改”约束。prompt={ (prompt_session or '')[:160]!r }，"
+                    f"prompt 没有明确“只读/不要修改”约束。prompt={(prompt_session or '')[:160]!r}，"
                     f"动作={action_cat}，目标={a_next.get('action_detail','')[:160]!r}"
                 ),
             )

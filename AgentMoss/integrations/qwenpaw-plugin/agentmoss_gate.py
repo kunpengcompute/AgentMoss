@@ -455,6 +455,21 @@ class AgentMossGateMiddleware(MiddlewareBase):
 
         # AgentGate responded with an AgentMoss verdict.
         if verdict.get("decision") in ("Deny", "deny"):
+            if verdict.get("ask_recommended"):
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ASK,
+                    message=(
+                        "AgentMoss 建议确认："
+                        + str(verdict.get("ask_reason") or verdict.get("reason", ""))[:500]
+                    ),
+                    decision_reason=(
+                        "risk_level="
+                        + str(verdict.get("risk_level", ""))
+                        + " risk_type="
+                        + str(verdict.get("risk_type", ""))
+                        + " ask_recommended=true"
+                    ),
+                )
             return PermissionDecision(
                 behavior=PermissionBehavior.DENY,
                 message=(

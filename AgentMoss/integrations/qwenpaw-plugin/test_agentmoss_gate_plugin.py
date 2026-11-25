@@ -237,6 +237,38 @@ class TestGateDenyBlocks(unittest.TestCase):
         self.assertEqual(decision.behavior, PermissionBehavior.DENY)
         self.assertIn("rm -rf /", decision.message)
 
+    def test_agentmoss_deny_with_ask_recommended_returns_ask(self):
+        mw = AgentMossGateMiddleware(
+            gate_url="http://gate",
+            timeout=1.0,
+            agent_type="qwenpaw",
+            fail_closed=False,
+            api_token="",
+            extra_metadata={},
+        )
+
+        async def fake_analyze(payload, tool_name, command):
+            return {
+                "decision": "Deny",
+                "reason": "L3 语义分析不可用，按 fail_closed 拒绝",
+                "ask_recommended": True,
+                "ask_reason": "这是没查完，不是确认有风险",
+                "risk_level": "medium",
+                "risk_type": "service_unavailable",
+            }
+
+        mw._query_agentgate = fake_analyze  # noqa: SLF001
+        decision = asyncio.run(
+            mw.on_check_permission(
+                FakeAgent(),
+                _make_input_kwargs("bash", {"command": "cat report.txt"}),
+                _allow_handler,
+            )
+        )
+        self.assertEqual(decision.behavior, PermissionBehavior.ASK)
+        self.assertIn("没查完", decision.message)
+        self.assertIn("ask_recommended=true", decision.decision_reason)
+
 
 class TestGateAllow(unittest.TestCase):
     def test_agentmoss_allow_returns_qp_decision(self):
