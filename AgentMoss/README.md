@@ -114,11 +114,13 @@ curl -fsS http://127.0.0.1:9090/api/v1/analyze \
 | `AGENT_MOSS_AGENT_TOKENS` | 按 Agent 分配令牌，格式为 `agentA=令牌A,agentB=令牌B` |
 | `AGENT_MOSS_DISABLE_LLM` | 设为 `1` 时只用本地规则 |
 | `AGENT_MOSS_LLM_BASE_URL`、`AGENT_MOSS_LLM_MODEL`、`AGENT_MOSS_LLM_API_KEY` | 模型服务的 OpenAI 兼容 API 地址、模型名和密钥 |
-| `AGENT_MOSS_LLM_FAIL_MODE` | L3 调用失败时，默认 `fail_open` 会放行通过前两层的动作，设为 `fail_closed` 则拒绝这次调用 |
+| `AGENT_MOSS_LLM_FAIL_MODE` | L3 调用失败或被硬预算跳过时，默认 `fail_open` 会放行通过前两层的动作，设为 `fail_closed` 则拒绝这次调用 |
 | `AGENT_MOSS_SCENARIO` | 为部署选择一组场景规则 |
 | `AGENT_MOSS_RULES_MODE` | `hot`（默认）支持控制台调整，`cold` 在启动时读取规则，`builtin` 只使用内置规则 |
 
 启用 L3 时，在启动 AgentMoss 的环境中设置模型地址、名称和密钥，取消 `AGENT_MOSS_DISABLE_LLM=1` 并重启进程。在客户端或另一个终端修改环境变量不会改变运行中的服务。鉴权文件不可读或自动令牌创建失败时，服务会报告错误并拒绝启动，请检查运行账户和数据目录权限。
+
+当前用户请求和脚本分析报告进入 L3 时受各自的字符上限约束。设置正数 `AGENT_MOSS_LLM_MAX_PROMPT_TOKENS` 可启用估算预算，默认在裁剪后仍超预算时跳过 L3 安全判断。配置项和响应含义见 [L3 Prompt 预算配置](docs/deploy/ENV_VARS.md) 和 [L3 Prompt 接入说明](docs/integrations/INTEGRATION_GUIDE.md)。
 
 ## 扩展规则
 

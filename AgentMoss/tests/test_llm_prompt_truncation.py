@@ -86,7 +86,8 @@ def test_format_prompt_history_limits_text_and_only_shows_action_types(input_cha
 
     result = LLMAnalyzer._format_prompt_history(history)
 
-    assert result == f"  第1轮用户意图: {'甲' * kept_chars}  → 动作: file_read"
+    marker = "（本段因长度上限已截断）" if input_chars > kept_chars else ""
+    assert result == f"  第1轮用户意图: {'甲' * kept_chars}{marker}  → 动作: file_read"
 
 
 @pytest.mark.parametrize("history", [None, [], [{"text": " \t "}]])

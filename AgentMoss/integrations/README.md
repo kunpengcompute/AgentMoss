@@ -9,3 +9,5 @@
 | 自有 Agent 或 OpenDesk | 原有工具运行环境 | [在工具入口调用 AgentGate](../../AgentGate/examples/opendesk/README.md) |
 
 使用 AgentGate 的应用先按[快速开始](../../README.md#快速开始)部署网关和分析引擎。直接使用 AIO 命令接口时，镜像中的 AgentMoss 在沙箱内完成检查。
+
+设置 L3 模型输入预算后，调用方可从分析响应判断语义分析是否跳过或降级。请求字段和处理方式见 [L3 Prompt 接入说明](../docs/integrations/INTEGRATION_GUIDE.md)。

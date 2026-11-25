@@ -111,7 +111,7 @@ class AgentMossMiddleware(AgentMiddleware):
         name, args = request.tool_call["name"], request.tool_call["args"]
         action = self.adapter.adapt(name, args)
         # Context carries previous tool calls, not inferred successful reads.
-        snapshot = view.snapshot()
+        snapshot = view.snapshot(omit_prompt_turn_id=run.turn_id)
         event = view.begin(
             run,
             request.tool_call["id"],

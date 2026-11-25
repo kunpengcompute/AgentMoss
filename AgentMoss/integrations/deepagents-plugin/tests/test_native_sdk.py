@@ -132,6 +132,41 @@ async def test_no_tool_turn_is_saved_in_existing_checkpointer(tmp_path):
         await runtime.aclose()
 
 
+async def test_gate_payload_omits_only_the_current_prompt_text(tmp_path):
+    runtime, seen = setup(tmp_path)
+    graph = make_agent(
+        runtime,
+        tmp_path,
+        [
+            call("execute", {"command": "printf previous"}, "previous"),
+            AIMessage(content="done"),
+            call("execute", {"command": "printf first"}, "first"),
+            call("execute", {"command": "printf second"}, "second"),
+            AIMessage(content="done"),
+        ],
+        checkpointer=InMemorySaver(),
+    )
+    prompt = "甲" * 194
+    try:
+        for _ in range(2):
+            inputs, config, context = run_args("repeated-prompt", prompt)
+            await graph.ainvoke(inputs, config, context=context)
+
+        assert seen[-1]["metadata"]["tool_call_id"] == "second"
+        assert seen[-1]["user_prompt"] == prompt
+        previous = {"action_type": "bash", "action_detail": "printf previous"}
+        first = {"action_type": "bash", "action_detail": "printf first"}
+        assert seen[-1]["prompt_history"] == [
+            {"text": prompt, "actions": [previous]},
+            {"text": "", "actions": [first]},
+        ]
+        assert seen[-1]["action_history"] == [previous, first]
+        saved = (await graph.aget_state(config)).values[KEY]
+        assert [turn["text"] for turn in saved["turns"]] == [prompt, prompt]
+    finally:
+        await runtime.aclose()
+
+
 async def test_parallel_leaf_calls_see_completed_predecessor(tmp_path):
     first = call("execute", {"command": "printf first"}, "first")
     first.tool_calls.append(

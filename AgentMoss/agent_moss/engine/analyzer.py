@@ -122,7 +122,7 @@ def analyze(
     judgment = None
 
     def _finalize(res: dict) -> dict:
-        """统一补上 ``source`` / ``l3_outcome``（2026-11 可观测性）。
+        """统一补上判定来源、L3 结局和能力降级说明。
 
         ``l3_outcome`` 是对外稳定枚举（见 ``engine.types.L3_OUTCOMES``），
         让调用方不必读日志就能判断「这条 Allow 是 L3 判过的还是 L3 挂了放的」。
@@ -132,6 +132,8 @@ def analyze(
             res.setdefault("source", judgment.source)
             l3_outcome = derive_l3_outcome(judgment)
             res.setdefault("l3_outcome", l3_outcome)
+            if judgment.degraded:
+                res.setdefault("degraded", list(judgment.degraded))
             if include_l3_diagnostics and l3_outcome == "circuit_open":
                 # 策略生成可能有自己的失败原因，保留原判定的熔断原因供路由使用。
                 res["_l3_circuit_reason"] = judgment.reason

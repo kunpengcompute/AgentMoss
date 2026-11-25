@@ -208,7 +208,7 @@ class RunHistory:
         self.merge(empty_history(self.value["root"]) | {"events": [updated], "clock": self.seq})
 
     @synchronized
-    def snapshot(self) -> dict:
+    def snapshot(self, *, omit_prompt_turn_id: str | None = None) -> dict:
         rows = list(self.value["events"])
         turns = list(self.value["turns"])
         truncated = self.value["truncated"]
@@ -251,6 +251,12 @@ class RunHistory:
             else:
                 turns.pop(0)
             result = build()
+        if omit_prompt_turn_id is not None:
+            # Keep the original history limits and omit the duplicate only in the wire copy.
+            for turn, prompt in zip(turns, result["prompt_history"], strict=True):
+                if turn["id"] == omit_prompt_turn_id:
+                    prompt["text"] = ""
+                    break
         return result
 
     @contextmanager

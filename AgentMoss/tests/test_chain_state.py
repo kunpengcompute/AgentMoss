@@ -128,6 +128,8 @@ def test_analyze_stateful_incremental_denies_when_chain_completes():
         ("Allow", "low", "fail_open", False, "chain", "high", "failed_but_blocked"),
         ("Allow", "low", "circuit_open", False, "chain", "high", "circuit_open"),
         ("Deny", "high", "failed_but_blocked", False, "chain", "high", "failed_but_blocked"),
+        ("Allow", "low", "skipped", False, "chain", "high", "skipped"),
+        ("Deny", "high", "skipped", False, "chain", "high", "skipped"),
     ],
 )
 def test_stateful_response_and_audit_follow_highest_denial(
@@ -138,13 +140,17 @@ def test_stateful_response_and_audit_follow_highest_denial(
     from agent_moss.server import routes
 
     observed = outcome == "failed_but_blocked"
-    prior_layers = ["L2.2"] if observed else (["L1.1"] if decision == "Deny" else [])
+    budget_skipped = outcome == "skipped"
+    prior_layers = ["L2.2"] if observed else (["L1.1"] if decision == "Deny" and not budget_skipped else [])
+    sources = {"failed_but_blocked": "llm_failure_with_violation", "skipped": "llm_budget_skipped"}
+    degraded = ["l3_budget_floor_exceeds"] if budget_skipped else []
     monkeypatch.setattr(analyzer, "analyze", Mock(return_value={
-        "source": "llm_failure_with_violation" if observed else "engine",
+        "source": sources.get(outcome, "engine"),
         "decision": decision, "risk_level": risk, "risk_type": "" if observed else "engine",
         "reason": "model failed" if observed else "engine",
         "violated_policy": "engine", "violated_layers": prior_layers, "confidence": 76,
         "policy": "allow policy" if decision == "Allow" else "", "l3_outcome": outcome,
+        "degraded": degraded,
     }))
     chain = {"risk_level": "high", "reason": "chain", "graph": {"property_id": "chain"}}
     flow = {"risk_level": "critical", "reason": "flow", "graph": {"property_id": "flow"}}
@@ -173,6 +179,8 @@ def test_stateful_response_and_audit_follow_highest_denial(
     assert body["risk_level"] == expected_risk
     assert body["reason"] == expected_reason
     assert body["l3_outcome"] == expected_outcome
+    if budget_skipped:
+        assert body["degraded"] == degraded
     assert body["violated_layers"] == prior_layers + ["L2.2-stateful"]
     assert body["risk_type"] == ("engine" if expected_reason == "engine" else "formal_verification")
     assert body["confidence"] == (76 if expected_reason == "engine" else 90)

@@ -50,7 +50,9 @@ def _merge_stateful_denial(result: dict, finding: dict) -> tuple[dict, bool]:
     outcome = result.get("l3_outcome")
     stateful_wins = (
         result["decision"] != "Deny"
-        or result.get("source") in ("llm_failure_fallback", "llm_circuit_open", "llm_failure_with_violation")
+        or result.get("source") in (
+            "llm_failure_fallback", "llm_circuit_open", "llm_failure_with_violation", "llm_budget_skipped",
+        )
         or RISK_PRIORITY.get(level, 0) > RISK_PRIORITY.get(result.get("risk_level"), -1)
     )
     merged = dict(result)
@@ -851,6 +853,7 @@ async def analyze(req: AnalyzeRequest, request: Request, response: Response):
                     logger.warning("stateful incremental 异常（不阻断响应）: %s", e)
 
         result = _public_formal_result(result, finding, instance_id, session_id, session_history)
+        _degraded.extend(result.get("degraded") or [])
         duration_ms = (time.monotonic() - start) * 1000
 
         # ========== L3 结局 → 能力说明（2026-11）==========
@@ -881,8 +884,7 @@ async def analyze(req: AnalyzeRequest, request: Request, response: Response):
                 f"【已降级】LLM 熔断器打开，本次**未发起 L3 请求**{circuit_detail}。"
                 "检查模型服务与网络，冷却后自动试探恢复。"
             )
-        # 注意：``skipped``（L3 未启用）**不**写 degraded —— 那是部署方的既有
-        # 选择，每条响应都提示会变成噪音；需要时读 l3_outcome 字段即可。
+        # 主动禁用 L3 的 skipped 没有降级说明。预算跳过的说明已从引擎合入。
         # 状态不可用导致的 ``failed_but_blocked`` 提示已在合并判定时添加。
 
         # 追踪日志：最终判定 + 总耗时

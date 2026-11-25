@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Standalone smoke tests for the AgentMoss Gate plugin.
+"""Smoke tests for the AgentMoss Gate plugin.
 
-These tests do NOT import QwenPaw or AgentMoss. They exercise the plugin
-logic with a fake agent / fake middleware chain / mocked HTTP, so they
-run anywhere Python 3.10+ is available.
+The tests use a fake agent, fake middleware chain and mocked HTTP. The
+prompt-rendering test also needs AgentGate and AgentMoss on the Python path.
 
 Usage:
     cd plugins/agentmoss-gate
@@ -14,6 +13,8 @@ import asyncio
 import json
 import sys
 import unittest
+from dataclasses import replace
+from importlib.util import find_spec
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -332,8 +333,15 @@ class TestPayloadBuild(unittest.TestCase):
             mw.on_check_permission(
                 FakeAgent(
                     context=[
+                        FakeMsg("user", "查看报告"),
+                        FakeMsg("assistant", [
+                            FakeToolCallBlock("read_file", '{"path": "report.txt"}', "c1"),
+                        ]),
                         FakeMsg("user", "查一下磁盘"),
-                        FakeMsg("assistant", "用 bash"),
+                        FakeMsg("assistant", [
+                            FakeToolCallBlock("execute_shell_command", '{"command": "pwd"}', "c2"),
+                            FakeToolCallBlock("execute_shell_command", '{"command": "ls"}', "c3"),
+                        ]),
                     ],
                     session_id="cmb-sess",
                 ),
@@ -345,9 +353,79 @@ class TestPayloadBuild(unittest.TestCase):
         self.assertEqual(seen["tool_name"], "bash")
         self.assertEqual(seen["agent_type"], "qwenpaw")
         self.assertEqual(seen["user_prompt"], "查一下磁盘")
+        previous_actions = [{"action_type": "read_file", "action_detail": "report.txt"}]
+        current_actions = [
+            {"action_type": "execute_shell_command", "action_detail": "pwd"},
+            {"action_type": "execute_shell_command", "action_detail": "ls"},
+        ]
+        self.assertEqual(seen["prompt_history"], [
+            {"text": "查看报告", "actions": previous_actions},
+            {"text": "", "actions": current_actions},
+        ])
+        self.assertEqual(seen["action_history"], previous_actions + current_actions)
         self.assertEqual(seen["metadata"]["tenant"], "cmb")
         self.assertEqual(seen["metadata"]["source"], "qwenpaw-plugin")
         self.assertIn("qp_behavior", seen["metadata"])
+
+    def test_single_turn_intent_is_only_in_user_prompt(self):
+        current = "查看报告。" + "甲" * 189
+
+        seen = self._payload_for(
+            {"command": "pwd"},
+            FakeAgent(context=[FakeMsg("user", [FakeTextBlock(current)])]),
+        )
+
+        self.assertEqual(seen["user_prompt"], current)
+        self.assertEqual(seen["prompt_history"], [{"text": "", "actions": []}])
+        self.assertEqual(seen["action_history"], [])
+
+    @unittest.skipUnless(find_spec("agent_gate") and find_spec("agent_moss"), "requires AgentGate and AgentMoss")
+    def test_current_turn_action_summary_survives_flat_history_window(self):
+        from agent_gate.shared.normalizer import Normalizer
+        from agent_gate.shared.server.models import AgentGateInput, SystemContext
+        from agent_moss.engine.llm_prompt_budget import prepare_l3_prompt
+        from agent_moss.infra.config import get_llm_prompt_budget_config
+        from agent_moss.server.models import AnalyzeRequest
+
+        current = "查看报告。" + "甲" * 189
+        actions = [FakeToolCallBlock("read_file", '{"path": "earliest-note.txt"}', "first")]
+        actions.extend(
+            FakeToolCallBlock("execute_shell_command", '{"command": "pwd"}', f"step-{index}")
+            for index in range(20)
+        )
+        payload = self._payload_for(
+            {"command": "pwd"},
+            FakeAgent(context=[FakeMsg("user", current), FakeMsg("assistant", actions)]),
+        )
+        request = AgentGateInput.model_validate({**payload, "instance_id": "qwenpaw-budget-test"})
+        with patch("agent_gate.shared.tool_map.load_configured_map", return_value={}):
+            normalized = asyncio.run(Normalizer().normalize(request, SystemContext()))
+        moss_request = AnalyzeRequest.model_validate(normalized)
+        settings = replace(
+            get_llm_prompt_budget_config(), max_prompt_tokens=4096, mode="hard",
+            history_max_items=20, prompt_history_max_turns=20, prompt_session_max_chars=8000,
+        )
+
+        prepared = prepare_l3_prompt(
+            settings,
+            prompt_session=moss_request.prompt_session,
+            action_history=[action.model_dump() for action in moss_request.action_history],
+            prompt_history=[turn.model_dump() for turn in moss_request.prompt_history],
+            a_next=moss_request.a_next.model_dump(),
+            reason=moss_request.reason,
+            skills_text="",
+            hints_text="",
+            script_analysis_text="",
+            skip_l3_hints="",
+            path_context="",
+        )
+
+        self.assertFalse(prepared.code)
+        self.assertEqual(prepared.text.count(current), 1)
+        self.assertIn("（更早的 1 条历史动作已省略）", prepared.text)
+        self.assertNotIn("earliest-note.txt", prepared.text)
+        self.assertNotIn("第1轮用户意图:", prepared.text)
+        self.assertRegex(prepared.text, r"第1轮动作[：:][^\n]*\bread\b")
 
     def test_tool_input_is_not_json_escaped(self):
         """Backslashes must survive verbatim, or Windows rules never match.

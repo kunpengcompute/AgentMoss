@@ -17,7 +17,8 @@ from agent_moss.engine.types import (
     SecurityJudgment,
     derive_l3_outcome,
 )
-from agent_moss.infra.config import Config, RetryConfig, TimeoutConfig
+from agent_moss.infra.config import CacheConfig, Config, RetryConfig, TimeoutConfig
+from agent_moss.infra.policy_cache import PolicyCache
 
 
 def _j(source: str, allowed: bool = True) -> SecurityJudgment:
@@ -37,6 +38,8 @@ def _j(source: str, allowed: bool = True) -> SecurityJudgment:
         # L3 未启用
         ("heuristic_and_logic_only", True, "skipped"),
         ("disabled", True, "skipped"),
+        ("llm_budget_skipped", True, "skipped"),
+        ("llm_budget_skipped", False, "skipped"),
         # L3 失败：按 fail_mode 分叉
         ("llm_failure_fallback", True, "fail_open"),
         ("llm_failure_fallback", False, "fail_closed"),
@@ -69,6 +72,7 @@ def test_every_declared_outcome_is_reachable() -> None:
     sources = (
         "llm", "llm_extracted", "llm_reasoning_fallback",
         "heuristic_and_logic_only", "disabled",
+        "llm_budget_skipped",
         "llm_failure_fallback", "llm_circuit_open",
         "llm_failure_with_violation",
         "whitelist_bypass", "heuristic", "logic_rule", "formal_engine",
@@ -113,3 +117,64 @@ def test_circuit_reason_is_preserved_when_policy_generation_fails(monkeypatch, i
         assert result["_l3_circuit_reason"] == circuit_reason
     else:
         assert "_l3_circuit_reason" not in result
+
+
+@pytest.fixture
+def budget_model(monkeypatch, default_config):
+    from agent_moss.engine import llm_analyzer
+
+    monkeypatch.setenv("AGENT_MOSS_DISABLE_HEURISTIC", "1")
+    monkeypatch.setenv("AGENT_MOSS_DISABLE_LOGIC_RULES", "1")
+    monkeypatch.setenv("AGENT_MOSS_DISABLE_LLM", "0")
+    monkeypatch.setenv("AGENT_MOSS_BRAIN_ENABLED", "0")
+    monkeypatch.setenv("AGENT_MOSS_ENABLE_POLICY_GEN", "0")
+    monkeypatch.setenv("AGENT_MOSS_SAVE_POLICY", "0")
+    monkeypatch.setenv("AGENT_MOSS_LLM_MAX_PROMPT_TOKENS", "500")
+    monkeypatch.setenv("AGENT_MOSS_LLM_BUDGET_MODE", "hard")
+    monkeypatch.setattr(analyzer, "get_default_config", lambda: default_config)
+    monkeypatch.setattr(analyzer, "get_default_cache", lambda: PolicyCache(CacheConfig(enabled=False)))
+    call = Mock(side_effect=ValueError("fixture model failure"))
+    monkeypatch.setattr(llm_analyzer, "call_llm", call)
+    return call
+
+
+@pytest.mark.parametrize(("fail_mode", "decision"), [("fail_open", "Allow"), ("fail_closed", "Deny")])
+def test_hard_budget_skip_reaches_python_and_http(monkeypatch, budget_model, fail_mode, decision):
+    from fastapi.testclient import TestClient
+
+    from agent_moss.server.app import create_app
+
+    monkeypatch.setenv("AGENT_MOSS_LLM_FAIL_MODE", fail_mode)
+    payload = {
+        "session_id": "hard-budget",
+        "prompt_session": "检查测试输出",
+        "a_next": {"action_type": "fixture_tool", "action_detail": "生成摘要"},
+        "action_history": [],
+        "reason": "测试",
+    }
+
+    result = analyzer.analyze(**payload)
+    assert result["source"] == "llm_budget_skipped"
+    with TestClient(create_app()) as client:
+        response = client.post("/api/v1/analyze", json=payload)
+    assert response.status_code == 200
+    for verdict in (result, response.json()):
+        assert verdict["decision"] == decision
+        assert verdict["l3_outcome"] == "skipped"
+        assert verdict["violated_layers"] == []
+        assert verdict["degraded"] == ["l3_budget_floor_exceeds"]
+    budget_model.assert_not_called()
+
+
+def test_soft_budget_degradation_survives_model_failure(monkeypatch, budget_model):
+    monkeypatch.setenv("AGENT_MOSS_LLM_BUDGET_MODE", "soft")
+    monkeypatch.setenv("AGENT_MOSS_LLM_FAIL_MODE", "fail_closed")
+    result = analyzer.analyze(
+        session_id="soft-budget", prompt_session="检查测试输出", action_history=[],
+        a_next={"action_type": "fixture_tool", "action_detail": "生成摘要"}, reason="测试",
+    )
+
+    budget_model.assert_called_once()
+    assert result["decision"] == "Deny"
+    assert result["l3_outcome"] == "fail_closed"
+    assert result["degraded"] == ["l3_budget_unreachable"]

@@ -371,6 +371,11 @@ class AgentMossGateMiddleware(MiddlewareBase):
         # Build AgentGate payload
         ctx = _extract_session_context(agent)
         command = _tool_input_text(tool_input)
+        prompt_history = ctx["prompt_turns"]
+        if prompt_history:
+            # The current intent is sent in user_prompt. Keep the last row
+            # so its actions and the history window's positions are preserved.
+            prompt_history = [*prompt_history[:-1], {**prompt_history[-1], "text": ""}]
 
         # cwd 优先取**本次调用显式指定**的值：QwenPaw 的 shell 工具签名是
         # `execute_shell_command(command, timeout, cwd=None, ...)` —— cwd 为 None
@@ -396,7 +401,7 @@ class AgentMossGateMiddleware(MiddlewareBase):
             # file" from "overwrite an existing one" in read_before_write.
             "description": ctx["reason"],
             "user_prompt": ctx["user_prompt"],
-            "prompt_history": ctx["prompt_turns"],
+            "prompt_history": prompt_history,
             # Send the tool calls we saw in this session's context window.
             # Previously omitted in favour of AgentGate's SQLite auto-fill,
             # which only knows calls made *after* the plugin was enabled —

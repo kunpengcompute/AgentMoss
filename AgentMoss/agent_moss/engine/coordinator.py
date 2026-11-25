@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from ..profiles.base import OSProfile
     from ..agents.base import AgentExtensions
 
-from ..infra.config import Config, is_brain_enabled, is_llm_enabled
+from ..infra.config import Config, get_llm_fail_mode, is_brain_enabled, is_llm_enabled
 from ..profiles import get_profile
 from .heuristic import (
     HeuristicDetector, is_safe_bash_command,
@@ -41,7 +41,7 @@ from .heuristic import (
 from .inline_analyzer import (
     analyze_inline_script, confirms_inline_read, has_inline_danger_evidence, is_literal_text_command,
 )
-from .llm_analyzer import LLMAnalyzer
+from .llm_analyzer import LLMAnalyzer, LLMPromptBudgetExceeded
 from .logic_rules import LogicRulesChecker, _SHELL_FULL_READ_CMDS, _split_shell_segments
 from .script_content_analyzer import (
     analyze_script_content,
@@ -774,8 +774,24 @@ class AgentMossBot:
                     prompt_history=prompt_history,
                     path_context=path_context,
                 )
+            except LLMPromptBudgetExceeded as e:
+                # 前置层已确认的拒绝已返回。此时的 L2.2 标记仅来自 observe 模式。
+                fail_mode = get_llm_fail_mode()
+                allowed = fail_mode == "fail_open"
+                decision = "放行" if allowed else "拒绝"
+                return SecurityJudgment(
+                    allowed=allowed,
+                    reason=f"L3 prompt 超出硬预算，已跳过语义分析，按 {fail_mode} {decision}",
+                    risk_level="low" if allowed else "medium",
+                    source="llm_budget_skipped",
+                    action_desc=a_next.get("action_detail", ""),
+                    violated_layers=violated_layers,
+                    degraded=[e.code],
+                )
             except Exception as e:
                 logger.warning("LLM 分析异常: %s", e)
+                budget_degradation = getattr(e, "l3_budget_degraded", "")
+                degraded = [budget_degradation] if budget_degradation else []
                 # 熔断打开 ≠ 调用失败：前者连请求都没发（上游早就判定不可用），
                 # 后者是真去调了但失败。两者对运维的含义不同，source 分开。
                 from ..infra.llm_client import LLMCircuitOpenError
@@ -793,11 +809,11 @@ class AgentMossBot:
                         source="llm_failure_with_violation",
                         action_desc=a_next.get("action_detail", ""),
                         violated_layers=violated_layers,
+                        degraded=degraded,
                     )
                 # 纯靠 L3 时 LLM 挂了：按 fail_mode 决策
                 # - fail_open（默认）：Allow + 警告，可用性优先
                 # - fail_closed：Deny，安全优先
-                from ..infra.config import get_llm_fail_mode
                 if get_llm_fail_mode() == "fail_open":
                     logger.warning(
                         "LLM 分析失败，fail_open 模式：允许执行（前两层未拦截）: %s", e
@@ -809,6 +825,7 @@ class AgentMossBot:
                         source=_l3_fail_source,
                         action_desc=a_next.get("action_detail", ""),
                         violated_layers=violated_layers,
+                        degraded=degraded,
                     )
                 return SecurityJudgment(
                     allowed=False,
@@ -816,6 +833,7 @@ class AgentMossBot:
                     risk_level="medium",
                     source=_l3_fail_source,
                     action_desc=a_next.get("action_detail", ""),
+                    degraded=degraded,
                 )
             if not llm_judgment.allowed:
                 violated_layers.append("L3.1")

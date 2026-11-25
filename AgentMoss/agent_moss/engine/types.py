@@ -24,6 +24,7 @@ class SecurityJudgment:
     violation_graph: dict | None = None
     # 兼容旧调用方：反例路径数组 [[session_id, seq, detail, timestamp?, agent?], ...]
     violation_chain: list = field(default_factory=list)
+    degraded: list[str] = field(default_factory=list)
 
 
 #: L3（LLM 语义分析）本次的实际结局。对客户暴露的稳定枚举 ——
@@ -32,7 +33,7 @@ L3_OUTCOMES = (
     "ok",                   # L3 正常返回并被采纳
     "reasoning_fallback",   # content 为空、判定取自 reasoning 类字段（判定仍有效）
     "not_reached",          # L1/L2 已给出结论（拦截或白名单放行），未调用 L3
-    "skipped",              # L3 未启用（无 key / 层级开关关闭）
+    "skipped",              # L3 未启用或主动跳过（如 prompt 硬预算不够）
     "fail_open",            # L3 调用失败，按 fail_open 放行（**能力降级**）
     "fail_closed",          # L3 调用失败，按 fail_closed 拒绝（**能力降级**）
     "failed_but_blocked",   # L3 调用失败，最终由其他分析层拒绝
@@ -57,7 +58,7 @@ def derive_l3_outcome(judgment: "SecurityJudgment") -> str:
         return "circuit_open"
     if src == "llm_failure_with_violation":
         return "failed_but_blocked"
-    if src in ("heuristic_and_logic_only", "disabled"):
+    if src in ("heuristic_and_logic_only", "disabled", "llm_budget_skipped"):
         return "skipped"
     # whitelist_bypass / heuristic* / logic_rule* / formal_engine / brain_rule …
     # 都是「前两层已给出结论，没轮到 L3」。
