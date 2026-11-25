@@ -150,6 +150,10 @@ _COPROC_GROUP_RE = re.compile(
     _CASE_COMMAND_START + _COPROC_PREFIX
     + r"(?:(?:\{|if|for|while|until|select)(?=$|[\s;&|()<>])|\()"
 )
+_CASE_FUNCTION_RE = re.compile(
+    _CASE_COMMAND_START
+    + r"(?:function[ \t]+[^\s;&|()<>]+|[^\s;&|()<>]+[ \t]*\([ \t]*\))"
+)
 _CASE_CLOSE_RE = re.compile(r"(?:^|(?<=[;&]))[ \t]*esac(?=$|[ \t;&|])")
 _CASE_HEADER_LINE_RE = re.compile(r"[ \t]*case[ \t]+([^\s;&|()<>]+)(?:[ \t]+(in))?[ \t]*")
 _IF_OPEN_RE = re.compile(r"\bif\b")
@@ -181,8 +185,8 @@ def _find_block_end(
 
 def _case_depth_delta(line: str) -> int | None:
     """在已遮蔽的语法行中识别命令边界；无法可靠配对时返回 None。"""
-    if _COPROC_GROUP_RE.search(line):
-        return None  # coproc 命令组可能在同一行开启内层 case。
+    if _COPROC_GROUP_RE.search(line) or _CASE_FUNCTION_RE.search(line):
+        return None  # coproc 命令组或函数体可能在同一行开启内层 case。
     opens = len(_CASE_OPEN_RE.findall(line))
     closes = list(_CASE_CLOSE_RE.finditer(line))
     if opens + len(closes) > 1 or (closes and closes[0].start() != 0):

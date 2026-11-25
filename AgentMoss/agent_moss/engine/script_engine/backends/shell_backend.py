@@ -24,7 +24,6 @@ from ..ir import ScriptCall, ScriptIR, scan_fingerprint
 from .base import LanguageBackend
 from .symbolic import (
     CASE_HEADER_RE,
-    _CASE_QUOTED_PART,
     case_syntax_lines,
     parse_case_statement,
     select_case_branch,
@@ -36,59 +35,120 @@ _POSITIONAL_RE = re.compile(r"\$(?:([1-9@*])|\{([1-9][0-9]*|[@*])(?:(:-|-)|\}))"
 _QUOTED_WORD_PART_RE = re.compile(r"""\$\{|\\[\s\S]|\$[1-9@*]""")
 _SHELL_WORD_PART_RE = re.compile(rf"""'[^']*'|"|{_QUOTED_WORD_PART_RE.pattern}""")
 _SHELL_SOURCE_PART_RE = re.compile(rf"\#|{_SHELL_WORD_PART_RE.pattern}")
-_DOUBLE_QUOTE_END_RE = re.compile(r"""\\[\s\S]|\$\{|""" + '"')
-_DEFAULT_BOUNDARY_RE = re.compile(rf"""{_CASE_QUOTED_PART}|\$\{{|\$\(|[}}'"\x60]""")
+_SUBSTITUTION_START = r"\$\(|\x60"
+_DEFAULT_WORD_PART_RE = re.compile(rf"{_SUBSTITUTION_START}|{_SHELL_WORD_PART_RE.pattern}")
+_QUOTED_DEFAULT_PART_RE = re.compile(rf'{_SUBSTITUTION_START}|"|{_QUOTED_WORD_PART_RE.pattern}')
+_DOUBLE_QUOTE_END_RE = re.compile(rf'\\[\s\S]|\$\{{|{_SUBSTITUTION_START}|"')
+_DEFAULT_BOUNDARY_RE = re.compile(
+    rf"""\\[\s\S]|'[^']*'|"|\$\{{|{_SUBSTITUTION_START}|[}}']"""
+)
+_SUBSTITUTION_BOUNDARY_RE = re.compile(
+    rf"""\\[\s\S]|'[^']*'|"|\$\{{|{_SUBSTITUTION_START}|[()']|<<"""
+    r"|(?<![^\s;&|()<>])(?:\#[^\n]*|case(?=[ \t]))"
+)
+_BACKTICK_RE = re.compile(r"\x60(?:\\[\s\S]|[^\x60\\])*\x60")
 _IFS_RE = re.compile(r"([ \t\n]+)")
 _MAX_DEFAULT_DEPTH = 32
 
 
-def _braced_word_end(text: str, start: int) -> int | None:
+def _substitution_end(text: str, start: int, opening: str, level: int) -> int | None:
+    """Locate a command substitution without interpreting its output."""
+    if level >= _MAX_DEFAULT_DEPTH:
+        return None
+    if opening == "`":
+        match = _BACKTICK_RE.match(text, start - 1)
+        return match.end() if match else None
+
     depth = 1
-    for token in _DEFAULT_BOUNDARY_RE.finditer(text, start):
-        if token[0] == "${":
+    while token := _SUBSTITUTION_BOUNDARY_RE.search(text, start):
+        part = token[0]
+        start = token.end()
+        if part in ("(", "$("):
             depth += 1
-        elif token[0] == "}":
+        elif part == ")":
             depth -= 1
             if not depth:
-                return token.end()
-        elif token[0] in ("$(", '"', "'", "`"):
+                return start
+        elif part == '"':
+            start = _double_quote_end(text, start, level + 1)
+        elif part == "${":
+            start = _braced_word_end(text, start, level + 1)
+        elif part == "`":
+            start = _substitution_end(text, start, part, level + 1)
+        elif part in ("'", "<<", "case"):
+            return None  # These can change the meaning of a closing parenthesis.
+        if start is None:
             return None
     return None
 
 
-def _double_quote_end(text: str, start: int) -> int | None:
+def _braced_word_end(text: str, start: int, level: int = 0) -> int | None:
+    if level >= _MAX_DEFAULT_DEPTH:
+        return None
+    depth = 1
+    while token := _DEFAULT_BOUNDARY_RE.search(text, start):
+        part = token[0]
+        start = token.end()
+        if part == "${":
+            depth += 1
+        elif part == "}":
+            depth -= 1
+            if not depth:
+                return start
+        elif part in ("$(", "`"):
+            start = _substitution_end(text, start, part, level + 1)
+        elif part == '"':
+            start = _double_quote_end(text, start, level + 1)
+        elif part == "'":
+            return None
+        if start is None:
+            return None
+    return None
+
+
+def _double_quote_end(text: str, start: int, level: int = 0) -> int | None:
+    if level >= _MAX_DEFAULT_DEPTH:
+        return None
     while token := _DOUBLE_QUOTE_END_RE.search(text, start):
-        if token[0] == '"':
+        part = token[0]
+        if part == '"':
             return token.end()
         start = token.end()
-        if token[0] == "${":
-            end = _braced_word_end(text, start)
-            if end is None:
-                return None
-            start = end
+        if part == "${":
+            start = _braced_word_end(text, start, level + 1)
+        elif part in ("$(", "`"):
+            start = _substitution_end(text, start, part, level + 1)
+        if start is None:
+            return None
     return None
 
 
 def _shell_word_parts(
-    text: str, quoted: bool = False, *, syntax: str | None = None,
+    text: str, quoted: bool = False, *,
+    syntax: str | None = None, default_text: bool = False,
 ) -> Iterator[tuple[int, int]]:
-    if quoted:
+    if default_text:
+        pattern = _QUOTED_DEFAULT_PART_RE if quoted else _DEFAULT_WORD_PART_RE
+    elif quoted:
         pattern = _QUOTED_WORD_PART_RE
     else:
         pattern = _SHELL_SOURCE_PART_RE if syntax is not None else _SHELL_WORD_PART_RE
     offset = 0
     while token := pattern.search(text, offset):
+        part = token[0]
         end = token.end()
-        if token[0] == "#" and syntax is not None and syntax[token.start()] == " ":
+        if part == "#" and syntax is not None and syntax[token.start()] == " ":
             end = text.find("\n", end)
             if end < 0:
                 return
             offset = end + 1
             continue
-        if token[0] == "${":
+        if part == "${":
             end = _braced_word_end(text, end)
-        elif token[0] == '"':
+        elif part == '"':
             end = _double_quote_end(text, end)
+        elif part in ("$(", "`"):
+            end = _substitution_end(text, end, part, 0)
         if end is None:
             if syntax is None:
                 return
@@ -100,6 +160,17 @@ def _shell_word_parts(
             continue
         yield token.start(), end
         offset = end
+
+
+def _default_has_substitution(text: str, quoted: bool) -> bool:
+    for start, end in _shell_word_parts(text, quoted, default_text=True):
+        part = text[start:end]
+        if part.startswith(("$(", "`")):
+            return True
+        if part.startswith('"') and _default_has_substitution(part[1:-1], True):
+            return True
+    return False
+
 
 def _positional_value(token: str, args: list[str]) -> tuple[str | list[str], bool]:
     """返回可用的实参，或尚未求值的默认项。"""
@@ -140,7 +211,10 @@ def bind_positional_args(content: str, args: list[str]) -> str:
                 value, use_default = _positional_value(token, args)
                 values = value if isinstance(value, list) else [value]
                 if use_default:
-                    values = _expand_shell_word(values[0], args, split_unquoted=not quoted)
+                    if _default_has_substitution(values[0], quoted):
+                        output.append(token)
+                        continue
+                    values = _expand_shell_word(values[0], args, quoted_default=quoted)
                 if quoted:
                     values = [re.sub(r'([\\$"\x60])', r"\\\1", item) for item in values]
                 output.append(('" "' if quoted else " ").join(values))
@@ -350,9 +424,13 @@ def _mark_loops_reachable(content: str) -> str:
 _CHILD_INTERPRETER_RE = re.compile(r"\b(?:bash|sh|zsh|python3?|node|ruby|perl|php|lua)\b")
 _CHILD_CALL_RE = re.compile(
     r"(?:^[ \t]*(?:\(?[^()\n;&<>]+\)[ \t]*)?|(?<=[;&|])(?<![<>][&|]))[ \t]*"
-    r"(?:(?:if|then|elif|else|while|until|do|!|\{|exec|command)[ \t]+|\([ \t]*"
+    r"(?:(?:if|then|elif|else|while|until|do|!|\{)[ \t]+|\([ \t]*"
+    r"|command(?:[ \t]+-p)?(?:[ \t]+--)?[ \t]+"
+    r"|exec(?:[ \t]+(?:-[cl]+|-a[ \t]+[^ \t\n;&|<>()\x00]+))*(?:[ \t]+--)?[ \t]+"
     r"|(?:(?:/usr)?/bin/)?time(?:[ \t]+-p)?(?:[ \t]+--)?[ \t]+"
-    r"|(?:(?:/usr)?/bin/)?env(?:[ \t]+(?:-i|--ignore-environment))?(?:[ \t]+--)?[ \t]+"
+    r"|(?:(?:/usr)?/bin/)?env(?:[ \t]+(?:-i|--ignore-environment"
+    r"|(?:-u[ \t]*|--unset(?:[ \t]+|=))[^ \t\n;&|<>()\x00]+"
+    r"))*(?:[ \t]+--)?[ \t]+"
     r"|[A-Za-z_][A-Za-z0-9_]*=[^ \t\n;&|<>()\x00]*[ \t]+)*"
     r"((?:/bin/)?bash|sh|zsh|python3?|node|ruby|perl|php|lua)[ \t]+"
     r"([^\n;|&<>()\x00]+)",
@@ -371,12 +449,12 @@ def _split_fields(text: str) -> Iterator[str | None]:
 
 def _argument_parts(
     word: str, args: list[str] | None, *, quoted: bool = False,
-    split_unquoted: bool = True, default_depth: int = 0,
+    default_text: bool = False, default_depth: int = 0,
 ) -> Iterator[str | None]:
     """产出单词的字面片段；None 表示展开后的字段边界。"""
-    field_split = not quoted and split_unquoted
+    field_split = not quoted
     offset = 0
-    for start, end in _shell_word_parts(word, quoted):
+    for start, end in _shell_word_parts(word, quoted, default_text=default_text):
         if start > offset:
             literal = word[offset:start]
             yield from _split_fields(literal) if field_split else (literal,)
@@ -384,7 +462,7 @@ def _argument_parts(
         text = word[start:end]
         if not quoted and text.startswith("'"):
             yield text[1:-1]
-        elif not quoted and text.startswith('"'):
+        elif text.startswith('"'):
             if text == '""':
                 yield ""
             else:
@@ -394,17 +472,18 @@ def _argument_parts(
         elif text.startswith("\\"):
             escaped = text[1:]
             if escaped != "\n":
-                yield escaped if not quoted or escaped in '$"\\`' else text
+                specials = '$"\\`}' if default_text else '$"\\`'
+                yield escaped if not quoted or escaped in specials else text
         elif args is None or _POSITIONAL_RE.match(text) is None:
             yield text
         else:
             value, use_default = _positional_value(text, args)
             if use_default:
-                if default_depth >= _MAX_DEFAULT_DEPTH:
+                if default_depth >= _MAX_DEFAULT_DEPTH or _default_has_substitution(value, quoted):
                     yield text
                     continue
                 yield from _argument_parts(
-                    value, args, split_unquoted=field_split, default_depth=default_depth + 1,
+                    value, args, quoted=quoted, default_text=True, default_depth=default_depth + 1,
                 )
                 if not value and not field_split:
                     yield ""
@@ -423,11 +502,11 @@ def _argument_parts(
 
 
 def _expand_shell_word(
-    word: str, args: list[str] | None, *, split_unquoted: bool = True,
+    word: str, args: list[str] | None, *, quoted_default: bool = False,
 ) -> list[str]:
     fields: list[str] = []
     pieces: list[str] = []
-    for part in _argument_parts(word, args, split_unquoted=split_unquoted):
+    for part in _argument_parts(word, args, quoted=quoted_default, default_text=quoted_default):
         if part is not None:
             pieces.append(part)
         elif pieces:

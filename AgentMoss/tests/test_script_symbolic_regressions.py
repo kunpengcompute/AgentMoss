@@ -164,6 +164,28 @@ esac"""
     assert "echo outer_default" not in ir.reachable_content
 
 
+@pytest.mark.parametrize("selector", ["$1", '"$1"'])
+@pytest.mark.parametrize("declaration", ["function worker", "worker()"])
+def test_case_with_inline_function_keeps_full_text(selector, declaration):
+    script = f"""case {selector} in
+  bak*) echo before; {declaration} {{ case "$2" in
+      on) echo inner_on ;;
+      off) echo inner_off ;;
+    esac
+    }}
+    worker
+    echo after_function
+    ;;
+  *) echo outer_default ;;
+esac"""
+
+    ir = shell_backend.ShellBackend().parse(script, ["bak42", "off"])
+
+    assert not ir.control_flow_resolved
+    for marker in ("inner_on", "inner_off", "after_function", "outer_default"):
+        assert f"echo {marker}" in ir.reachable_content
+
+
 def test_case_with_ambiguous_inline_closer_keeps_full_text():
     script = """case $1 in
   bak*) echo before; case $2 in
@@ -316,6 +338,44 @@ env bash env_plain.sh third
     ]
 
 
+def test_shell_wrapper_options_preserve_command_position():
+    script = """echo Usage: command -- bash ignored.sh
+printf '%s\n' Example: exec -- bash ignored.sh
+command -v bash ignored.sh
+command -- bash command_child.sh one
+exec -- bash exec_child.sh two
+env -u UNUSED bash env_child.sh three
+env -u bash sh env_sh_child.sh four
+"""
+
+    calls = shell_backend.extract_calls_from_content(script)
+
+    assert [(call.path, call.args, call.interpreter) for call in calls] == [
+        ("command_child.sh", ["one"], "bash"),
+        ("exec_child.sh", ["two"], "bash"),
+        ("env_child.sh", ["three"], "bash"),
+        ("env_sh_child.sh", ["four"], "sh"),
+    ]
+
+
+@pytest.mark.parametrize("quote", ["", '"'])
+@pytest.mark.parametrize("path", ["known.sh", ""])
+@pytest.mark.parametrize(
+    "default", ["""$(printf '%s' "$(printf '%s' '})')")""", "`printf fallback.sh`"],
+)
+def test_child_path_ignores_unused_command_substitution(quote, path, default):
+    expression = "$" + "{1:-" + default + "}"
+    script = "bash " + quote + expression + quote + " run"
+
+    ir = shell_backend.ShellBackend().parse(script, [path])
+
+    assert [(call.path, call.args) for call in ir.calls] == (
+        [("known.sh", ["run"])] if path else []
+    )
+    expected_text = "known.sh" if path else expression
+    assert expected_text in ir.reachable_content
+
+
 @pytest.mark.parametrize(
     "first_command",
     [
@@ -338,6 +398,9 @@ def test_shell_binding_continues_after_comment_or_unsupported_command(first_comm
         ("", "one two", ["one", "two"]),
         ('"', "one two", ["one two"]),
         ("", r"one\ two tail", ["one two", "tail"]),
+        ('"', "'one two'", ["'one two'"]),
+        ("", "'one two'", ["one two"]),
+        ('"', '"one two"', ["one two"]),
     ],
 )
 def test_positional_default_fields_follow_shell_quoting(quote, default, expected):
@@ -346,6 +409,16 @@ def test_positional_default_fields_follow_shell_quoting(quote, default, expected
     calls = shell_backend.ShellBackend().parse(script, [""]).calls
 
     assert [(call.path, call.args) for call in calls] == [("child.sh", expected)]
+
+
+def test_double_quoted_default_preserves_literal_apostrophes_during_expansion():
+    script = "bash child.sh \"$" + "{1:-'prefix $2'}\""
+
+    calls = shell_backend.ShellBackend().parse(script, ["", "expanded"]).calls
+
+    assert [(call.path, call.args) for call in calls] == [
+        ("child.sh", ["'prefix expanded'"]),
+    ]
 
 
 def test_tracker_visits_calls_with_distinct_arguments_and_stops_cycles(tmp_path):
