@@ -691,6 +691,33 @@ def test_uncertain_delivery_without_confirmation_never_uses_provisional_result()
     assert tracker.to_snapshot() == before
 
 
+def test_same_gate_call_id_with_different_content_is_a_protocol_conflict():
+    tracker = _tracker()
+    first = _action(1, "fixture-start")
+    tracker.advance(first, session_id="s")
+    with pytest.raises(stateful.GateCallConflict):
+        tracker.advance({**first, "action_detail": "echo fixture-other"}, session_id="s")
+    assert len(tracker.nodes) == 1
+
+
+def test_unconfirmed_gate_call_without_delivery_marker_is_a_protocol_conflict():
+    tracker = _tracker()
+    first = _action(1, "fixture-start")
+    order = stateful._gate_order(first)
+    fingerprint = stateful.StatefulChainTracker._input_fingerprint(
+        first, False, "", "", order,
+    )
+    node = tracker._make_node(
+        first, "s", False, "", "", order=order, input_fingerprint=fingerprint,
+    )
+    tracker._add_node(node)
+    with pytest.raises(stateful.GateCallConflict):
+        tracker.advance(first, session_id="s")
+    with pytest.raises(stateful.UnconfirmedGateRetry):
+        tracker.advance({**first, "_gate_delivery_uncertain": True}, session_id="s")
+    assert len(tracker.nodes) == 1
+
+
 def test_old_fingerprints_do_not_collapse_independent_numbered_calls():
     tracker = _tracker()
     first, second = _action(1, "same-content"), _action(2, "same-content")

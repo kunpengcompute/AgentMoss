@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from agent_moss.engine import analyzer
 from agent_moss.engine.formal_engine import chain_state, stateful
-from agent_moss.engine.formal_engine.stateful import StatefulAnalysisUnavailable
+from agent_moss.engine.formal_engine.stateful import StatefulAnalysisUnavailable, UnconfirmedGateRetry
 from agent_moss.infra import metrics, security_policy
 from agent_moss.server import routes
 from agent_moss.server.app import _PooledLimiter, _RateLimiter, create_app
@@ -66,10 +66,7 @@ def test_gate_identity_is_required_for_correlation(client, monkeypatch):
         assert response.status_code == 200
         assert "gate_call_id" not in response.json()
     monkeypatch.setenv("AGENT_MOSS_AUTH_MODE", "off")
-    response = client.post("/api/v1/analyze", json=malformed)
-    assert response.status_code == 200
-    assert "gate_call_id" not in response.json()
-    assert client.post("/api/v1/analyze", headers=_headers(), json=_body()).status_code == 403
+    assert "AGENT_MOSS_AUTH_MODE=off" in security_policy.auth_config_error()
 
 
 @pytest.mark.parametrize("alias", ["global", "agent", "console"])
@@ -130,7 +127,7 @@ def test_gate_pool_full_correlates_only_authenticated_admission(client, monkeypa
     base_analysis.assert_not_called()
 
 
-def test_gate_state_failure_is_an_explicit_denial_with_echo(client, monkeypatch):
+def test_gate_state_unavailable_degrades_without_blocking(client, monkeypatch):
     failure = Mock(side_effect=StatefulAnalysisUnavailable("fixture evidence unavailable"))
     monkeypatch.setattr(routes, "_chain_state_for_agent", lambda _: SimpleNamespace(apply_incremental=failure))
     response = client.post("/api/v1/analyze", headers=_headers(), json=_body(
@@ -138,8 +135,12 @@ def test_gate_state_failure_is_an_explicit_denial_with_echo(client, monkeypatch)
     ))
     assert response.status_code == 200
     result = response.json()
-    assert (result["decision"], result["risk_type"], result["policy"]) == ("Deny", "service_unavailable", "")
+    assert (result["decision"], result["risk_type"], result["policy"]) == (
+        "Allow", "", "fixture allow policy",
+    )
     assert result["gate_call_id"] == CALL_ID
+    degraded = "\n".join(result["degraded"])
+    assert "有状态分析不可用" in degraded and "本次动作未参与 L2.2" in degraded
     assert failure.call_args.args[0] == {
         "action_type": "bash",
         "action_detail": "echo example",
@@ -148,6 +149,22 @@ def test_gate_state_failure_is_an_explicit_denial_with_echo(client, monkeypatch)
         "_gate_call_time_us": CALL_TIME,
         "_gate_delivery_uncertain": True,
     }
+
+
+def test_unconfirmed_gate_retry_is_denied_with_echo(client, monkeypatch):
+    failure = Mock(side_effect=UnconfirmedGateRetry("fixture unconfirmed"))
+    monkeypatch.setattr(routes, "_chain_state_for_agent", lambda _: SimpleNamespace(apply_incremental=failure))
+    response = client.post("/api/v1/analyze", headers=_headers(), json=_body(
+        metadata={"stateful_incremental": True}, gate_delivery_uncertain=True,
+    ))
+    assert response.status_code == 200
+    result = response.json()
+    assert (result["decision"], result["risk_type"], result["risk_level"]) == (
+        "Deny", "service_unavailable", "high",
+    )
+    assert result["gate_call_id"] == CALL_ID
+    assert "无法确认本次 Gate 调用是否已入链" in result["reason"]
+    assert "避免重复入链" in "\n".join(result["degraded"])
 
 
 @pytest.mark.parametrize("state_enabled", [True, False])
@@ -171,13 +188,11 @@ def test_l3_degradation_uses_final_stateful_decision_in_response_and_metrics(cli
     assert result["gate_call_id"] == CALL_ID
     assert l3_error in degraded
     if state_enabled:
-        assert (result["decision"], result["risk_type"], result["l3_outcome"]) == (
-            "Deny", "service_unavailable", "failed_but_blocked",
-        )
-        assert "有状态分析不可用" in result["reason"]
-        assert "本次最终拒绝" in degraded
-        assert "fail_open 放行" not in degraded
-        analyze_total.inc.assert_called_once_with(decision="Deny", risk_level="high", l3_outcome="failed_but_blocked")
+        assert (result["decision"], result["l3_outcome"]) == ("Allow", "fail_open")
+        assert "有状态分析不可用" in degraded
+        assert "本次最终拒绝" not in degraded
+        assert "fail_open 放行" in degraded
+        analyze_total.inc.assert_called_once_with(decision="Allow", risk_level="low", l3_outcome="fail_open")
     else:
         assert (result["decision"], result["l3_outcome"]) == ("Allow", "fail_open")
         assert "fail_open 放行" in degraded
@@ -194,9 +209,15 @@ def test_circuit_open_diagnostic_keeps_its_own_cause(client, monkeypatch, state_
     })
     analyze_total = Mock()
     monkeypatch.setattr(metrics, "ANALYZE_TOTAL", analyze_total)
+    state_ok = Mock(return_value={
+        "should_block": False, "matched": None, "exfil": [],
+        "usage_pct": 0, "node_count": 0, "capacity": 1000,
+        "skipped_for_capacity": False,
+    })
+    monkeypatch.setattr(routes, "_chain_state_for_agent", lambda _: SimpleNamespace(apply_incremental=state_ok))
 
     response = client.post("/api/v1/analyze", headers=_headers(), json=_body(
-        metadata={"stateful_incremental": state_enabled}, gate_delivery_uncertain=True,
+        metadata={"stateful_incremental": state_enabled},
     ))
     assert response.status_code == 200
     result = response.json()
@@ -207,10 +228,9 @@ def test_circuit_open_diagnostic_keeps_its_own_cause(client, monkeypatch, state_
     assert "warn-allow" not in circuit_note and "有状态分析不可用" not in circuit_note
     assert "L1/L2 正常" not in circuit_note
     if state_enabled:
-        assert (result["decision"], result["risk_type"]) == ("Deny", "service_unavailable")
-        assert result["reason"] == "AgentMoss 有状态分析不可用"
-        assert result["reason"] in result["degraded"]
-        analyze_total.inc.assert_called_once_with(decision="Deny", risk_level="high", l3_outcome="circuit_open")
+        assert result["decision"] == "Allow"
+        assert result["reason"].startswith("LLM 分析失败")
+        analyze_total.inc.assert_called_once_with(decision="Allow", risk_level="low", l3_outcome="circuit_open")
     else:
         assert result["decision"] == "Allow"
         assert result["degraded"] == [circuit_note]
@@ -271,6 +291,15 @@ def test_empty_gate_call_is_confirmed_across_restart(client):
     assert (prior.gate_call_id, node.gate_call_id) == ("b" * 32, CALL_ID)
     assert (node.action_detail, node.stage, node.lifecycle, node.resources, node.instances) == ("", "", "", (), ())
     assert node.confirmed == {"matched": None, "exfil": []}
+
+
+def test_gate_token_with_auth_off_is_config_error(monkeypatch):
+    monkeypatch.setenv("AGENT_MOSS_AUTH_MODE", "off")
+    monkeypatch.setenv("AGENT_MOSS_GATE_AUTH_TOKEN", "dedicated")
+    security_policy.reset_auth_cache()
+    assert "AGENT_MOSS_AUTH_MODE=off" in security_policy.auth_config_error()
+    with pytest.raises(SystemExit):
+        security_policy.fail_fast_on_auth_error()
 
 
 def test_only_a_call_skipped_for_capacity_reports_lost_coverage(client, monkeypatch):

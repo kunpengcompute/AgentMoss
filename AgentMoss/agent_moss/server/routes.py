@@ -79,16 +79,25 @@ def _merge_stateful_denial(result: dict, finding: dict) -> tuple[dict, bool]:
     return merged, stateful_wins
 
 
-def _stateful_unavailable(result: dict, degraded: list[str]) -> dict:
-    reason = "AgentMoss 有状态分析不可用"
-    degraded.append(reason)
+def _stateful_unconfirmed(result: dict, degraded: list[str]) -> dict:
+    """Gate 调用无法确认是否已入链：只在这种情况下拒绝，避免重复记账。"""
+    reason = "AgentMoss 无法确认本次 Gate 调用是否已入链"
+    degraded.append(f"【已降级】{reason}；本次按拒绝处理，避免重复入链。")
+    if result["decision"] == "Deny":
+        return result
     result = {**result, "policy": ""}
+    result.update(decision="Deny", reason=reason, risk_type="service_unavailable", risk_level="high")
     if result.get("l3_outcome") == "fail_open":
-        l3_failure = str(result.get("reason") or "")[:160]
-        degraded.append(f"【已降级】L3 语义分析未完成（{l3_failure}），本次最终拒绝。")
         result["l3_outcome"] = "failed_but_blocked"
-    if result["decision"] != "Deny":
-        result.update(decision="Deny", reason=reason, risk_type="service_unavailable", risk_level="high")
+    return result
+
+
+def _stateful_degraded(result: dict, degraded: list[str], detail: str) -> dict:
+    """状态层不可用是能力降级，不改变 L1/L2/L3 的判定。"""
+    degraded.append(
+        f"【已降级】有状态分析不可用（{detail}）："
+        "本次动作未参与 L2.2 组合链检测；L1/L2.1/L3 判定不受影响。"
+    )
     return result
 
 
@@ -788,7 +797,7 @@ async def analyze(req: AnalyzeRequest, request: Request, response: Response):
         metadata = req.metadata or {}
         finding = None
         if str(metadata.get("stateful_incremental", "") or "").lower() in ("1", "true", "yes", "on"):
-            from ..engine.formal_engine.stateful import StatefulAnalysisUnavailable
+            from ..engine.formal_engine.stateful import StatefulAnalysisUnavailable, UnconfirmedGateRetry
 
             state_action = a_next
             if gate_call_id is not None:
@@ -842,15 +851,15 @@ async def analyze(req: AnalyzeRequest, request: Request, response: Response):
                 if inc["should_block"]:
                     candidates = ([inc["matched"]] if inc["matched"] else []) + inc["exfil"]
                     finding = max(candidates, key=lambda v: RISK_PRIORITY.get(v.get("risk_level", "high"), 0))
+            except UnconfirmedGateRetry as e:
+                logger.warning("Gate 调用状态无法确认: %s", e)
+                result = _stateful_unconfirmed(result, _degraded)
             except StatefulAnalysisUnavailable as e:
-                logger.warning("stateful incremental 无法确认本次状态: %s", e)
-                result = _stateful_unavailable(result, _degraded)
+                logger.warning("stateful incremental 状态不可用（降级，不阻断）: %s", e)
+                _stateful_degraded(result, _degraded, "链状态存储不可用或本次动作超出保留窗口")
             except Exception as e:
-                if gate_call_id is not None:
-                    logger.warning("AgentGate 专用调用的状态化分析失败: %s", e)
-                    result = _stateful_unavailable(result, _degraded)
-                else:
-                    logger.warning("stateful incremental 异常（不阻断响应）: %s", e)
+                logger.warning("stateful incremental 异常（降级，不阻断）: %s", e)
+                _stateful_degraded(result, _degraded, "内部异常")
 
         result = _public_formal_result(result, finding, instance_id, session_id, session_history)
         _degraded.extend(result.get("degraded") or [])

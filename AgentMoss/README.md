@@ -112,6 +112,7 @@ curl -fsS http://127.0.0.1:9090/api/v1/analyze \
 | `AGENT_MOSS_DATA_DIR` | 运行账户可读写的数据目录，默认为 `~/.config/agentmoss` |
 | `AGENT_MOSS_AUTH_TOKEN`、`AGENT_MOSS_AUTH_TOKEN_FILE` | 显式指定服务令牌或令牌文件，供直接调用方和 AgentGate 使用 |
 | `AGENT_MOSS_AGENT_TOKENS` | 按 Agent 分配令牌，格式为 `agentA=令牌A,agentB=令牌B` |
+| `AGENT_MOSS_GATE_AUTH_TOKEN` | 可选的 AgentGate 专用令牌，仅用于 `/api/v1/analyze` 和 `/api/v1/review`；默认关闭，启用时与 AgentGate 的 `AGENT_GATE_MOSS_GATE_TOKEN` 取相同值，且不能与全局、Agent、Console 令牌相同；`AGENT_MOSS_AUTH_MODE=off` 时不可启用 |
 | `AGENT_MOSS_DISABLE_LLM` | 设为 `1` 时只用本地规则 |
 | `AGENT_MOSS_LLM_BASE_URL`、`AGENT_MOSS_LLM_MODEL`、`AGENT_MOSS_LLM_API_KEY` | 模型服务的 OpenAI 兼容 API 地址、模型名和密钥 |
 | `AGENT_MOSS_LLM_FAIL_MODE` | L3 调用失败或被硬预算跳过时，默认 `fail_open` 会放行通过前两层的动作，设为 `fail_closed` 则拒绝这次调用 |
@@ -119,6 +120,8 @@ curl -fsS http://127.0.0.1:9090/api/v1/analyze \
 | `AGENT_MOSS_RULES_MODE` | `hot`（默认）支持控制台调整，`cold` 在启动时读取规则，`builtin` 只使用内置规则 |
 
 启用 L3 时，在启动 AgentMoss 的环境中设置模型地址、名称和密钥，取消 `AGENT_MOSS_DISABLE_LLM=1` 并重启进程。在客户端或另一个终端修改环境变量不会改变运行中的服务。鉴权文件不可读或自动令牌创建失败时，服务会报告错误并拒绝启动，请检查运行账户和数据目录权限。
+
+Gate 专用身份是可选的：AgentMoss 设置 `AGENT_MOSS_GATE_AUTH_TOKEN`，AgentGate 设置相同值的 `AGENT_GATE_MOSS_GATE_TOKEN`，两边一致才生效。它用于区分 Gate 的 analyze/review 调用并启用 call-id 关联，不是隔离边界；普通令牌仍可调用其他接口。`AGENT_MOSS_AUTH_MODE=off` 与 Gate 专用身份互斥，同时配置会拒绝启动。
 
 当前用户请求和脚本分析报告进入 L3 时受各自的字符上限约束。设置正数 `AGENT_MOSS_LLM_MAX_PROMPT_TOKENS` 可启用估算预算，默认在裁剪后仍超预算时跳过 L3 安全判断。配置项和响应含义见 [L3 Prompt 预算配置](docs/deploy/ENV_VARS.md) 和 [L3 Prompt 接入说明](docs/integrations/INTEGRATION_GUIDE.md)。
 

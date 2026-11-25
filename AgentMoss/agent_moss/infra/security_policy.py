@@ -330,7 +330,9 @@ def _resolve_auth() -> tuple[str, dict[str, str], str]:
             logger.error("鉴权配置错误，拒绝启动: %s", error)
 
     agents = _parse_agent_tokens(raw_agents)
-    if not error and auth_mode() != AUTH_MODE_OFF and gate_token:
+    if not error and auth_mode() == AUTH_MODE_OFF and gate_token:
+        error = "AGENT_MOSS_GATE_AUTH_TOKEN 不能在 AGENT_MOSS_AUTH_MODE=off 时启用"
+    elif not error and gate_token:
         if gate_token == token or gate_token == console_token or gate_token in agents.values():
             error = "AGENT_MOSS_GATE_AUTH_TOKEN 必须与全局、Agent 和 Console 凭据不同"
     _TOKEN_CACHE = (key, token, agents, error)

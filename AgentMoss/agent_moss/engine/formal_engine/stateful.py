@@ -92,6 +92,10 @@ class UnconfirmedGateRetry(StatefulAnalysisUnavailable):
     """A retry with uncertain delivery has no confirmed result to reuse."""
 
 
+class GateCallConflict(UnconfirmedGateRetry):
+    """The same Gate call id was reused with different content or timing."""
+
+
 def _gate_order(action: dict) -> tuple[int, str] | None:
     call_id = action.get("_gate_call_id")
     call_time = action.get("_gate_call_time_us")
@@ -848,16 +852,23 @@ class StatefulChainTracker:
         if order is not None:
             existing = self._gate_nodes.get((session_id, order[1]))
             input_fingerprint = self._input_fingerprint(a_next, is_error, agent_id, instance_id, order)
-            if existing is not None and existing.confirmed is not None:
-                if existing.input_fingerprint == input_fingerprint:
-                    return self._confirmed_result(existing)
+            if existing is not None:
+                if existing.confirmed is not None:
+                    if (existing.input_fingerprint == input_fingerprint
+                            and existing.order_key == order):
+                        return self._confirmed_result(existing)
+                    raise GateCallConflict("同一 Gate call_id 的内容或时间不一致")
+                if a_next.get("_gate_delivery_uncertain") is True:
+                    raise UnconfirmedGateRetry("不确定送达的调用缺少已确认的状态化判定")
+                if existing.order_key != order:
+                    raise GateCallConflict("同一 Gate call_id 的时间不一致")
+                if existing.input_fingerprint:
+                    raise GateCallConflict("同一 Gate call_id 的重复调用缺少送达不确定标记")
+                # Review seed 建的是未确认节点（无 input_fingerprint）：允许本次真实调用纠正它。
             if a_next.get("_gate_delivery_uncertain") is True:
                 raise UnconfirmedGateRetry("不确定送达的调用缺少已确认的状态化判定")
             if self._is_archived(order):
                 raise StatefulAnalysisUnavailable("调用早于当前链状态保留窗口")
-            if existing is not None and (existing.confirmed is not None or existing.order_key != order):
-                # 内容不同的编号冲突沿用旧处理，不覆盖已关联节点。
-                existing, order, input_fingerprint = None, None, ""
 
         # 带编号的空动作也保存确认结果，供响应丢失后的重试关联。
         if order is None and not a_next.get("action_detail"):

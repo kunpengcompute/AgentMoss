@@ -84,7 +84,7 @@ def _maybe_trigger_review(moss_client, agent_id: str, repo) -> None:
         _review_tasks.add(task)
         task.add_done_callback(_review_tasks.discard)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("review trigger skipped: {}", exc)
+        logger.debug("review trigger skipped: %s", exc)
 
 
 def _agent_gate_version() -> str:
@@ -159,7 +159,7 @@ async def analyze(
     _principal = getattr(request.state, "principal", "") or ""
     _ok, _who = sp.bind_agent(_principal, input_data.agent_type)
     if not _ok:
-        logger.warning("拒绝身份不匹配的请求: principal={} claimed={}", _principal, input_data.agent_type)
+        logger.warning("拒绝身份不匹配的请求: principal=%s claimed=%s", _principal, input_data.agent_type)
         raise HTTPException(status_code=403, detail=_who)
 
     # 1. Register agent & session in SQLite.

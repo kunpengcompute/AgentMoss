@@ -84,7 +84,7 @@ def run_storage_maintenance(agent_id: str = "default") -> dict:
                     sp.proxy_archive_max_bytes(), sp.proxy_archive_max_age_days(),
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("归档清理失败: {}", exc)
+                logger.warning("归档清理失败: %s", exc)
                 return {}
             result["archive_cleanup"] = c.get("tool", c)
             result["proxy_cleanup"] = c.get("proxy", {})

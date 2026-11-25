@@ -96,6 +96,8 @@ SDK 从 `AGENT_GATE_AUTH_TOKEN` 读取令牌，也可通过 `GateClient(api_toke
 3. `AGENT_MOSS_AUTH_TOKEN_FILE` 指向的文件
 4. `AGENT_MOSS_DATA_DIR/auth_token`（设置了数据目录时），或 `~/.config/agentmoss/auth_token`
 
+可选启用 Gate 专用身份：AgentGate 设置 `AGENT_GATE_MOSS_GATE_TOKEN`，AgentMoss 设置相同值的 `AGENT_MOSS_GATE_AUTH_TOKEN`。启用后 analyze/review 使用该令牌，并带 `X-AgentGate-Require-Identity`、`X-AgentGate-Call-Id` 关联头；两边不一致时 Gate 调用会按协议拒绝。AgentMoss 的 `AGENT_MOSS_AUTH_MODE=off` 与 Gate 专用身份互斥。
+
 ## 配置与存储
 
 配置示例见 [agent_gate.yaml](config/agent_gate.yaml)。启动网关时用 `--config` 指定 YAML 文件，用 `--host`、`--port` 指定监听地址。AgentMoss 地址按 `--security-url`（别名 `--moss-url`）、`AGENT_MOSS_URL`、`MOSS_URL`、YAML 中的 `agent_moss.url` 的顺序取值。
