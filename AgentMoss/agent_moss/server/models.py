@@ -193,6 +193,13 @@ class AnalyzeResponse(BaseModel):
         description="L3 outcome: ok|reasoning_fallback|not_reached|skipped|"
                     "fail_open|fail_closed|failed_but_blocked|circuit_open",
     )
+    #: Deny 但建议向用户确认（2026-11）。旧 agent 忽略仍是 Deny。
+    ask_recommended: bool = Field(
+        default=False, description="Deny but user confirmation is recommended"
+    )
+    ask_reason: str = Field(
+        default="", description="Why user confirmation is recommended"
+    )
 
 
 class GateAnalyzeResponse(AnalyzeResponse):

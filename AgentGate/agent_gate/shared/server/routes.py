@@ -267,8 +267,11 @@ async def analyze(
         degraded=moss_result.get("degraded") or [],
         # L3 结局：透传 AgentMoss 的稳定枚举，便于客户直接看「L3 有没有真判」
         l3_outcome=moss_result.get("l3_outcome") or "",
+        # Deny 但建议询问用户：网关超时/不可用或规则不确定时透传，旧 agent 可忽略
+        ask_recommended=bool(moss_result.get("ask_recommended", False)),
+        ask_reason=str(moss_result.get("ask_reason") or ""),
         collected_context=context,
-        source="agent_moss",
+        source=str(moss_result.get("source") or "agent_moss"),
     )
 
 

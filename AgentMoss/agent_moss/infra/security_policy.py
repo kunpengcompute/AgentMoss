@@ -533,6 +533,17 @@ def path_within(path: str, roots: list[Path]) -> bool:
 
 # ==================== 私有文件 / 目录 ====================
 
+def _current_uid() -> int | None:
+    """当前进程 uid；Windows 没有 ``os.getuid()``，返回 None。
+
+    Windows 的文件权限是 ACL，``st_uid`` 与 POSIX 属主语义不对应；此时跳过
+    属主校验，只做 chmod（尽力而为），否则鉴权 token 初始化会直接 AttributeError
+    → 服务拒绝启动（2026-11 Windows 实测）。
+    """
+    getter = getattr(os, "getuid", None)
+    return getter() if getter is not None else None
+
+
 def ensure_private_dir(path: Path) -> bool:
     """确保目录存在且为 0700；失败返回 False（调用方决定是否回退）。"""
     try:
@@ -540,7 +551,8 @@ def ensure_private_dir(path: Path) -> bool:
         if path.is_symlink():
             return False
         st = path.stat()
-        if st.st_uid != os.getuid():
+        uid = _current_uid()
+        if uid is not None and st.st_uid != uid:
             return False
         os.chmod(path, stat.S_IRWXU)
         return True

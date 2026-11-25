@@ -109,6 +109,23 @@ def test_bank_allowed_commands_are_kept(cmd):
     assert not _blocked_by_bank(cmd), f"误判「拦」，会被错误移出 allow.sh: {cmd}"
 
 
+def test_bank_grep_pattern_is_not_a_path_access():
+    """grep/sed 的引号内搜索模式不是路径访问（招行沙箱 2026-11 误报）。"""
+    assert not _blocked_by_bank(
+        'cd /opt/sandbox/file && grep -n "/" gen_christmas_docx.js | head -40'
+    )
+
+
+def test_bank_grep_outside_file_operand_is_still_blocked():
+    """剥搜索模式时必须保留文件操作数：引号包住的 /etc/passwd 仍要拦。"""
+    assert _blocked_by_bank('grep -n "foo" "/etc/passwd"')
+
+
+def test_bank_grep_pipe_ssh_is_still_blocked():
+    """只剥检索模式，不吞管道后的真实命令：grep ... | ssh host 仍要拦。"""
+    assert _blocked_by_bank('grep -n "foo" file.js | ssh host')
+
+
 # ==================== ③ 副本自包含性 ====================
 
 def test_copy_stays_dependency_free():

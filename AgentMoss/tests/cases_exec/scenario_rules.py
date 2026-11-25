@@ -127,6 +127,77 @@ def _split_command_segments(action_detail: str) -> list:
     return segments
 
 
+# ---------------------------------------------------------------------------
+# 2.1) 检索模式参数剥离（对齐 agent_moss/engine/heuristic.py
+#      _strip_search_pattern_argument）
+# ---------------------------------------------------------------------------
+_TEXT_SEARCH_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "ack", "ack-grep"})
+_SEARCH_PREFIX_WORDS = frozenset({"sudo", "command", "nohup", "time"})
+_SEARCH_OPTION_WITH_ARG = frozenset({
+    "-m", "--max-count", "-A", "--after-context", "-B", "--before-context",
+    "-C", "--context", "-d", "--directories", "-D", "--devices",
+    "--include", "--exclude", "--exclude-dir", "--glob", "--iglob",
+    "--type", "--type-add", "--type-not",
+})
+
+
+def _join_shell_tokens(tokens: list) -> str:
+    """重组 token，保留 &&/||/|/;/& 为裸操作符，避免 shlex.join 给管道加引号。"""
+    return " ".join(
+        token if token in ("&&", "||", "|", ";", "&") else shlex.quote(token)
+        for token in tokens
+    )
+
+
+def _strip_search_pattern_argument(command: str) -> str:
+    """只摘掉检索命令的模式参数，保留文件操作数（含引号包裹的真实路径）。"""
+    parts = []
+    for seg in _split_command_segments(command):
+        if seg.strip() in ("&&", "||", ";", "|", "&", "\n"):
+            parts.append(seg)
+            continue
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            parts.append(seg)
+            continue
+        idx = 0
+        while idx < len(tokens) and tokens[idx] in _SEARCH_PREFIX_WORDS:
+            idx += 1
+        if idx >= len(tokens) or tokens[idx] not in _TEXT_SEARCH_COMMANDS:
+            parts.append(seg)
+            continue
+        pattern_idx = None
+        i = idx + 1
+        while i < len(tokens):
+            token = tokens[i]
+            if token == "--":
+                pattern_idx = i + 1 if i + 1 < len(tokens) else None
+                break
+            if token in ("-e", "--regexp"):
+                pattern_idx = i + 1 if i + 1 < len(tokens) else None
+                break
+            if token.startswith("--regexp="):
+                pattern_idx = i
+                break
+            if token in ("-f", "--file") or token.startswith("--file="):
+                break
+            if token.startswith("-") and token != "-":
+                i += 2 if token in _SEARCH_OPTION_WITH_ARG else 1
+                continue
+            pattern_idx = i
+            break
+        if pattern_idx is None or pattern_idx >= len(tokens):
+            parts.append(seg)
+            continue
+        tokens.pop(pattern_idx)
+        try:
+            parts.append(_join_shell_tokens(tokens))
+        except Exception:  # noqa: BLE001
+            parts.append(seg)
+    return "".join(parts)
+
+
 def _split_shell_commands(command: str) -> list:
     """切成「命令段」列表（不含分隔符），供逐段判定。原样搬运自
     agent_moss/engine/heuristic.py::_split_shell_commands。"""
@@ -219,6 +290,8 @@ def scenario_blocks_allow(cmd: str, scenario_id: str) -> bool:
         return False
     allowed_dirs = _SCENARIO_ALLOWED_DIRS[scenario_id]
     extra = _SCENARIO_EXTRA_PATTERNS.get(scenario_id, ())
+    # 检索模式参数（grep -n "/" file 的 "/"）不是路径访问；文件操作数保留。
+    cmd = _strip_search_pattern_argument(cmd)
 
     # 0) 场景追加禁命令正则（bank 禁 ssh）——段首/独立 token 命中即拦
     for pat in extra:

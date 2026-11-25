@@ -518,6 +518,16 @@ def get_llm_fail_mode() -> str:
     return "fail_closed" if val.lower() == "fail_closed" else "fail_open"
 
 
+def get_deploy_role() -> str:
+    """部署角色：standalone（默认）/ host（agent 本体）/ sandbox（沙箱）。
+
+    host 侧读不到沙箱脚本内容，脚本内容分析交给 sandbox；host 不因
+    “脚本读不到”做内容判断。
+    """
+    val = str(get_agent_moss_setting("AGENT_MOSS_DEPLOY_ROLE", "standalone")).strip().lower()
+    return val if val in ("host", "sandbox") else "standalone"
+
+
 def get_llm_timeout() -> int:
     """获取 LLM 超时时间（秒）"""
     timeout = get_agent_moss_setting("AGENT_MOSS_LLM_TIMEOUT", 300)

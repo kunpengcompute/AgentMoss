@@ -4,6 +4,7 @@ Makes async HTTP calls to AgentMoss for security analysis.
 If AgentMoss is unreachable, returns Deny (security-first).
 """
 
+import json
 import os
 import time
 import uuid
@@ -205,8 +206,9 @@ class MossClient:
         self._base_url = _resolve_local_moss_port(
             (resolved or moss_cfg.get("url", "http://127.0.0.1:9090")).rstrip("/")
         )
-        # timeout 默认 100s：需覆盖 AgentMoss 总超时（90s）+ 余量，避免 AgentMoss
-        # 还在分析时被 AgentGate 抢断后 fail-closed 误杀。
+        # timeout 默认 330s：必须覆盖 AgentMoss 默认 LLM 预算 300s + 余量，避免
+        # AgentMoss 还在分析时被 AgentGate 抢断后误判为超时。若 Moss 侧调大了
+        # AGENT_MOSS_LLM_TIMEOUT，AgentGate 也要同步调大。
         # 可用 AGENT_GATE_MOSS_TIMEOUT（秒）覆盖，与 TS 版 AGENT_GATE_MOSS_TIMEOUT_MS 对齐。
         env_timeout = os.environ.get("AGENT_GATE_MOSS_TIMEOUT", "")
         try:
@@ -217,7 +219,7 @@ class MossClient:
             timeout
             if timeout is not None
             else (env_timeout_val if env_timeout_val and env_timeout_val > 0
-                  else moss_cfg.get("timeout", 100.0))
+                  else moss_cfg.get("timeout", 330.0))
         )
         # max_retries 默认 0：AgentMoss 内部已有重试，AgentGate 这层不再重试，
         # 否则单次失败会翻倍耗时。用显式 None 判断避免 0 被 `or` 当 falsy。
@@ -304,7 +306,7 @@ class MossClient:
                     if response.headers.get(_GATE_RATE_LIMITED_CALL_ID_HEADER) != gate_call_id:
                         return self._gate_protocol_rejection("unconfirmed rate limit response")
                     return {
-                        **self._fail_closed_response("AgentMoss analysis rate limited"),
+                        **self._fail_closed_response("AgentMoss analysis rate limited", request=request),
                         **gate_audit,
                     }
                 response.raise_for_status()
@@ -398,7 +400,10 @@ class MossClient:
         reason_prefix = "AgentMoss analysis timeout" if is_timeout else "AgentMoss security service unavailable"
         if auth_rejected:
             return self._gate_protocol_rejection(last_error)
-        return {**self._fail_closed_response(last_error, risk_type, reason_prefix), **gate_audit}
+        return {
+            **self._fail_closed_response(last_error, risk_type, reason_prefix, request=request),
+            **gate_audit,
+        }
 
     async def review(self, agent_id: str = "", db_path: str = "") -> None:
         """低频回顾：让 AgentMoss 从 AgentGate 本地存储直读全量 tool_calls。
@@ -468,10 +473,60 @@ class MossClient:
             "violated_policy": "",
             "confidence": 100,
             "analysis_duration_ms": 0,
+            "degraded": [f"gateway_gate_protocol_rejected: {reason}"],
+            "l3_outcome": "",
+            "ask_recommended": True,
+            "ask_reason": "AgentGate 专用协议无法确认本次调用状态；建议向用户确认是否继续。",
+            "source": "gateway_gate_protocol_rejected",
             "_gate_protocol_rejected": True,
         }
 
-    def _fail_closed_response(self, error: str, risk_type: str = "service_unavailable", reason_prefix: str = "AgentMoss security service unavailable") -> dict:
+    def _fail_closed_response(
+        self,
+        error: str,
+        risk_type: str = "service_unavailable",
+        reason_prefix: str = "AgentMoss security service unavailable",
+        request: dict | None = None,
+    ) -> dict:
+        """超时/不可用时的响应。
+
+        AGENT_GATE_MOSS_FAIL_MODE（默认 closed）：
+          - closed：Deny + ask_recommended，保持安全默认；
+          - readonly_open：只读动作 Allow，其余 Deny；
+          - open：全部 Allow（可用性优先，需明确配置）。
+        """
+        mode = os.getenv("AGENT_GATE_MOSS_FAIL_MODE", "closed").strip().lower()
+        if mode not in ("closed", "open", "readonly_open"):
+            mode = "closed"
+        action_type = ""
+        if isinstance(request, dict):
+            a_next = request.get("a_next") or {}
+            action_type = str(
+                request.get("action_type")
+                or (a_next.get("action_type") if isinstance(a_next, dict) else "")
+                or ""
+            ).lower()
+        readonly = action_type in ("read", "list_dir", "glob", "grep") or action_type.startswith("read")
+        if mode == "open" or (mode == "readonly_open" and readonly):
+            return {
+                "decision": "Allow",
+                "reason": f"{reason_prefix} — fail_open({mode}): {error}",
+                "risk_level": "low",
+                "risk_type": "",
+                "violated_layers": [],
+                "policy": "",
+                "violated_policy": "",
+                "confidence": 50,
+                "analysis_duration_ms": 0,
+                "degraded": [
+                    f"gateway_moss_unavailable: {error}（AGENT_GATE_MOSS_FAIL_MODE={mode}）"
+                ],
+                "l3_outcome": "",
+                "ask_recommended": False,
+                "ask_reason": "",
+                "source": "gateway_fail_open",
+            }
+        ask = risk_type in ("analysis_timeout", "service_unavailable")
         return {
             "decision": "Deny",
             "reason": f"{reason_prefix} — blocking by default: {error}",
@@ -482,6 +537,11 @@ class MossClient:
             "violated_policy": "",
             "confidence": 100,
             "analysis_duration_ms": 0,
+            "ask_recommended": ask,
+            "ask_reason": (
+                "AgentMoss 分析超时/不可用，无法完成安全检查；建议向用户确认是否继续。"
+                if ask else ""
+            ),
         }
 
     async def close(self) -> None:

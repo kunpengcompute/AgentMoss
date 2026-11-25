@@ -6,6 +6,7 @@ sequence + payload data only when a trigger rule matches.
 
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -101,7 +102,7 @@ class MossBatchClient:
                 time.sleep(1.0)
 
         logger.error("AgentMoss unreachable, returning Deny: %s", last_error)
-        return self._fail_closed_response(last_error)
+        return self._fail_closed_response(last_error, request=request)
 
     def report_async(self, report: dict):
         """Queue a report for async sending (non-blocking).
@@ -210,7 +211,32 @@ class MossBatchClient:
             "action_history": action_history,
         }
 
-    def _fail_closed_response(self, error: str) -> dict:
+    def _fail_closed_response(self, error: str, request: dict | None = None) -> dict:
+        mode = os.getenv("AGENT_GATE_MOSS_FAIL_MODE", "closed").strip().lower()
+        if mode not in ("closed", "open", "readonly_open"):
+            mode = "closed"
+        action_type = ""
+        if isinstance(request, dict):
+            a_next = request.get("a_next") or {}
+            action_type = str(
+                request.get("action_type")
+                or (a_next.get("action_type") if isinstance(a_next, dict) else "")
+                or ""
+            ).lower()
+        readonly = action_type in ("read", "list_dir", "glob", "grep") or action_type.startswith("read")
+        if mode == "open" or (mode == "readonly_open" and readonly):
+            return {
+                "decision": "Allow",
+                "reason": f"AgentMoss unavailable — fail_open({mode}): {error}",
+                "risk_level": "low",
+                "risk_type": "service_unavailable",
+                "violated_layers": [],
+                "intercept_actions": [],
+                "analysis_duration_ms": 0,
+                "degraded": [f"gateway_moss_unavailable: {error}"],
+                "ask_recommended": False,
+                "ask_reason": "",
+            }
         return {
             "decision": "Deny",
             "reason": f"AgentMoss unavailable — blocking by default: {error}",
@@ -219,4 +245,6 @@ class MossBatchClient:
             "violated_layers": [],
             "intercept_actions": [],
             "analysis_duration_ms": 0,
+            "ask_recommended": True,
+            "ask_reason": "AgentMoss 不可用，无法完成安全检查；建议向用户确认是否继续。",
         }

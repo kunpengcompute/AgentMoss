@@ -86,7 +86,14 @@ def _stateful_unconfirmed(result: dict, degraded: list[str]) -> dict:
     if result["decision"] == "Deny":
         return result
     result = {**result, "policy": ""}
-    result.update(decision="Deny", reason=reason, risk_type="service_unavailable", risk_level="high")
+    result.update(
+        decision="Deny", reason=reason, risk_type="service_unavailable", risk_level="high",
+        ask_recommended=True,
+        ask_reason=(
+            "无法确认本次 Gate 调用是否已入链；"
+            "这是“没查完”而非“确认有风险”，建议向用户确认是否继续。"
+        ),
+    )
     if result.get("l3_outcome") == "fail_open":
         result["l3_outcome"] = "failed_but_blocked"
     return result
@@ -1010,6 +1017,8 @@ async def analyze(req: AnalyzeRequest, request: Request, response: Response):
             violation_graph=result.get("violation_graph"),
             degraded=_degraded,
             l3_outcome=str(result.get("l3_outcome", "") or ""),
+            ask_recommended=bool(result.get("ask_recommended", False)),
+            ask_reason=str(result.get("ask_reason") or ""),
             **({"gate_call_id": gate_call_id} if gate_call_id is not None else {}),
         )
         if diagnostics and await diagnostics.write_with_timeout(analysis_response.decision):

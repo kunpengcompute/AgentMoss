@@ -24,7 +24,11 @@ class SecurityJudgment:
     violation_graph: dict | None = None
     # 兼容旧调用方：反例路径数组 [[session_id, seq, detail, timestamp?, agent?], ...]
     violation_chain: list = field(default_factory=list)
+    #: 本次判定的能力降级说明（空 = 全层完整跑过）；由 analyze()/HTTP 层透传。
     degraded: list[str] = field(default_factory=list)
+    #: Deny 但建议向用户确认（如 L3 fail_closed：拒绝原因是“分析不可用”，不是确认有风险）。
+    ask_recommended: bool = False
+    ask_reason: str = ""
 
 
 #: L3（LLM 语义分析）本次的实际结局。对客户暴露的稳定枚举 ——
@@ -91,6 +95,8 @@ class LogicRuleResult:
     reason: str = ""
     risk_type: str = ""
     is_credential: bool = False  # 是否命中凭据文件（凭据文件无论读写都拦截，不进 inline 跳过）
+    #: L2 不确定但值得 L3 关注的结构化提示（不拦截，只注入 L3）。
+    l3_hint: str = ""
 
 
 @dataclass

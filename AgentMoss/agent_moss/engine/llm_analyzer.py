@@ -567,6 +567,9 @@ class LLMAnalyzer:
                 f"   类型: {logic_result.risk_type}\n"
                 f"   原因: {logic_result.reason}"
             )
+        elif getattr(logic_result, "l3_hint", ""):
+            # L2 不确定、没有拦截，但保留了结构化观察给 L3，不能丢。
+            hints.append(f"ℹ️ {logic_result.l3_hint}")
 
         if not hints:
             return "特征匹配检测和逻辑规则检测均未发现风险。"

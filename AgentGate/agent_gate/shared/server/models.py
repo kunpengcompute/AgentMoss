@@ -175,6 +175,14 @@ class AgentGateResponse(BaseModel):
     l3_outcome: str = Field(
         default="", description="L3 outcome passed through from AgentMoss"
     )
+    #: Deny 但建议向用户确认（2026-11）。旧 agent 忽略此字段仍是 Deny；
+    #: 新 agent 可据此把 DENY 升级为 ASK，避免超时/不可用造成硬阻断。
+    ask_recommended: bool = Field(
+        default=False, description="Deny but user confirmation is recommended"
+    )
+    ask_reason: str = Field(
+        default="", description="Why user confirmation is recommended"
+    )
     source: str = Field(default="agent_moss", description="Analysis source: agent_moss / fail_closed")
 
 

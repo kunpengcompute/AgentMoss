@@ -197,12 +197,24 @@ def auth_token_path() -> Path:
     return root / "agentgate" / "auth_token"
 
 
+def _current_uid() -> int | None:
+    """当前进程 uid；Windows 没有 ``os.getuid()``，返回 None。
+
+    Windows 的文件权限是 ACL，``st_uid`` 与 POSIX 属主语义不对应；此时跳过
+    属主校验，只做 chmod（尽力而为），否则鉴权 token 初始化会直接 AttributeError
+    → 服务拒绝启动（2026-11 Windows 实测）。
+    """
+    getter = getattr(os, "getuid", None)
+    return getter() if getter is not None else None
+
+
 def ensure_private_dir(path: Path, mode: int = 0o700) -> bool:
     """目录不存在就建（0700）；已存在且属于自己但不是 0700 时收紧。"""
     try:
         path.mkdir(parents=True, exist_ok=True)
         st = path.stat()
-        if st.st_uid == os.getuid() and (st.st_mode & 0o777) != mode:
+        uid = _current_uid()
+        if (uid is None or st.st_uid == uid) and (st.st_mode & 0o777) != mode:
             os.chmod(path, mode)
         return True
     except OSError as e:
@@ -216,7 +228,8 @@ def harden_permissions(path: Path, mode: int) -> None:
         st = path.lstat()
         if stat.S_ISLNK(st.st_mode):
             return
-        if st.st_uid != os.getuid():
+        uid = _current_uid()
+        if uid is not None and st.st_uid != uid:
             return
         if (st.st_mode & 0o777) != mode:
             os.chmod(path, mode)
@@ -867,7 +880,8 @@ def harden_db_files(db_path) -> None:
     try:
         if p.parent.name == "agent_gate":
             st = p.parent.stat()
-            if st.st_uid == os.getuid() and (st.st_mode & 0o777) not in (0o700, 0o750):
+            uid = _current_uid()
+            if (uid is None or st.st_uid == uid) and (st.st_mode & 0o777) not in (0o700, 0o750):
                 os.chmod(p.parent, 0o700)
     except OSError:
         pass
