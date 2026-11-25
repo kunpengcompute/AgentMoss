@@ -19,6 +19,7 @@ shell（bash/sh/zsh）脚本的静态解析后端，产出 IR。
 
 import re
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 
 from ..ir import BranchInfo, ScriptCall, ScriptIR, scan_fingerprint
 from .base import LanguageBackend
@@ -90,7 +91,7 @@ def _split_case_body(body: str) -> list[BranchInfo]:
             continue
         m = re.match(r"^([^()]+?)\)\s*(.*)$", stripped)
         if m:
-            pat = m.group(1).strip().strip("\"'")
+            pat = m.group(1).strip()
             inline = m.group(2).strip()
             if pat:
                 # 收割上一个分支
@@ -111,6 +112,25 @@ def _split_case_body(body: str) -> list[BranchInfo]:
     if cur is not None and cur.body.strip() and not any(b is cur for b in branches):
         branches.append(cur)
     return branches
+
+
+_CASE_ALTERNATIVE_RE = re.compile(r"""(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|\[[^]]*]|[^|'"\\])+""")
+
+
+def _match_case_label(label: str, value: str) -> str | None:
+    """返回命中类型，保留诊断中对通配分支 * 的区分。"""
+    for pattern in _CASE_ALTERNATIVE_RE.findall(label):
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        if pattern == "*":
+            return "default"
+        if pattern[0] in "\"'" and pattern[-1] == pattern[0]:
+            if value == pattern[1:-1]:
+                return "match"
+        elif not re.search(r"""['"\\]""", pattern) and fnmatchcase(value, pattern):
+            return "match"
+    return None
 
 
 def _split_nested_case_branches(
@@ -137,20 +157,16 @@ def _split_nested_case_branches(
     cur_pat: str | None = None
     cur_body: list[str] = []
     selected: str | None = None
-    fallback: str | None = None
 
-    def _flush_as_selected(body_text: str, pat: str | None) -> None:
-        nonlocal selected, fallback
-        if pat is None:
+    def _flush_as_selected(body_text: str, pat: str) -> None:
+        nonlocal selected
+        if selected is not None:
             return
-        pat_values = [v.strip() for v in pat.split("|") if v.strip()]
-        if "*" in pat_values:
-            if fallback is None:
-                fallback = body_text
-        elif selector_val in pat_values:
-            ordered_vals = pat_values
-            if selector_val in ordered_vals:
-                selected = body_text
+        match = _match_case_label(pat, selector_val)
+        if match is not None:
+            selected = body_text
+            if diagnostics is not None:
+                diagnostics["p1_case"] = match
 
     for ln in body_lines:
         stripped = ln.strip()
@@ -160,7 +176,7 @@ def _split_nested_case_branches(
             if bm:
                 if cur_pat is not None:
                     _flush_as_selected("\n".join(cur_body), cur_pat)
-                cur_pat = bm.group(1).strip().strip("\"'")
+                cur_pat = bm.group(1).strip()
                 cur_body = [bm.group(2).strip()] if bm.group(2).strip() else []
                 continue
         if re.search(r"\bcase\b", stripped):
@@ -176,9 +192,7 @@ def _split_nested_case_branches(
     if cur_pat is not None and cur_body:
         _flush_as_selected("\n".join(cur_body), cur_pat)
 
-    if diagnostics is not None and (selected is not None or fallback is not None):
-        diagnostics["p1_case"] = "match" if selected is not None else "default"
-    return selected if selected is not None else fallback
+    return selected
 
 
 def parse_case(
@@ -187,7 +201,7 @@ def parse_case(
     """解析 case 结构，返回可达分支内容（None = 未识别/fail-closed）。
 
     识别 `case <selector> in ... esac`。selector 由 args 绑定，
-    命中分支 (显式 / *) 保留，未命中剔除。完全未命中 → None（继续走全文本）。
+    按脚本顺序选择首个匹配的分支（字面量或 glob）。未命中则返回 None。
     """
     m = re.search(r"\bcase\s+(\$\{?\d+\}?|[A-Za-z_]\w*|\$[A-Za-z_]\w*)\s+in", content)
     if not m:
@@ -219,16 +233,13 @@ def parse_case(
     else:
         branches = _split_case_body(body)
         selected = None
-        fallback = ""
-        for b in branches:
-            values = [v.strip() for v in b.label.split("|") if v.strip()]
-            if "*" in values:
-                fallback = b.body
-            elif val in values:
-                selected = b.body
-        if diagnostics is not None and (selected is not None or fallback):
-            diagnostics["p1_case"] = "match" if selected is not None else "default"
-        selected = selected if selected is not None else (fallback or None)
+        for branch in branches:
+            match = _match_case_label(branch.label, val)
+            if match is not None:
+                selected = branch.body
+                if diagnostics is not None:
+                    diagnostics["p1_case"] = match
+                break
         if selected is None:
             return None
 
@@ -429,8 +440,8 @@ class ShellBackend(LanguageBackend):
         """解析 shell 脚本：P1 → P2/P3/P4 升级 → fail-closed 回退。
 
         逐级责任链：
-          P1 现有 case/if 字面量匹配 → 能选分支就用
-          P2/P3/P4 符号环境执行器 → P1 处理不了时升级（变量拼接/内部变量/glob/数值）
+          P1 基于入口参数匹配 case/if → 能选分支就用
+          P2/P3/P4 符号环境执行器 → P1 处理不了时升级（变量拼接/内部变量/数值）
           都处理不了 → fail-closed 全文本（loop_marked）
 
         漏报防护（NEW-FN）：脚本含 shift / set -- / read / 函数定义 时，
@@ -447,10 +458,12 @@ class ShellBackend(LanguageBackend):
         # 位置参数/变量绑定安全性检测：命中则跳过 P1 的 $1 绑定剪枝。
         # `set --` 后是空格，`--` 末尾不能用 \b（- 非词字符，后无词边界）
         _P1_UNSAFE_RE = re.compile(r"\bshift\b|\bset\s+--(?:\s|$)|[\s;|&]read\b|^\s*read\b|\(\)\s*\{|function\s+\w+")
-        p1_safe = not _P1_UNSAFE_RE.search(content)
+        # Bash 的 ;& / ;;& 可在首个匹配后继续执行其他分支。
+        case_fallthrough = ";&" in content and bool(re.search(r"\bcase\s", content))
+        p1_safe = not case_fallthrough and not _P1_UNSAFE_RE.search(content)
 
         if p1_safe:
-            # P1: 现有 case/if 字面量裁剪（bind_positional_args + parse_case/parse_if）
+            # P1: 基于入口参数裁剪 case/if
             case_out = parse_case(candidate, entry_args, diagnostics=diagnostics)
             if case_out is not None and case_out != candidate:
                 resolved = True
@@ -467,7 +480,10 @@ class ShellBackend(LanguageBackend):
         # P2/P3/P4 升级：LiteSE 顺序执行器（只在 P1 未能裁剪时尝试，避免双实现）
         if diagnostics is not None:
             diagnostics.update(parser="shell_p1", p1_safe=p1_safe, child_extractor="regex")
-        if not resolved:
+        if case_fallthrough:
+            if diagnostics is not None:
+                diagnostics.update(parser="shell_full", fallback_reason="case_fallthrough")
+        elif not resolved:
             from .symbolic import symbolic_process
             symbolic_diagnostics = {} if diagnostics is not None else None
             sym_out = symbolic_process(content, entry_args, diagnostics=symbolic_diagnostics)

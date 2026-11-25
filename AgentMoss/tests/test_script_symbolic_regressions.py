@@ -3,7 +3,50 @@
 对应上游反馈的 LS-30 / LS-31 / LS-25 补充 / LS-28 补充。前三个是漏判
 （危险命令被剪枝），最后一个是变量表上限未覆盖启动参数。
 """
+import pytest
+
 from agent_moss.engine.script_engine.backends import shell_backend, symbolic
+
+
+@pytest.mark.parametrize(
+    ("labels", "arg", "selected"),
+    [
+        (("bak*", "*"), "bak20260101", 0),
+        (("bak*", "*"), "deploy", 1),
+        (("bak*", "bak20260101"), "bak20260101", 0),
+        (("*", "bak20260101"), "bak20260101", 0),
+        (("archive|bak[0-9]?", "*"), "bak42", 0),
+        (('"bak*"', "*"), "bak42", 1),
+        (('"a|*|b"', "*"), "bak42", 1),
+    ],
+)
+@pytest.mark.parametrize("nested", [False, True])
+def test_shell_backend_case_glob_keeps_first_matching_branch(labels, arg, selected, nested):
+    first_body = "echo first_branch ;;"
+    if nested:
+        first_body = "echo first_branch\n    case $2 in\n      x) echo nested_branch ;;\n    esac\n    ;;"
+    script = f"case $1 in\n  {labels[0]}) {first_body}\n  {labels[1]}) echo second_branch ;;\nesac"
+
+    ir = shell_backend.ShellBackend().parse(script, [arg])
+
+    assert ir.control_flow_resolved
+    markers = ("echo first_branch", "echo second_branch")
+    assert markers[selected] in ir.reachable_content
+    assert markers[1 - selected] not in ir.reachable_content
+
+
+@pytest.mark.parametrize("terminator", [";&", ";;&"])
+def test_shell_backend_case_fallthrough_keeps_later_branches(terminator):
+    script = f"""case $1 in
+  bak*) echo first_branch {terminator}
+  *) echo second_branch ;;
+esac"""
+
+    ir = shell_backend.ShellBackend().parse(script, ["bak42"])
+
+    assert not ir.control_flow_resolved
+    assert "echo first_branch" in ir.reachable_content
+    assert "echo second_branch" in ir.reachable_content
 
 
 def test_glob_if_keeps_dangerous_command():
