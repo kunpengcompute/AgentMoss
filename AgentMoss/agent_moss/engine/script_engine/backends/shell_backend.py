@@ -18,44 +18,63 @@ shell（bash/sh/zsh）脚本的静态解析后端，产出 IR。
 """
 
 import re
+from collections.abc import Iterator
 
 from ..ir import ScriptCall, ScriptIR, scan_fingerprint
 from .base import LanguageBackend
-from .symbolic import CASE_HEADER_RE, case_syntax_lines, parse_case_statement, select_case_branch
+from .symbolic import (
+    CASE_HEADER_RE,
+    _CASE_QUOTED_PART,
+    case_syntax_lines,
+    parse_case_statement,
+    select_case_branch,
+)
 
 
 # ==================== 参数绑定 ====================
-# 把 entry_args 绑到 $1/$2/${1}/${@}/$*，支持 ${1:-default}
+_POSITIONAL_RE = re.compile(r"""\$(?:([1-9@*])|\{([1-9][0-9]*|[@*])(?:(:-|-)([^{}'"\\$\x60]*))?\})""")
+_SHELL_PART_RE = re.compile(rf"{_CASE_QUOTED_PART}|{_POSITIONAL_RE.pattern}")
+_DOUBLE_QUOTED_PART_RE = re.compile(rf"\\[\s\S]|{_POSITIONAL_RE.pattern}")
+_IFS_RE = re.compile(r"([ \t\n]+)")
+
+
+def _positional_value(part: re.Match[str], args: list[str]) -> str | list[str]:
+    bare, braced, operator, default = part.groups()
+    name = bare or braced
+    if name == "@":
+        return args
+    if name == "*":
+        return " ".join(args)
+    # 先按长度筛选不可到达的索引，避免超长数字影响分析。
+    index = int(name) - 1 if len(name) <= len(str(len(args))) else len(args)
+    if index >= len(args) or (operator == ":-" and not args[index]):
+        return default or ""
+    return args[index]
 
 
 def bind_positional_args(content: str, args: list[str]) -> str:
-    """把脚本位置参数 $1/$2/${1}/${@}/${*} 替换为实际参数值。"""
-    if not args:
+    """为文本扫描展开位置参数，保留单引号和转义字面量。"""
+    if not args or "$" not in content:
         return content
-    all_args = " ".join(args)
 
-    def _repl_num(kind: str, default_val: str | None = None) -> str:
-        idx = int(kind)
-        if 1 <= idx <= len(args):
-            return args[idx - 1]
-        if default_val is not None:
-            return default_val
-        return ""
+    def expand(token: str, *, quoted: bool = False) -> str:
+        match = _POSITIONAL_RE.fullmatch(token)
+        if match is None:
+            return token
+        value = _positional_value(match, args)
+        values = value if isinstance(value, list) else [value]
+        if quoted:
+            return '" "'.join(re.sub(r'([\\$"\x60])', r"\\\1", value) for value in values)
+        return " ".join(values)
 
-    # ${n} / ${n:-default} / ${@} / ${*}
-    content = re.sub(
-        r"\$\{(\d+|@|\*)(?::?[-]?([^}]*))?\}",
-        lambda m: (
-            all_args
-            if m.group(1) in ("@", "*")
-            else _repl_num(m.group(1), m.group(2) if m.group(2) is not None else None)
-        ),
-        content,
-    )
-    # 裸 $1 $2（不含 ${...}）
-    content = re.sub(r"\$(\d+)", lambda m: _repl_num(m.group(1)), content)
-    content = re.sub(r"\$[@*]", lambda m: all_args, content)
-    return content
+    def bind_part(part: re.Match[str]) -> str:
+        token = part[0]
+        if token.startswith('"'):
+            body = _DOUBLE_QUOTED_PART_RE.sub(lambda m: expand(m[0], quoted=True), token[1:-1])
+            return f'"{body}"'
+        return expand(token)
+
+    return _SHELL_PART_RE.sub(bind_part, content)
 
 
 # ==================== case 分支解析 ====================
@@ -253,31 +272,88 @@ def _mark_loops_reachable(content: str) -> str:
 
 # ==================== 子脚本调用提取（含参数） ====================
 
-# bash x.sh param → (x.sh, [param])；整体覆盖含 |/引号的后缀参数
 _CHILD_CALL_RE = re.compile(
-    r"(?:^|\s|&&|\|\|)\s*"
-    r"((?:/bin/)?bash|sh|zsh|(?:python|python3|node|ruby|perl|php|lua))\s+"
-    r"""("[^"\n]+"|'[^'\n]+'|[^\s;|&]+)"""
-    r"([^\n;|&]*?)(?=(?:;;&|;&|;;)[ \t]*(?:\#[^\n]*)?$|$)",
+    r"(?:^|[ \t;&|])[ \t]*"
+    r"((?:/bin/)?bash|sh|zsh|python3?|node|ruby|perl|php|lua)[ \t]+"
+    r"([^\n;|&<>\x00]+)",
     re.MULTILINE | re.IGNORECASE,
 )
 
 
-def extract_calls_from_content(content: str) -> list[ScriptCall]:
-    """提取脚本内容里的子脚本调用（含参数）。Python/Node 等解释器子调用也可识别。"""
+def _argument_parts(
+    word: str, args: list[str] | None, *, quoted: bool = False,
+) -> Iterator[str | None]:
+    """产出单词的字面片段；None 表示展开后的字段边界。"""
+    offset = 0
+    parts = _DOUBLE_QUOTED_PART_RE if quoted else _SHELL_PART_RE
+    for part in parts.finditer(word):
+        if part.start() > offset:
+            yield word[offset:part.start()]
+        offset = part.end()
+        text = part[0]
+        if not quoted and text.startswith("'"):
+            yield text[1:-1]
+        elif not quoted and text.startswith('"'):
+            if text == '""':
+                yield ""
+            else:
+                yield from _argument_parts(text[1:-1], args, quoted=True)
+        elif text.startswith("\\"):
+            escaped = text[1:]
+            if escaped != "\n":
+                yield escaped if not quoted or escaped in '$"\\`' else text
+        elif args is None:
+            yield text
+        else:
+            value = _positional_value(part, args)
+            if quoted and isinstance(value, list):
+                for index, item in enumerate(value):
+                    if index:
+                        yield None
+                    yield item
+            elif quoted:
+                yield value
+            else:
+                # shortcut: 使用默认 IFS；文件名通配和自定义 IFS 留给运行时。
+                fields = _IFS_RE.split(" ".join(value) if isinstance(value, list) else value)
+                for index, field in enumerate(fields):
+                    if index % 2:
+                        yield None
+                    elif field:
+                        yield field
+    if offset < len(word):
+        yield word[offset:]
+
+
+def _expand_shell_word(word: str, args: list[str] | None) -> list[str]:
+    fields: list[str] = []
+    pieces: list[str] = []
+    for part in _argument_parts(word, args):
+        if part is not None:
+            pieces.append(part)
+        elif pieces:
+            fields.append("".join(pieces))
+            pieces.clear()
+    if pieces:
+        fields.append("".join(pieces))
+    return fields
+
+
+def extract_calls_from_content(content: str, entry_args: list[str] | None = None) -> list[ScriptCall]:
+    """基于原始单词边界提取子脚本参数，展开后的值不再作为 Shell 语法解析。"""
+    if not _CHILD_CALL_RE.search(content):
+        return []
+    syntax = "\n".join(case_syntax_lines(content))
     calls: list[ScriptCall] = []
-    for m in _CHILD_CALL_RE.finditer(content):
-        interp, path, rest = m.group(1), m.group(2).strip(), m.group(3).strip()
-        if path.startswith(("'", '"')) and path[-1] == path[0]:
-            path = path[1:-1]
-        if path.startswith(("-", "$")) or "/dev/" in path:
-            continue
-        # 参数切分（剥引号，按空白/管道断）
-        rest = re.split(r"[;|&<>]", rest)[0].strip()
-        args = []
-        for tm in re.finditer(r"""(["'])(.*?)\1|(\S+)""", rest):
-            args.append(tm.group(2) if tm.group(1) else tm.group(3))
-        calls.append(ScriptCall(path=path, args=args, interpreter=interp))
+    for match in _CHILD_CALL_RE.finditer(syntax):
+        start, end = match.span(2)
+        words = [
+            content[start + word.start():start + word.end()]
+            for word in re.finditer(r"[^ \t]+", syntax[start:end])
+        ]
+        argv = [field for word in words for field in _expand_shell_word(word, entry_args)]
+        if argv and argv[0] and not argv[0].startswith(("-", "$")) and "/dev/" not in argv[0]:
+            calls.append(ScriptCall(path=argv[0], args=argv[1:], interpreter=match[1]))
     return calls
 
 
@@ -356,15 +432,13 @@ class ShellBackend(LanguageBackend):
 
         # 剔除不会执行的行（shebang / 整行注释）—— 见函数 docstring：
         # 否则 shebang 里的 /bin/bash 会被当"访问白名单外路径"，整脚本被误拦。
-        # 全文回退仍可绑定未被修改的入口参数，供子脚本提取使用。
-        bound = bind_positional_args(candidate, entry_args or []) if p1_safe else candidate
-        bound = strip_non_executable_lines(bound)
+        candidate = strip_non_executable_lines(candidate)
+        bind_args = entry_args if p1_safe else None
+        calls = extract_calls_from_content(candidate, bind_args)
+        bound = bind_positional_args(candidate, bind_args or [])
 
         # 循环体保守标记（保留，不剔除）
         loop_marked = _mark_loops_reachable(bound)
-
-        # 子脚本调用提取
-        calls = extract_calls_from_content(loop_marked)
 
         if resolved:
             ir = ScriptIR(

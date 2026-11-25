@@ -138,8 +138,14 @@ class NotModeledStmt(Stmt):
 # 线性复杂度 O(行数)，无嵌套遍历开销。
 
 CASE_HEADER_RE = re.compile(r"^[ \t]*case[ \t]+", re.MULTILINE)
-_CASE_OPEN_RE = re.compile(r"^[ \t]*(?:\(?[^()]+\)[ \t]*)?case[ \t]+")
-_CASE_CLOSE_RE = re.compile(r"^[ \t]*esac(?=$|[ \t;])")
+_CASE_OPEN_RE = re.compile(
+    r"(?:^|(?<=[;|&()]))[ \t]*"
+    r"(?:(?:if|then|elif|else|while|until|do|\{|!|time(?:[ \t]+-p)?)[ \t]+)*"
+    r"(?:coproc(?:[ \t]+[A-Za-z_]\w*)?[ \t]+)?"
+    r"case[ \t]+(?=[^\s;&|()<>])"
+)
+_CASE_CLOSE_RE = re.compile(r"(?:^|(?<=[;&]))[ \t]*esac(?=$|[ \t;&|])")
+_CASE_HEADER_LINE_RE = re.compile(r"[ \t]*case[ \t]+([^\s;&|()<>]+)(?:[ \t]+(in))?[ \t]*")
 _IF_OPEN_RE = re.compile(r"\bif\b")
 _IF_CLOSE_RE = re.compile(r"\bfi\b")
 
@@ -167,8 +173,25 @@ def _find_block_end(
     return -1
 
 
+def _case_depth_delta(line: str) -> int | None:
+    """在已遮蔽的语法行中识别命令边界；无法可靠配对时返回 None。"""
+    opens = len(_CASE_OPEN_RE.findall(line))
+    closes = list(_CASE_CLOSE_RE.finditer(line))
+    if opens + len(closes) > 1 or (closes and closes[0].start() != 0):
+        return None  # 行内 esac 或同一行的多层边界需要更完整的语法分析。
+    return opens - len(closes)
+
+
 def _find_case_end(lines: list[str], start_line: int) -> int:
-    return _find_block_end(lines, start_line, _CASE_OPEN_RE, _CASE_CLOSE_RE)
+    depth = 0
+    for index in range(start_line, len(lines)):
+        delta = _case_depth_delta(lines[index])
+        if delta is None or (index == start_line and delta != 1):
+            return -1
+        depth += delta
+        if depth == 0:
+            return index
+    return -1
 
 
 def _find_if_end(lines: list[str], start_line: int) -> int:
@@ -342,9 +365,19 @@ def case_syntax_lines(content: str) -> list[str]:
 
 def parse_case_statement(lines: list[str], syntax_lines: list[str], start: int) -> CaseStmt | None:
     """切分逐行 case 块，保留原始模式和嵌套分支。"""
-    header = re.fullmatch(r"\s*case\s+(.+?)\s+in\s*", syntax_lines[start])
+    header = _CASE_HEADER_LINE_RE.fullmatch(syntax_lines[start])
+    if header is None:
+        return None
+    body_start = start + 1
+    if header[2] is None:
+        while body_start < len(syntax_lines) and not syntax_lines[body_start].strip():
+            body_start += 1
+        if body_start == len(syntax_lines) or syntax_lines[body_start].strip() != "in":
+            return None
+        body_start += 1
+
     end = _find_case_end(syntax_lines, start)
-    if header is None or end == -1 or not re.fullmatch(r"\s*esac\s*;?\s*", syntax_lines[end]):
+    if end < body_start or not re.fullmatch(r"\s*esac\s*;?\s*", syntax_lines[end]):
         return None
     if any("\0" in line or "$(" in line for line in syntax_lines[start:end + 1]):
         return None
@@ -354,7 +387,7 @@ def parse_case_statement(lines: list[str], syntax_lines: list[str], start: int) 
     label: str | None = None
     body: list[str] = []
     depth = 0
-    for index in range(start + 1, end):
+    for index in range(body_start, end):
         line, syntax = lines[index], syntax_lines[index]
         if label is None:
             if not syntax.strip():
@@ -365,12 +398,10 @@ def parse_case_statement(lines: list[str], syntax_lines: list[str], start: int) 
             label = line[branch.start(1):branch.end(1)].strip()
             line, syntax = line[branch.end():], syntax[branch.end():]
 
-        if _CASE_OPEN_RE.match(syntax):
-            depth += 1
-        elif _CASE_CLOSE_RE.match(syntax):
-            if depth == 0:
-                return None
-            depth -= 1
+        delta = _case_depth_delta(syntax)
+        if delta is None or depth + delta < 0:
+            return None
+        depth += delta
 
         body.append(line)
         if depth == 0 and (terminator := _CASE_TERMINATOR_RE.search(syntax)):
