@@ -49,6 +49,79 @@ esac"""
     assert "echo second_branch" in ir.reachable_content
 
 
+@pytest.mark.parametrize("selector", ["$1", '"$1"'])
+@pytest.mark.parametrize("arg,selected", [("bak42", "first"), ("other", "second")])
+def test_case_alternatives_match_in_both_parsers(selector, arg, selected):
+    script = f"""case {selector} in
+  archive|bak*) echo first_branch ;;
+  *) echo second_branch ;;
+esac"""
+
+    diagnostics = {}
+    ir = shell_backend.ShellBackend().parse(script, [arg], diagnostics=diagnostics)
+
+    assert ir.control_flow_resolved
+    assert f"echo {selected}_branch" in ir.reachable_content
+    assert ("echo first_branch" in ir.reachable_content) is (selected == "first")
+    assert ("echo second_branch" in ir.reachable_content) is (selected == "second")
+    assert diagnostics["parser"] == ("shell_p1" if selector == "$1" else "shell_litese")
+
+
+@pytest.mark.parametrize("selector", ["$1", '"$1"'])
+@pytest.mark.parametrize("literal", ["# ;& ;;&", 'echo "case ;& ;;&"', r"echo \;\&", 'echo prefix";&"'])
+def test_case_text_does_not_trigger_fallthrough(selector, literal):
+    script = f"""case {selector} in
+  bak*)
+    {literal}
+    echo first_branch ;; # ;&
+  *) echo second_branch ;;
+esac"""
+
+    ir = shell_backend.ShellBackend().parse(script, ["bak42"])
+
+    assert ir.control_flow_resolved
+    assert "echo first_branch" in ir.reachable_content
+    assert "echo second_branch" not in ir.reachable_content
+
+
+@pytest.mark.parametrize("selector", ["$1", '"$1"'])
+@pytest.mark.parametrize("terminator", [";&", ";;&"])
+def test_case_fallthrough_tracks_bound_child(tmp_path, selector, terminator):
+    from agent_moss.engine.script_engine.tracker import RecursiveTracker
+
+    parent = tmp_path / "parent.sh"
+    child = tmp_path / "child script.sh"
+    child.write_text("echo child_body", encoding="utf-8")
+    script = f"""case {selector} in
+  bak*) echo first_branch {terminator} # keep scanning
+  *) bash "$2" ;;
+esac"""
+    parent.write_text(script, encoding="utf-8")
+    args = ["bak42", child.name]
+
+    ir = shell_backend.ShellBackend().parse(script, args)
+    result = RecursiveTracker().track(str(parent), args)
+
+    assert not ir.control_flow_resolved
+    assert "echo first_branch" in ir.reachable_content
+    assert [call.path for call in ir.calls] == [child.name]
+    assert [node.script_path for node in result.nodes] == [str(parent), str(child)]
+
+
+@pytest.mark.parametrize("selector", ["$1", '"$1"'])
+@pytest.mark.parametrize("arg", ["a", "b"])
+def test_case_caret_negation_keeps_all_branches(selector, arg):
+    script = f"""case {selector} in
+  [^a]) echo first_branch ;;
+  *) echo second_branch ;;
+esac"""
+    ir = shell_backend.ShellBackend().parse(script, [arg])
+
+    assert not ir.control_flow_resolved
+    assert "echo first_branch" in ir.reachable_content
+    assert "echo second_branch" in ir.reachable_content
+
+
 def test_glob_if_keeps_dangerous_command():
     script = '''if [[ "$1" == bak* ]]; then
   rm -rf /opt/data

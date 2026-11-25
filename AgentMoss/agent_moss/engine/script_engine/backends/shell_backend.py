@@ -18,11 +18,10 @@ shell（bash/sh/zsh）脚本的静态解析后端，产出 IR。
 """
 
 import re
-from dataclasses import dataclass, field
-from fnmatch import fnmatchcase
 
-from ..ir import BranchInfo, ScriptCall, ScriptIR, scan_fingerprint
+from ..ir import ScriptCall, ScriptIR, scan_fingerprint
 from .base import LanguageBackend
+from .symbolic import CASE_HEADER_RE, case_syntax_lines, parse_case_statement, select_case_branch
 
 
 # ==================== 参数绑定 ====================
@@ -79,173 +78,35 @@ def _find_selector_value(selector: str, args: list[str] | None) -> str | None:
     return None  # $MODE 等命名变量不可静态绑定
 
 
-def _split_case_body(body: str) -> list[BranchInfo]:
-    """把 case 分支体切分成 BranchInfo 列表（含单行/多行分支）。"""
-    lines = body.split("\n")
-    branches: list[BranchInfo] = []
-    cur: BranchInfo | None = None
-    for ln in lines:
-        stripped = ln.strip()
-        # 跳过函数定义 name() {
-        if re.match(r"^[\w:-]+\s*\(\)\s*\{", stripped):
-            continue
-        m = re.match(r"^([^()]+?)\)\s*(.*)$", stripped)
-        if m:
-            pat = m.group(1).strip()
-            inline = m.group(2).strip()
-            if pat:
-                # 收割上一个分支
-                if cur is not None:
-                    branches.append(cur)
-                cur = BranchInfo(kind="case", label=pat, body=inline, reachable=False)
-            continue
-        if cur is not None:
-            # 多行分支体累积；;; 结束当前分支
-            if stripped.strip(";") == "" and stripped.strip() == "":
-                pass
-            cur.body += (("\n" + ln) if cur.body else ln)
-            if stripped.endswith(";;"):
-                if cur is not None:
-                    branches.append(cur)
-                    cur = None
-                cur = None
-    if cur is not None and cur.body.strip() and not any(b is cur for b in branches):
-        branches.append(cur)
-    return branches
-
-
-_CASE_ALTERNATIVE_RE = re.compile(r"""(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|\[[^]]*]|[^|'"\\])+""")
-
-
-def _match_case_label(label: str, value: str) -> str | None:
-    """返回命中类型，保留诊断中对通配分支 * 的区分。"""
-    for pattern in _CASE_ALTERNATIVE_RE.findall(label):
-        pattern = pattern.strip()
-        if not pattern:
-            continue
-        if pattern == "*":
-            return "default"
-        if pattern[0] in "\"'" and pattern[-1] == pattern[0]:
-            if value == pattern[1:-1]:
-                return "match"
-        elif not re.search(r"""['"\\]""", pattern) and fnmatchcase(value, pattern):
-            return "match"
-    return None
-
-
-def _split_nested_case_branches(
-    body_lines: list[str],
-    selector_val: str,
-    *,
-    diagnostics: dict | None = None,
-) -> str | None:
-    """嵌套 case 的外层分支切分：选中的分支整体保留，未选中剔除。
-
-    在 body_lines（外层 in 之后、外层 esac 之前的行）上做深度感知扫描：
-    - `pattern)` 行（depth 0）开启一个新外层分支；
-    - depth 0 的 `;;` 结束当前外层分支（内层 case 的 `;;` 因 depth>0 被跳过）；
-    - 匹配 selector_val 的分支被选中，返回其 body（含嵌套原样）。
-    意外返 None = 未命中任何外层分支（fail-closed 回退全文）。
-
-    Args:
-        body_lines: 外层 case 分支体各行
-        selector_val: 外层 selector 已绑定的具体值
-    Returns:
-        选中分支的 body 文本；无法确定时 None。
-    """
-    depth = 0
-    cur_pat: str | None = None
-    cur_body: list[str] = []
-    selected: str | None = None
-
-    def _flush_as_selected(body_text: str, pat: str) -> None:
-        nonlocal selected
-        if selected is not None:
-            return
-        match = _match_case_label(pat, selector_val)
-        if match is not None:
-            selected = body_text
-            if diagnostics is not None:
-                diagnostics["p1_case"] = match
-
-    for ln in body_lines:
-        stripped = ln.strip()
-        # depth 0 且是 `pattern)` 行 → 新分支
-        if depth == 0:
-            bm = re.match(r"^([^()]+?)\s*\)\s*(.*)$", stripped)
-            if bm:
-                if cur_pat is not None:
-                    _flush_as_selected("\n".join(cur_body), cur_pat)
-                cur_pat = bm.group(1).strip()
-                cur_body = [bm.group(2).strip()] if bm.group(2).strip() else []
-                continue
-        if re.search(r"\bcase\b", stripped):
-            depth += 1
-        elif re.search(r"\besac\b", stripped):
-            depth = max(0, depth - 1)
-        elif cur_pat is not None:
-            cur_body.append(ln)
-            if depth == 0 and stripped.endswith(";;"):
-                _flush_as_selected("\n".join(cur_body), cur_pat)
-                cur_pat = None
-                cur_body = []
-    if cur_pat is not None and cur_body:
-        _flush_as_selected("\n".join(cur_body), cur_pat)
-
-    return selected
-
-
 def parse_case(
     content: str, args: list[str] | None, *, diagnostics: dict | None = None,
 ) -> str | None:
-    """解析 case 结构，返回可达分支内容（None = 未识别/fail-closed）。
-
-    识别 `case <selector> in ... esac`。selector 由 args 绑定，
-    按脚本顺序选择首个匹配的分支（字面量或 glob）。未命中则返回 None。
-    """
-    m = re.search(r"\bcase\s+(\$\{?\d+\}?|[A-Za-z_]\w*|\$[A-Za-z_]\w*)\s+in", content)
-    if not m:
+    """用已知的入口参数选择 case 分支；无法确定时交给 LiteSE。"""
+    if not args or not CASE_HEADER_RE.search(content):
         return None
-    selector = m.group(1).strip()
-    val = _find_selector_value(selector, args)
-    if val is None:
-        return None  # selector 无法绑定 → fail-closed
-
-    # 深度配对找本层 esac（嵌套 case 时不能 find 第一个）
-    from .symbolic import _find_case_end
-    content_lines = content.split("\n")
-    end_match = _find_case_end(content_lines, 0)
-    if end_match == -1:
-        return None
-    # body = "in" 之后到本层 esac 之前的行
-    body_lines = content_lines[1:end_match]
-    body = "\n".join(body_lines)
-
-    has_nested = bool(re.search(r"\bcase\s+", body)) or bool(re.search(r"\bif\s+", body))
-
-    if has_nested:
-        # 嵌套：外层仍剪枝（选中的分支整体保留，未选中的剔除），内层候选不细化。
-        # 用深度感知的分支切分：`pattern)` 行 + `;;` 结束，但 `;;` 属于外层分支时才算
-        # 分支结束（内层 case 的 `;;` 不结束外层）。
-        selected = _split_nested_case_branches(body_lines, val, diagnostics=diagnostics)
-        if selected is None:
-            return None
+    lines = content.split("\n")
+    syntax_lines = case_syntax_lines(content)
+    for index, line in enumerate(syntax_lines):
+        if CASE_HEADER_RE.match(line):
+            break
     else:
-        branches = _split_case_body(body)
-        selected = None
-        for branch in branches:
-            match = _match_case_label(branch.label, val)
-            if match is not None:
-                selected = branch.body
-                if diagnostics is not None:
-                    diagnostics["p1_case"] = match
-                break
-        if selected is None:
-            return None
+        return None
 
-    prefix = content[: m.start()]
-    suffix = "\n".join(content_lines[end_match + 1:])
-    return f"{prefix}\n{selected}\n{suffix}"
+    case = parse_case_statement(lines, syntax_lines, index)
+    if case is None:
+        return None
+    value = _find_selector_value(case.selector, args)
+    if value is None:
+        return None
+    selection = select_case_branch(case, value)
+    if selection is None:
+        return None
+
+    branch, kind = selection
+    if diagnostics is not None:
+        diagnostics["p1_case"] = kind
+    end = index + case.line.count("\n") + 1
+    return "\n".join([*lines[:index], case.branches[branch][1], *lines[end:]])
 
 
 # ==================== if 分支解析 ====================
@@ -396,8 +257,8 @@ def _mark_loops_reachable(content: str) -> str:
 _CHILD_CALL_RE = re.compile(
     r"(?:^|\s|&&|\|\|)\s*"
     r"((?:/bin/)?bash|sh|zsh|(?:python|python3|node|ruby|perl|php|lua))\s+"
-    r"(\S+(?:\.(?:sh|shrc|py|js|rb|pl|php|lua))?)"
-    r"([^\n;|&]*?)$",
+    r"""("[^"\n]+"|'[^'\n]+'|[^\s;|&]+)"""
+    r"([^\n;|&]*?)(?=(?:;;&|;&|;;)[ \t]*(?:\#[^\n]*)?$|$)",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -407,7 +268,9 @@ def extract_calls_from_content(content: str) -> list[ScriptCall]:
     calls: list[ScriptCall] = []
     for m in _CHILD_CALL_RE.finditer(content):
         interp, path, rest = m.group(1), m.group(2).strip(), m.group(3).strip()
-        if path.startswith("-") or path.startswith("$") or "/dev/" in path:
+        if path.startswith(("'", '"')) and path[-1] == path[0]:
+            path = path[1:-1]
+        if path.startswith(("-", "$")) or "/dev/" in path:
             continue
         # 参数切分（剥引号，按空白/管道断）
         rest = re.split(r"[;|&<>]", rest)[0].strip()
@@ -458,39 +321,30 @@ class ShellBackend(LanguageBackend):
         # 位置参数/变量绑定安全性检测：命中则跳过 P1 的 $1 绑定剪枝。
         # `set --` 后是空格，`--` 末尾不能用 \b（- 非词字符，后无词边界）
         _P1_UNSAFE_RE = re.compile(r"\bshift\b|\bset\s+--(?:\s|$)|[\s;|&]read\b|^\s*read\b|\(\)\s*\{|function\s+\w+")
-        # Bash 的 ;& / ;;& 可在首个匹配后继续执行其他分支。
-        case_fallthrough = ";&" in content and bool(re.search(r"\bcase\s", content))
-        p1_safe = not case_fallthrough and not _P1_UNSAFE_RE.search(content)
+        p1_safe = not _P1_UNSAFE_RE.search(content)
 
         if p1_safe:
-            # P1: 基于入口参数裁剪 case/if
             case_out = parse_case(candidate, entry_args, diagnostics=diagnostics)
             if case_out is not None and case_out != candidate:
                 resolved = True
                 candidate = case_out
-            if_out = parse_if(candidate, entry_args, diagnostics=diagnostics)
-            if if_out is not None and if_out != candidate:
-                resolved = True
-                candidate = if_out
-            bound = bind_positional_args(candidate, entry_args or [])
-        else:
-            # $1 语义不可靠 → 不做绑定/裁剪，保持原文（fail-closed，交 symbolic）
-            bound = candidate
+            # case 尚未解析时，不能用 if 剪枝绕过 LiteSE 的 case 判定。
+            if not CASE_HEADER_RE.search(candidate):
+                if_out = parse_if(candidate, entry_args, diagnostics=diagnostics)
+                if if_out is not None and if_out != candidate:
+                    resolved = True
+                    candidate = if_out
 
         # P2/P3/P4 升级：LiteSE 顺序执行器（只在 P1 未能裁剪时尝试，避免双实现）
         if diagnostics is not None:
             diagnostics.update(parser="shell_p1", p1_safe=p1_safe, child_extractor="regex")
-        if case_fallthrough:
-            if diagnostics is not None:
-                diagnostics.update(parser="shell_full", fallback_reason="case_fallthrough")
-        elif not resolved:
+        if not resolved:
             from .symbolic import symbolic_process
             symbolic_diagnostics = {} if diagnostics is not None else None
             sym_out = symbolic_process(content, entry_args, diagnostics=symbolic_diagnostics)
             if sym_out is not None and sym_out != content:
                 resolved = True
                 candidate = sym_out
-                bound = candidate  # bind 已在 symbolic 内完成
             if diagnostics is not None and symbolic_diagnostics is not None:
                 diagnostics["parser"] = "shell_litese" if resolved else "shell_full"
                 diagnostics["symbolic"] = symbolic_diagnostics
@@ -502,6 +356,8 @@ class ShellBackend(LanguageBackend):
 
         # 剔除不会执行的行（shebang / 整行注释）—— 见函数 docstring：
         # 否则 shebang 里的 /bin/bash 会被当"访问白名单外路径"，整脚本被误拦。
+        # 全文回退仍可绑定未被修改的入口参数，供子脚本提取使用。
+        bound = bind_positional_args(candidate, entry_args or []) if p1_safe else candidate
         bound = strip_non_executable_lines(bound)
 
         # 循环体保守标记（保留，不剔除）
