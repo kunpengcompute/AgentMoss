@@ -943,6 +943,8 @@ def test_line_budget_counts_physical_lines(tmp_path, lines, final_newline):
     source = _with_lines(statements, lines) + ("\n" if final_newline else "")
     retained, details = _scan_marked_child(tmp_path, source)
     assert details["physical_lines"] == lines
+    assert details["reachable_content"] == retained
+    assert details["reachable_content_matches_source"] is (lines == 501)
     if lines == 500:
         assert details["parser"] == "python_ast"
         assert "UNREACHED_PARENT_DATA" not in retained

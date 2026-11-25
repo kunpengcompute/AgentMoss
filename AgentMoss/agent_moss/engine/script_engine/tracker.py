@@ -266,6 +266,8 @@ class RecursiveTracker:
         self._result.total_nodes = len(self._result.nodes)
 
         if details is not None:
+            from ...infra.script_diagnostics import capture_reachable_content
+
             scan_bytes, scan_sha256 = scan_fingerprint(ir.reachable_content)
             details.update(
                 language=ir.language,
@@ -277,6 +279,7 @@ class RecursiveTracker:
                 child_arg_counts=[len(call.args) for call in ir.calls[:DIAGNOSTIC_CHILD_LIMIT]],
                 inline_l1_scan=False,
             )
+            capture_reachable_content(details, content, ir.reachable_content)
 
         # Inline L1（内联扫描 reachable_content）
         if self._scanner is not None and ir.reachable_content:
