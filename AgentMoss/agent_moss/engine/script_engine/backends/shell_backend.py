@@ -19,6 +19,7 @@ shell（bash/sh/zsh）脚本的静态解析后端，产出 IR。
 
 import re
 from collections.abc import Iterator
+from enum import Enum, auto
 
 from ..ir import ScriptCall, ScriptIR, scan_fingerprint
 from .base import LanguageBackend
@@ -49,6 +50,11 @@ _SUBSTITUTION_BOUNDARY_RE = re.compile(
 _BACKTICK_RE = re.compile(r"\x60(?:\\[\s\S]|[^\x60\\])*\x60")
 _IFS_RE = re.compile(r"([ \t\n]+)")
 _MAX_DEFAULT_DEPTH = 32
+
+
+
+class _ExpansionStatus(Enum):
+    UNRESOLVED = auto()
 
 
 def _substitution_end(text: str, start: int, opening: str, level: int) -> int | None:
@@ -214,7 +220,11 @@ def bind_positional_args(content: str, args: list[str]) -> str:
                     if _default_has_substitution(values[0], quoted):
                         output.append(token)
                         continue
-                    values = _expand_shell_word(values[0], args, quoted_default=quoted)
+                    expanded = _expand_shell_word(values[0], args, quoted_default=quoted)
+                    if expanded is None:
+                        output.append(token)
+                        continue
+                    values = expanded
                 if quoted:
                     values = [re.sub(r'([\\$"\x60])', r"\\\1", item) for item in values]
                 output.append(('" "' if quoted else " ").join(values))
@@ -450,8 +460,8 @@ def _split_fields(text: str) -> Iterator[str | None]:
 def _argument_parts(
     word: str, args: list[str] | None, *, quoted: bool = False,
     default_text: bool = False, default_depth: int = 0,
-) -> Iterator[str | None]:
-    """产出单词的字面片段；None 表示展开后的字段边界。"""
+) -> Iterator[str | None | _ExpansionStatus]:
+    """产出单词的字面片段、字段边界或未求值状态。"""
     field_split = not quoted
     offset = 0
     for start, end in _shell_word_parts(word, quoted, default_text=default_text):
@@ -474,13 +484,15 @@ def _argument_parts(
             if escaped != "\n":
                 specials = '$"\\`}' if default_text else '$"\\`'
                 yield escaped if not quoted or escaped in specials else text
-        elif args is None or _POSITIONAL_RE.match(text) is None:
+        elif _POSITIONAL_RE.match(text) is None:
             yield text
+        elif args is None:
+            yield _ExpansionStatus.UNRESOLVED
         else:
             value, use_default = _positional_value(text, args)
             if use_default:
                 if default_depth >= _MAX_DEFAULT_DEPTH or _default_has_substitution(value, quoted):
-                    yield text
+                    yield _ExpansionStatus.UNRESOLVED
                     continue
                 yield from _argument_parts(
                     value, args, quoted=quoted, default_text=True, default_depth=default_depth + 1,
@@ -503,10 +515,12 @@ def _argument_parts(
 
 def _expand_shell_word(
     word: str, args: list[str] | None, *, quoted_default: bool = False,
-) -> list[str]:
+) -> list[str] | None:
     fields: list[str] = []
     pieces: list[str] = []
     for part in _argument_parts(word, args, quoted=quoted_default, default_text=quoted_default):
+        if part is _ExpansionStatus.UNRESOLVED:
+            return None
         if part is not None:
             pieces.append(part)
         elif pieces:
@@ -530,6 +544,9 @@ def extract_calls_from_content(content: str, entry_args: list[str] | None = None
             token = content[start:end]
             if "${" not in token or syntax[start] == " ":
                 continue
+            # A quoted substitution may itself contain a braced parameter.
+            if token.startswith('"') and _default_has_substitution(token[1:-1], True):
+                continue
             parts.append(syntax[offset:start])
             parts.append("".join("\n" if ch == "\n" else "x" for ch in token))
             offset = end
@@ -538,13 +555,23 @@ def extract_calls_from_content(content: str, entry_args: list[str] | None = None
     calls: list[ScriptCall] = []
     for match in _CHILD_CALL_RE.finditer(syntax):
         start, end = match.span(2)
-        words = [
-            content[start + word.start():start + word.end()]
-            for word in re.finditer(r"[^ \t]+", syntax[start:end])
-        ]
-        argv = [field for word in words for field in _expand_shell_word(word, entry_args)]
+        words = list(re.finditer(r"[^ \t]+", syntax[start:end]))
+        truncated = syntax[end:end + 1] == "\0" and not content.startswith("<<", end)
+        if truncated and words and words[-1].end() == end - start:
+            words.pop()  # The unknown fragment may be part of this word.
+        argv: list[str] = []
+        args_known = not truncated
+        for word in words:
+            fields = _expand_shell_word(content[start + word.start():start + word.end()], entry_args)
+            if fields is None:
+                args_known = False
+                break
+            argv.extend(fields)
         if argv and argv[0] and not argv[0].startswith(("-", "$")) and "/dev/" not in argv[0]:
-            calls.append(ScriptCall(path=argv[0], args=argv[1:], interpreter=match[1]))
+            calls.append(ScriptCall(
+                path=argv[0], args=argv[1:] if args_known else [],
+                interpreter=match[1], args_known=args_known,
+            ))
     return calls
 
 
@@ -565,7 +592,8 @@ class ShellBackend(LanguageBackend):
     ]
 
     def parse(
-        self, content: str, entry_args: list[str] | None, *, diagnostics: dict | None = None,
+        self, content: str, entry_args: list[str] | None, *,
+        diagnostics: dict | None = None, args_known: bool = True,
     ) -> ScriptIR:
         """解析 shell 脚本：P1 → P2/P3/P4 升级 → fail-closed 回退。
 
@@ -588,7 +616,7 @@ class ShellBackend(LanguageBackend):
         # 位置参数/变量绑定安全性检测：命中则跳过 P1 的 $1 绑定剪枝。
         # `set --` 后是空格，`--` 末尾不能用 \b（- 非词字符，后无词边界）
         _P1_UNSAFE_RE = re.compile(r"\bshift\b|\bset\s+--(?:\s|$)|[\s;|&]read\b|^\s*read\b|\(\)\s*\{|function\s+\w+")
-        p1_safe = not _P1_UNSAFE_RE.search(content)
+        p1_safe = args_known and not _P1_UNSAFE_RE.search(content)
 
         if p1_safe:
             case_out = parse_case(candidate, entry_args, diagnostics=diagnostics)
@@ -605,7 +633,10 @@ class ShellBackend(LanguageBackend):
         # P2/P3/P4 升级：LiteSE 顺序执行器（只在 P1 未能裁剪时尝试，避免双实现）
         if diagnostics is not None:
             diagnostics.update(parser="shell_p1", p1_safe=p1_safe, child_extractor="regex")
-        if not resolved:
+        if not args_known:
+            if diagnostics is not None:
+                diagnostics.update(parser="shell_full", fallback_reason="unknown_args")
+        elif not resolved:
             from .symbolic import symbolic_process
             symbolic_diagnostics = {} if diagnostics is not None else None
             sym_out = symbolic_process(content, entry_args, diagnostics=symbolic_diagnostics)

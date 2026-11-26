@@ -186,6 +186,23 @@ esac"""
         assert f"echo {marker}" in ir.reachable_content
 
 
+@pytest.mark.parametrize("selector", ["$1", '"$1"'])
+def test_empty_array_assignment_does_not_disable_case_pruning(selector):
+    script = f"""case {selector} in
+  bak*) items=()
+    echo selected_branch
+    ;;
+  *) echo other_branch ;;
+esac"""
+
+    ir = shell_backend.ShellBackend().parse(script, ["bak42"])
+
+    assert ir.control_flow_resolved
+    assert "items=()" in ir.reachable_content
+    assert "echo selected_branch" in ir.reachable_content
+    assert "echo other_branch" not in ir.reachable_content
+
+
 def test_case_with_ambiguous_inline_closer_keeps_full_text():
     script = """case $1 in
   bak*) echo before; case $2 in
@@ -419,6 +436,62 @@ def test_double_quoted_default_preserves_literal_apostrophes_during_expansion():
     assert [(call.path, call.args) for call in calls] == [
         ("child.sh", ["'prefix expanded'"]),
     ]
+
+
+@pytest.mark.parametrize("language", ["shell", "python"])
+@pytest.mark.parametrize("substitution", [
+    "$(printf '%s' runtime)",
+    "$(printf '%s' \"$" + "{2:-runtime}\")",
+])
+def test_unknown_child_arguments_prevent_branch_pruning(tmp_path, language, substitution):
+    from agent_moss.engine.script_engine.tracker import RecursiveTracker
+
+    parent = tmp_path / "parent.sh"
+    if language == "shell":
+        child = tmp_path / "child.sh"
+        launcher = "bash"
+        source = """case "$""" + """{1:-first}" in
+  first) echo first_branch ;;
+  *) echo other_branch ;;
+esac"""
+    else:
+        child = tmp_path / "child.py"
+        launcher = "python3"
+        source = """import sys
+mode = sys.argv[1] if len(sys.argv) > 1 else "first"
+if mode == "first":
+    print("first_branch")
+else:
+    print("other_branch")
+"""
+    script = f"""{launcher} {child.name} first "{substitution}" later
+bash incomplete"$(printf '%s' suffix)" later
+"""
+    parent.write_text(script, encoding="utf-8")
+    child.write_text(source, encoding="utf-8")
+
+    ir = shell_backend.ShellBackend().parse(script, [])
+    result = RecursiveTracker().track(str(parent), [])
+
+    assert [call.path for call in ir.calls] == [child.name]
+    assert ir.calls[0].args == []
+    assert not ir.calls[0].args_known
+    assert [node.script_path for node in result.nodes] == [str(parent), str(child)]
+    assert "first_branch" in result.nodes[1].preprocessed_content
+    assert "other_branch" in result.nodes[1].preprocessed_content
+
+
+def test_quoted_nested_default_retains_unresolved_expression():
+    inner = "$" + "{2:-$(printf '%s' runtime)}"
+    outer = "$" + "{1:-" + inner + "}"
+    script = f'printf "%s" "{outer}"'
+
+    ir = shell_backend.ShellBackend().parse(script, ["", ""])
+
+    assert ir.reachable_content == script
+
+    ir = shell_backend.ShellBackend().parse(script, ["", "known"])
+    assert ir.reachable_content == 'printf "%s" "known"'
 
 
 def test_tracker_visits_calls_with_distinct_arguments_and_stops_cycles(tmp_path):

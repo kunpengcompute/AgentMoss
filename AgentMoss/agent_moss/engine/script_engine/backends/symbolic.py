@@ -152,8 +152,9 @@ _COPROC_GROUP_RE = re.compile(
 )
 _CASE_FUNCTION_RE = re.compile(
     _CASE_COMMAND_START
-    + r"(?:function[ \t]+[^\s;&|()<>]+|[^\s;&|()<>]+[ \t]*\([ \t]*\))"
+    + r"(?:function[ \t]+[^\s;&|()<>]+|(?P<name>[^\s;&|()<>]+)[ \t]*\([ \t]*\))"
 )
+_CASE_ARRAY_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[.+\])?\+?=")
 _CASE_CLOSE_RE = re.compile(r"(?:^|(?<=[;&]))[ \t]*esac(?=$|[ \t;&|])")
 _CASE_HEADER_LINE_RE = re.compile(r"[ \t]*case[ \t]+([^\s;&|()<>]+)(?:[ \t]+(in))?[ \t]*")
 _IF_OPEN_RE = re.compile(r"\bif\b")
@@ -183,10 +184,19 @@ def _find_block_end(
     return -1
 
 
-def _case_depth_delta(line: str) -> int | None:
+def _case_depth_delta(line: str, raw_line: str) -> int | None:
     """在已遮蔽的语法行中识别命令边界；无法可靠配对时返回 None。"""
-    if _COPROC_GROUP_RE.search(line) or _CASE_FUNCTION_RE.search(line):
-        return None  # coproc 命令组或函数体可能在同一行开启内层 case。
+    if _COPROC_GROUP_RE.search(line):
+        return None  # coproc 命令组可能在同一行开启内层 case。
+    for function in _CASE_FUNCTION_RE.finditer(line):
+        start, end = function.span("name")
+        # 遮蔽后的函数名可能看起来像赋值，按原始文本识别空数组。
+        if (
+            start < 0
+            or raw_line[end] != "("
+            or not _CASE_ARRAY_ASSIGNMENT_RE.fullmatch(raw_line[start:end])
+        ):
+            return None  # 函数体可能在同一行开启内层 case。
     opens = len(_CASE_OPEN_RE.findall(line))
     closes = list(_CASE_CLOSE_RE.finditer(line))
     if opens + len(closes) > 1 or (closes and closes[0].start() != 0):
@@ -194,10 +204,10 @@ def _case_depth_delta(line: str) -> int | None:
     return opens - len(closes)
 
 
-def _find_case_end(lines: list[str], start_line: int) -> int:
+def _find_case_end(lines: list[str], syntax_lines: list[str], start_line: int) -> int:
     depth = 0
     for index in range(start_line, len(lines)):
-        delta = _case_depth_delta(lines[index])
+        delta = _case_depth_delta(syntax_lines[index], lines[index])
         if delta is None or (index == start_line and delta != 1):
             return -1
         depth += delta
@@ -388,7 +398,7 @@ def parse_case_statement(lines: list[str], syntax_lines: list[str], start: int) 
             return None
         body_start += 1
 
-    end = _find_case_end(syntax_lines, start)
+    end = _find_case_end(lines, syntax_lines, start)
     if end < body_start or not re.fullmatch(r"\s*esac\s*;?\s*", syntax_lines[end]):
         return None
     if any("\0" in line or "$(" in line for line in syntax_lines[start:end + 1]):
@@ -410,7 +420,7 @@ def parse_case_statement(lines: list[str], syntax_lines: list[str], start: int) 
             label = line[branch.start(1):branch.end(1)].strip()
             line, syntax = line[branch.end():], syntax[branch.end():]
 
-        delta = _case_depth_delta(syntax)
+        delta = _case_depth_delta(syntax, line)
         if delta is None or depth + delta < 0:
             return None
         depth += delta

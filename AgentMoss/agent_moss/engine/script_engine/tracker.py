@@ -118,7 +118,7 @@ class RecursiveTracker:
         self._max_total_size = max_total_size
         self._result = ScriptChainAnalysisResult()
         self._visiting: set[str] = set()   # 当前 DFS 路径（循环检测）
-        self._visited: dict[str, set[tuple[tuple[str, ...] | None, Path | None]]] = {}
+        self._visited: dict[str, set[tuple[bool, tuple[str, ...] | None, Path | None]]] = {}
         self._diagnostics = diagnostics
         self._diagnostic_nodes: list[dict] = []
         self._budget_skips = {"depth": 0, "nodes": 0, "total_bytes": 0}
@@ -176,6 +176,7 @@ class RecursiveTracker:
         args: list[str] | None,
         *,
         is_import: bool = False,
+        args_known: bool = True,
     ) -> None:
         """递归处理单个脚本节点及其子脚本。"""
         path_str = str(Path(path_str).resolve())
@@ -184,7 +185,9 @@ class RecursiveTracker:
         if path_str in self._visiting:
             logger.debug("检测到调用循环，跳过: %s", path_str)
             return
-        invocation = (tuple(args) if args is not None else None, process_cwd)
+        if not args_known:
+            args = None
+        invocation = (args_known, tuple(args) if args is not None else None, process_cwd)
         seen = self._visited.get(path_str)
         if seen is not None and (is_import or invocation in seen):
             return
@@ -253,7 +256,9 @@ class RecursiveTracker:
 
         # 解析 IR（按语言分派 backend）
         backend = _pick_backend(path_str)
-        if details is not None and type(backend) in (ShellBackend, PythonBackend):
+        if not args_known:
+            ir = backend.parse(content, None, args_known=False, diagnostics=details)
+        elif details is not None and type(backend) in (ShellBackend, PythonBackend):
             ir = backend.parse(content, args, diagnostics=details)
         else:
             ir = backend.parse(content, args)
@@ -331,6 +336,7 @@ class RecursiveTracker:
                 process_cwd=child_cwd,
                 args=call.args,  # 关键：子脚本用自己的调用参数
                 is_import=call.is_import,
+                args_known=call.args_known,
             )
             if self._stop_on_critical and self._result.has_critical:
                 break
