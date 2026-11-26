@@ -4,7 +4,7 @@
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `AGENT_MOSS_LLM_MAX_PROMPT_TOKENS` | `0` | L3 安全判断 Prompt 的输入 token 估算预算。正数启用预算裁剪，`0` 关闭。 |
+| `AGENT_MOSS_LLM_MAX_PROMPT_TOKENS` | `0` | L3 安全判断 Prompt 的输入 token 估算预算。非正数关闭预算，`1` 至 `1199` 按 `1200` 处理，`1200` 及以上使用配置值。 |
 | `AGENT_MOSS_LLM_BUDGET_MODE` | `hard` | 正数预算下生效。最终仍超预算时，`hard` 跳过 L3，`soft` 记录降级后继续请求。 |
 | `AGENT_MOSS_LLM_FAIL_MODE` | `fail_open` | L3 调用失败或被硬预算跳过时采用的判定策略。 |
 | `AGENT_MOSS_LLM_HISTORY_MAX_ITEMS` | `20` | 最近历史动作的条数上限。`0` 表示初始组装时不限条数。 |
@@ -28,9 +28,9 @@
 
 ## 估算与用量
 
-预算检查针对渲染完成的 L3 Prompt，模板、截断说明和授权指引都计入估算。估算公式为 `floor(字符数 / 2.5) + 1`。`hard` 使用 `floor(配置预算 / 1.15)` 作为通过阈值，预留估算余量。`soft` 直接用配置预算与估算值比较。模型的分词方式和消息包装会影响实际输入 token 数。
+预算检查针对渲染完成的 L3 Prompt，模板、截断说明和授权指引都计入估算。估算公式为 `floor(字符数 / 2.5) + 1`。`hard` 使用 `floor(生效预算 / 1.15)` 作为通过阈值，预留估算余量。`soft` 直接用生效预算与估算值比较。模型的分词方式和消息包装会影响实际输入 token 数。
 
-模型服务返回正数 `usage.prompt_tokens` 时，AgentMoss 按该值记录实际用量。该值超过正数配置预算时，记录 `l3_budget_exceeded_actual`，本次判定仍依据已经完成的分析。该字段缺失或为 `0` 时，按未上报处理。模型返回正文即计一次调用，解析失败后重试的响应分别计数。
+模型服务返回正数 `usage.prompt_tokens` 时，AgentMoss 按该值记录实际用量。正数预算生效且用量超过预算时，记录 `l3_budget_exceeded_actual`，本次判定仍依据已经完成的分析。该字段缺失或为 `0` 时，按未上报处理。模型返回正文即计一次调用，解析失败后重试的响应分别计数。
 
 预算未达标和实际用量超额可以通过 `GET /metrics` 的 `agent_moss_l3_budget_events_total` 查看，按 `event` 标签区分事件码。
 
