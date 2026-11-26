@@ -596,14 +596,26 @@ def eval_condition(
         diagnostics.pop("condition_failure", None)
     inner = cond.strip()
     # 剥外层 [ ] 或 [[ ]]（test 结构）
+    double_bracket = inner.startswith("[[")
     inner = re.sub(r"^\[\[?|\]\]?$", "", inner).strip()
     # 文件谓词 / 非比较：返回 None
     if re.match(r"^-[A-Za-z]\s", inner) or inner.startswith("-d") or inner.startswith("-f"):
         if diagnostics is not None:
             diagnostics["condition_failure"] = "unsupported_predicate"
         return None
-    # 剥引号
     inner_q = inner.replace('"', "").replace("'", "")
+
+    def _unquote(tok: str) -> tuple[str, bool] | None:
+        tok = tok.strip()
+        if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0]:
+            tok = tok[1:-1]
+            quoted = True
+        else:
+            quoted = False
+        # 交错引号/未成对转义会改变 shell 语义；交给 fail-closed。
+        if '"' in tok or "'" in tok or "\\" in tok:
+            return None
+        return tok, quoted
 
     def _resolve_var_side(tok: str) -> Optional[str]:
         """把 token 解析为具体字符串；无法解析返回 None。"""
@@ -637,7 +649,7 @@ def eval_condition(
         return result
 
     # 字符串相等/不等/匹配
-    m = re.search(r"(.*?)\s*(=~|==|!=|=)\s*(.*)", inner_q)
+    m = re.search(r"(.*?)\s*(=~|==|!=|=)\s*(.*)", inner)
     if not m:
         if diagnostics is not None:
             diagnostics["condition_failure"] = "unsupported_comparison"
@@ -645,31 +657,52 @@ def eval_condition(
     op = m.group(2)
     if diagnostics is not None:
         diagnostics["condition_operator"] = op
-    left = m.group(1).strip()
-    right = m.group(3).strip()
+    left_pair = _unquote(m.group(1))
+    right_pair = _unquote(m.group(3))
+    if left_pair is None or right_pair is None:
+        if diagnostics is not None:
+            diagnostics["condition_failure"] = "unsupported_quoting"
+        return None
+    left, _ = left_pair
+    right, right_quoted = right_pair
     lv = _resolve_var_side(left)
+    if lv is None:
+        if diagnostics is not None:
+            diagnostics["condition_failure"] = "unbound_operand"
+        return None
     if op == "=~":
-        # 正则匹配：右侧为正则
-        if right.startswith("/") and right.endswith("/"):
-            right = right[1:-1]
-        if lv is None:
+        if not double_bracket:
+            if diagnostics is not None:
+                diagnostics["condition_failure"] = "unsupported_operator"
+            return None
+        rv = _resolve_var_side(right)
+        if rv is None:
             if diagnostics is not None:
                 diagnostics["condition_failure"] = "unbound_operand"
             return None
+        if rv.startswith("/") and rv.endswith("/") and len(rv) > 1:
+            rv = rv[1:-1]
+        pattern = re.escape(rv) if right_quoted or right.startswith("$") else rv
         try:
-            return bool(re.search(right, lv))
+            return bool(re.search(pattern, lv))
         except re.error:
             if diagnostics is not None:
                 diagnostics["condition_failure"] = "invalid_regex"
             return None
     rv = _resolve_var_side(right)
-    if lv is None or rv is None:
+    if rv is None:
         if diagnostics is not None:
             diagnostics["condition_failure"] = "unbound_operand"
         return None
-    if "*" in rv or "?" in rv or "[" in rv:
+    # 未加引号的变量/通配符在单括号 [ ] 里还可能发生 pathname expansion。
+    glob = ("*" in rv or "?" in rv or "[" in rv)
+    if not right_quoted and (glob or right.startswith("$")):
+        if not double_bracket:
+            if diagnostics is not None:
+                diagnostics["condition_failure"] = "pathname_expansion"
+            return None
         import fnmatch
-        matched = fnmatch.fnmatchcase(lv, rv)
+        matched = fnmatch.fnmatchcase(lv, rv) if glob else lv == rv
     else:
         matched = lv == rv
     return (not matched) if op == "!=" else matched

@@ -189,7 +189,9 @@ class RecursiveTracker:
             args = None
         invocation = (args_known, tuple(args) if args is not None else None, process_cwd)
         seen = self._visited.get(path_str)
-        if seen is not None and (is_import or invocation in seen):
+        # 不能因为“是 import”就跳过：同一脚本可能先以带参直接调用扫描过，
+        # import 时以无参上下文执行，sys.argv 分支可能完全不同（会漏掉危险分支）。
+        if seen is not None and invocation in seen:
             return
 
         # 预算

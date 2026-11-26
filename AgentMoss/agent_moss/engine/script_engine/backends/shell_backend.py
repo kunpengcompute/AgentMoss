@@ -295,20 +295,42 @@ def _eval_if_condition(cond: str, args: list[str] | None) -> bool | None:
 
     支持：
       [ "$1" = "clean" ] / [ "$1" == "clean" ] / [ "$1" != "x" ]
-      [ "$1" = bak* ]（glob 通配符）
-      [[ "$1" =~ ^ba.* ]]（正则）
+      [ "$1" = bak* ]（未加引号 → glob 通配符）
+      [[ "$1" =~ ^ba.* ]]（未加引号 → 正则）
       [ -f /tmp/x ]（文件存在性 → None，运行期）
     条件变量里 $1 替换为 args[0] 后比较；操作符按最长优先匹配，`=~` 不会被 `=` 截断。
+
+    引号语义必须保留：`[ "$1" = "a*b" ]` 是字面量比较，不能当 glob；
+    `[[ "$1" =~ "a.*" ]]` 的 RHS 被引号包住时也是字面量，不能当正则。
+    复杂引号/转义无法可靠求值时返回 None（fail-closed）。
     """
     if not args:
         return None
+    double_bracket = cond.lstrip().startswith("[[")
     inner = re.sub(r"^\[\[?|\]\]?$", "", cond).strip()
-    inner = inner.replace('"', "").replace("'", "")
     m = re.search(r"(.*?)\s*(=~|==|!=|=)\s*(.*)", inner)
     if not m:
         return None  # 非字符串条件（-f 等）无法静态判定
     op = m.group(2)
-    left, right = m.group(1).strip(), m.group(3).strip()
+
+    def _unquote(tok: str) -> tuple[str, bool] | None:
+        tok = tok.strip()
+        if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0]:
+            tok = tok[1:-1]
+            quoted = True
+        else:
+            quoted = False
+        # 交错引号/未成对转义会改变 shell 语义；交给 fail-closed。
+        if '"' in tok or "'" in tok or "\\" in tok:
+            return None
+        return tok, quoted
+
+    left_pair = _unquote(m.group(1))
+    right_pair = _unquote(m.group(3))
+    if left_pair is None or right_pair is None:
+        return None
+    left, _ = left_pair
+    right, right_quoted = right_pair
 
     def _resolve(tok: str) -> str | None:
         rm = re.match(r"^\$(\d+)$", tok)
@@ -323,13 +345,20 @@ def _eval_if_condition(cond: str, args: list[str] | None) -> bool | None:
     if lv is None or rv is None:
         return None
     if op == "=~":
+        if not double_bracket:
+            return None  # [ ... =~ ... ] 不是 bash 正则匹配
         if rv.startswith("/") and rv.endswith("/") and len(rv) > 1:
             rv = rv[1:-1]
+        pattern = re.escape(rv) if right_quoted else rv
         try:
-            return bool(re.search(rv, lv))
+            return bool(re.search(pattern, lv))
         except re.error:
             return None
-    if "*" in rv or "?" in rv or "[" in rv:
+    if not right_quoted and ("*" in rv or "?" in rv or "[" in rv):
+        if not double_bracket:
+            # `[ "$1" = bak* ]` 的 * 会先做 pathname expansion，结果依赖工作目录；
+            # 不能按 glob 静态判定，否则可能选错分支造成漏报。
+            return None
         import fnmatch
         matched = fnmatch.fnmatchcase(lv, rv)
     else:
@@ -431,7 +460,7 @@ def _mark_loops_reachable(content: str) -> str:
 
 # ==================== 子脚本调用提取（含参数） ====================
 
-_CHILD_INTERPRETER_RE = re.compile(r"\b(?:bash|sh|zsh|python3?|node|ruby|perl|php|lua)\b")
+_CHILD_INTERPRETER_RE = re.compile(r"\b(?:bash|sh|zsh|python(?:3(?:\.[0-9]+)?)?|node|ruby|perl|php|lua)\b")
 _CHILD_CALL_RE = re.compile(
     r"(?:^[ \t]*(?:\(?[^()\n;&<>]+\)[ \t]*)?|(?<=[;&|])(?<![<>][&|]))[ \t]*"
     r"(?:(?:if|then|elif|else|while|until|do|!|\{)[ \t]+|\([ \t]*"
@@ -442,7 +471,7 @@ _CHILD_CALL_RE = re.compile(
     r"|(?:-u[ \t]*|--unset(?:[ \t]+|=))[^ \t\n;&|<>()\x00]+"
     r"))*(?:[ \t]+--)?[ \t]+"
     r"|[A-Za-z_][A-Za-z0-9_]*=[^ \t\n;&|<>()\x00]*[ \t]+)*"
-    r"((?:/bin/)?bash|sh|zsh|python3?|node|ruby|perl|php|lua)[ \t]+"
+    r"((?:(?:/usr)?(?:/local)?/bin/)?(?:bash|sh|zsh|python(?:3(?:\.[0-9]+)?)?|node|ruby|perl|php|lua))[ \t]+"
     r"([^\n;|&<>()\x00]+)",
     re.MULTILINE,
 )

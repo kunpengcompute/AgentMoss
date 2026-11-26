@@ -336,6 +336,19 @@ esac"""
     ]
 
 
+@pytest.mark.parametrize("launcher", [
+    "/usr/bin/bash",
+    "/usr/local/bin/bash",
+    "/usr/bin/python3",
+    "/usr/local/bin/python3.12",
+    "/bin/bash",
+])
+def test_absolute_interpreter_paths_extract_child_call(launcher):
+    calls = shell_backend.extract_calls_from_content(f"{launcher} child.sh --flag")
+    assert [(call.path, call.args) for call in calls] == [("child.sh", ["--flag"])]
+    assert calls[0].interpreter == launcher
+
+
 def test_wrapped_shell_calls_require_command_position():
     script = """echo Usage: time bash ignored_time.sh
 printf '%s\\n' Example: env bash ignored_env.sh
@@ -516,6 +529,62 @@ bash parent.sh different
     assert [node.script_path for node in result.nodes] == [str(parent), str(child), str(child)]
     assert "echo first_branch" in result.nodes[1].preprocessed_content
     assert "echo second_branch" in result.nodes[2].preprocessed_content
+
+
+def test_import_after_direct_call_scans_no_arg_branch(tmp_path):
+    """import 的执行参数与直接调用不同，不能被去重短路。
+
+    先 `python3 child.py safe` 扫描过 safe 分支，再由 `from . import child`
+    以无参上下文导入；child 在无参时会走 else 危险分支，必须重新扫描。
+    """
+    from agent_moss.engine.script_engine.tracker import RecursiveTracker
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    child = pkg / "child.py"
+    child.write_text(
+        "import sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == 'safe':\n"
+        "    print('SAFE_BRANCH')\n"
+        "else:\n"
+        "    print('IMPORT_DANGER')\n",
+        encoding="utf-8",
+    )
+    (pkg / "parent.py").write_text("from . import child\n", encoding="utf-8")
+    root = tmp_path / "root.sh"
+    root.write_text("python3 pkg/child.py safe\npython3 pkg/parent.py\n", encoding="utf-8")
+
+    result = RecursiveTracker().track(str(root), [])
+    child_contents = [n.preprocessed_content for n in result.nodes if n.script_path == str(child)]
+    assert any("SAFE_BRANCH" in text for text in child_contents), child_contents
+    assert any("IMPORT_DANGER" in text for text in child_contents), child_contents
+
+
+def test_single_bracket_glob_is_not_static_pattern_match():
+    """`[ "$1" = bak* ]` 的 * 先做 pathname expansion，不能据此选分支。"""
+    script = '''if [ "$1" = bak* ]; then
+  echo SAFE
+else
+  rm -rf /tmp/DANGER
+fi
+'''
+    ir = shell_backend.ShellBackend().parse(script, ["bak42"])
+    assert not ir.control_flow_resolved
+    assert "rm -rf /tmp/DANGER" in ir.reachable_content
+
+
+def test_quoted_if_glob_is_literal_not_pattern():
+    """引号内的 * 是字面量，不能被当成 glob 选中 then 分支。"""
+    script = '''if [ "$1" = "a*b" ]; then
+  echo SAFE
+else
+  rm -rf /tmp/DANGER
+fi
+'''
+    ir = shell_backend.ShellBackend().parse(script, ["aXb"])
+    assert "rm -rf /tmp/DANGER" in ir.reachable_content
+    assert "echo SAFE" not in ir.reachable_content
 
 
 def test_glob_if_keeps_dangerous_command():
