@@ -45,8 +45,11 @@ class Config:
             },
             "agent_moss": {
                 "url": "http://127.0.0.1:9090",
-                "timeout": 30.0,
-                "max_retries": 2,
+                # 必须覆盖 AgentMoss 默认 LLM 预算 300s + 余量；此前默认 30.0
+                # 会让 AgentGate 在 Moss 还在分析时先超时并按 fail-closed 拒绝。
+                "timeout": 330.0,
+                # AgentMoss 内部已有重试；这里再重试会把一次超时放大成数倍等待。
+                "max_retries": 0,
                 "retry_delay": 1.0,
             },
             "collector": {

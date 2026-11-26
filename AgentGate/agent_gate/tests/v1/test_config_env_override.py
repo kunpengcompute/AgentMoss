@@ -9,6 +9,7 @@
    于是 V1 的 ``server`` 子命令在分离部署里会一直连默认的 127.0.0.1:9090。
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -105,3 +106,20 @@ async def test_default_when_nothing_set(monkeypatch, tmp_path):
     monkeypatch.delenv("AGENT_MOSS_INSTANCE", raising=False)
     url = await _base_url_of(monkeypatch)
     assert url == "http://127.0.0.1:9090"
+
+
+async def test_default_timeout_covers_moss_budget(monkeypatch):
+    monkeypatch.delenv("AGENT_GATE_MOSS_TIMEOUT", raising=False)
+    client = MossClient()
+    try:
+        assert client._timeout == 330.0
+        assert client._max_retries == 0
+    finally:
+        await client.close()
+
+
+def test_shipped_config_matches_moss_budget():
+    config_path = Path(__file__).resolve().parents[3] / "config" / "agent_gate.yaml"
+    cfg = Config(config_path)
+    assert cfg.agent_moss["timeout"] == 330.0
+    assert cfg.agent_moss["max_retries"] == 0
