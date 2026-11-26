@@ -556,7 +556,10 @@ def extract_calls_from_content(content: str, entry_args: list[str] | None = None
     for match in _CHILD_CALL_RE.finditer(syntax):
         start, end = match.span(2)
         words = list(re.finditer(r"[^ \t]+", syntax[start:end]))
-        truncated = syntax[end:end + 1] == "\0" and not content.startswith("<<", end)
+        truncated = (
+            (syntax[end:end + 1] == "\0" and not content.startswith("<<", end))
+            or syntax.startswith("$(", end - 1)  # Unquoted substitution stops the match at '('.
+        )
         if truncated and words and words[-1].end() == end - start:
             words.pop()  # The unknown fragment may be part of this word.
         argv: list[str] = []

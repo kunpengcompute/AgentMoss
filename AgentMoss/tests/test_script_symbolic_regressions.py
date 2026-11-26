@@ -443,7 +443,8 @@ def test_double_quoted_default_preserves_literal_apostrophes_during_expansion():
     "$(printf '%s' runtime)",
     "$(printf '%s' \"$" + "{2:-runtime}\")",
 ])
-def test_unknown_child_arguments_prevent_branch_pruning(tmp_path, language, substitution):
+@pytest.mark.parametrize("quote", ['"', ""])
+def test_unknown_child_arguments_prevent_branch_pruning(tmp_path, language, substitution, quote):
     from agent_moss.engine.script_engine.tracker import RecursiveTracker
 
     parent = tmp_path / "parent.sh"
@@ -464,8 +465,8 @@ if mode == "first":
 else:
     print("other_branch")
 """
-    script = f"""{launcher} {child.name} first "{substitution}" later
-bash incomplete"$(printf '%s' suffix)" later
+    script = f"""{launcher} {child.name} first {quote}{substitution}{quote} later
+bash incomplete{quote}$(printf '%s' suffix){quote} later
 """
     parent.write_text(script, encoding="utf-8")
     child.write_text(source, encoding="utf-8")
