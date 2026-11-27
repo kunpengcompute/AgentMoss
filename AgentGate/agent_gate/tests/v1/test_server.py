@@ -1220,7 +1220,8 @@ class TestDashboard:
         """Dashboard HTML page should return 200."""
         response = client.get("/dashboard/")
         assert response.status_code == 200
-        assert "<title>AgentGate Dashboard</title>" in response.text
+        assert 'data-i18n="appTitle"' in response.text
+        assert "AgentGate Dashboard" in response.text
 
     def test_dashboard_stats(self, client, repo):
         """Stats API should return aggregated data."""

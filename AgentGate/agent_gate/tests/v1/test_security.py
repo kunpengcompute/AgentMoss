@@ -428,7 +428,8 @@ class TestDashboard:
         client.get(f"/dashboard/?token={GOOD_TOKEN}", follow_redirects=False)
         r = client.get("/dashboard/")
         assert r.status_code == 200
-        assert "<title>AgentGate Dashboard</title>" in r.text
+        assert 'data-i18n="appTitle"' in r.text
+        assert "AgentGate Dashboard" in r.text
 
     def test_wrong_token_query_is_401(self, client):
         r = client.get("/dashboard/?token=bad", follow_redirects=False)
